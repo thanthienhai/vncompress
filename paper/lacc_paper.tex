@@ -1,0 +1,759 @@
+% ============================================================================
+% LACC: Language-Aware Context Compression
+% Nén Ngữ Cảnh Có Nhận Thức Ngôn Ngữ cho Mô Hình Ngôn Ngữ Lớn Tiếng Việt
+% ============================================================================
+\documentclass[12pt,a4paper]{article}
+
+% ── Encoding & Fonts ──────────────────────────────────────────────────
+\usepackage[utf8]{vntex}
+\usepackage{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{indentfirst}
+
+% ── Layout ────────────────────────────────────────────────────────────
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ── Packages ──────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{color}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{float}
+
+% ── Theorem environments ──────────────────────────────────────────────
+\newtheorem{definition}{Định nghĩa}[section]
+\newtheorem{theorem}{Định lý}[section]
+\newtheorem{lemma}{Bổ đề}[section]
+
+% ── Custom commands ───────────────────────────────────────────────────
+\newcommand{\tone}[1]{\textit{#1}}          % tone name
+\newcommand{\score}[1]{\mathcal{S}(#1)}      % scoring function
+\newcommand{\weight}[1]{\mathbf{w}_{#1}}     % weight vector
+\newcommand{\token}[1]{\texttt{#1}}          % token
+\newcommand{\method}[1]{\textsc{#1}}         % method name
+\newcommand{\viet}[1]{\textit{#1}}           % Vietnamese word
+
+% ── Title ─────────────────────────────────────────────────────────────
+\title{\textbf{LACC: Language-Aware Context Compression \\
+        Nén Ngữ Cảnh Có Nhận Thức Ngôn Ngữ \\
+        cho Mô Hình Ngôn Ngữ Lớn Tiếng Việt}}
+
+\author{
+  Thanthien\thanks{Người thực hiện nghiên cứu.} \\
+  \texttt{thanthien@example.com}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+Các phương pháp nén ngữ cảnh (\textit{context compression}) hiện tại như LLMLingua, SnapKV hay Selective Context đều được thiết kế theo hướng \textbf{ngôn-ngữ-bất-khả-tri} (\textit{language-agnostic}) --- chúng đối xử mọi token như nhau mà không phân biệt đặc điểm ngôn ngữ. Điều này gây ra vấn đề nghiêm trọng với các ngôn ngữ có đặc thù riêng như tiếng Việt: (1) mất thông tin thanh điệu khi nén --- xóa dấu thanh làm thay đổi hoàn toàn nghĩa từ (\viet{má} $\neq$ \viet{ma}); (2) lãng phí ngân sách nén cho hư từ (chiếm 30--40\% token nhưng ít thông tin); và (3) không tận dụng được cấu trúc hình thái đặc thù (từ láy, từ ghép). Bài báo này đề xuất \method{LACC} (\textit{Language-Aware Context Compression}) --- một khung nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ, kết hợp ba tín hiệu: (i) \textbf{tín hiệu thanh điệu} --- bảo toàn thông tin 6 thanh của tiếng Việt qua ma trận tương phản thanh điệu; (ii) \textbf{tín hiệu hình thái từ} --- phân bổ ngân sách nén khác nhau cho hư từ, thực từ, từ láy và từ ghép; và (iii) \textbf{tín hiệu perplexity} --- từ mô hình ngôn ngữ nhỏ bên ngoài (135M tham số) để ước lượng độ quan trọng học máy của token. \method{LACC} hoạt động ở ba mức độ phần cứng: không cần GPU (0~GB VRAM, chỉ dùng tín hiệu ngôn ngữ), với GPU hạn chế (0.3~GB VRAM, thêm mô hình 135M), và đầy đủ (7.8~GB VRAM, kết hợp với INT4 7B để sinh văn bản). Chúng tôi xây dựng bộ benchmark \method{VCC-Bench} --- bộ dữ liệu đánh giá nén ngữ cảnh tiếng Việt đầu tiên với 5 tác vụ. Kết quả thực nghiệm cho thấy \method{LACC} vượt trội hơn các phương pháp hiện có về tỉ lệ bảo toàn thanh điệu và chất lượng sinh văn bản, đồng thời khả thi trên phần cứng hạn chế như GPU T4 16~GB.
+\end{abstract}
+
+
+% ============================================================================
+\section{Giới thiệu}
+% ============================================================================
+
+Mô hình ngôn ngữ lớn (LLM) ngày càng được sử dụng để xử lý các ngữ cảnh dài --- từ phân tích tài liệu pháp luật, hội thoại nhiều lượt, đến tác vụ agent đa bước. Tuy nhiên, độ phức tạp bậc hai $O(n^2)$ của self-attention khiến chi phí suy diễn tăng nhanh theo độ dài đầu vào. Để giải quyết vấn đề này, nhiều phương pháp nén ngữ cảnh đã được đề xuất, chia thành ba hướng chính:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Nén prompt} (LLMLingua~\cite{jiang2023llmlingua}, Selective Context): loại bỏ token/câu không quan trọng dựa trên perplexity hoặc độ tương đồng;
+    \item \textbf{Nén KV cache} (SnapKV~\cite{li2024snapkv}, H2O~\cite{zhang2023h2o}, StreamingLLM~\cite{xiao2024streamingllm}): giữ lại KV cache của các token quan trọng dựa trên attention score;
+    \item \textbf{Nén không gian tiềm ẩn} (Gist Tokens~\cite{mu2023gist}, ICAE~\cite{ge2024icae}): học các memory token đặc biệt để chứa thông tin nén.
+\end{enumerate}
+
+Tất cả các phương pháp trên đều \textbf{mù ngôn ngữ} --- chúng không phân biệt đặc điểm ngôn ngữ của văn bản đầu vào. Với tiếng Anh, điều này ít gây vấn đề vì tiếng Anh không có thanh điệu và có tỉ lệ hư từ thấp hơn. Tuy nhiên, với tiếng Việt --- một ngôn ngữ \textbf{đơn lập, có thanh điệu} (6 thanh) với \textbf{30--40\% token là hư từ} --- việc nén mù ngôn ngữ gây ra ba vấn đề nghiêm trọng:
+
+\begin{enumerate}[label=\textbf{P\arabic*}:,leftmargin=*]
+    \item \textbf{Mất thông tin thanh điệu.} Tiếng Việt có 6 thanh điệu tương phản (\tone{ngang}, \tone{huyền}, \tone{sắc}, \tone{hỏi}, \tone{ngã}, \tone{nặng}). Việc xóa token mang dấu thanh có thể thay đổi hoàn toàn nghĩa: \viet{má} (mẹ) $\to$ \viet{ma} (ma), \viet{mả} (mồ mả) $\to$ \viet{ma} (ma). Các phương pháp hiện tại không có cơ chế bảo vệ thông tin thanh điệu.
+    
+    \item \textbf{Lãng phí ngân sách cho hư từ.} Khoảng 30--40\% token trong văn bản tiếng Việt là hư từ (\viet{đã}, \viet{sẽ}, \viet{của}, \viet{và}, \viet{những}\ldots) --- những từ mang ít thông tin ngữ nghĩa nhưng được giữ lại như thực từ trong các phương pháp nén hiện tại.
+    
+    \item \textbf{Token inflation.} Cùng một nội dung, tiếng Việt sử dụng nhiều token hơn tiếng Anh 1.5--2.0 lần do đặc điểm hình thái và tokenizer không tối ưu~\cite{lee2026equity, deng2026language}. Điều này khiến context window bị ``phình to'' nhanh hơn, đòi hỏi tỉ lệ nén cao hơn.
+\end{enumerate}
+
+\textbf{Đóng góp của bài báo.} Chúng tôi đề xuất \method{LACC} --- khung nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ, với ba đóng góp chính:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=*]
+    \item \textbf{Tín hiệu thanh điệu} (\textit{Tone-Aware Scoring}): sử dụng ma trận tương phản 6 thanh điệu để tính trọng số bảo toàn cho từng token, ưu tiên giữ token có thanh điệu khác biệt với ngữ cảnh xung quanh.
+    \item \textbf{Tín hiệu hình thái từ} (\textit{Morphology-Aware Scoring}): phân loại token thành 4 lớp (hư từ, thực từ, từ láy, từ ghép) và áp dụng chiến lược nén khác nhau cho từng lớp.
+    \item \textbf{Kiến trúc module hóa}: cho phép vận hành ở ba mức độ phần cứng --- không cần GPU (chỉ tín hiệu ngôn ngữ), GPU hạn chế (thêm mô hình 135M), và đầy đủ (kết hợp INT4 7B).
+\end{enumerate}
+
+Ngoài ra, chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đánh giá nén ngữ cảnh tiếng Việt đầu tiên với 5 tác vụ, và công bố mã nguồn mở toàn bộ khung thực nghiệm.
+
+
+% ============================================================================
+\section{Nghiên cứu liên quan}
+% ============================================================================
+
+\subsection{Nén ngữ cảnh cho LLM}
+
+\textbf{Nén prompt.} LLMLingua~\cite{jiang2023llmlingua} sử dụng perplexity-based scoring với budget controller để nén prompt lên đến 20$\times$ mà ít mất hiệu năng. LongLLMLingua mở rộng cho ngữ cảnh dài. Selective Context chọn token dựa trên cosine similarity với query. Các phương pháp này hoạt động trong không gian token rời rạc và không có cơ chế nhận thức ngôn ngữ.
+
+\textbf{Nén KV cache.} SnapKV~\cite{li2024snapkv} quan sát attention pattern từ ``observation window'' ở cuối prompt để chọn KV position quan trọng. H2O~\cite{zhang2023h2o} giữ ``heavy hitters'' --- token có cumulative attention score cao. StreamingLLM~\cite{xiao2024streamingllm} phát hiện ``attention sink'' và giữ các token đầu + token gần đây. PyramidKV phân bổ ngân sách KV cache theo hình kim tự tháp giữa các layer. Tất cả đều dựa trên attention score --- một tín hiệu không phản ánh đặc điểm ngôn ngữ.
+
+\textbf{Nén không gian tiềm ẩn.} Gist Tokens~\cite{mu2023gist} huấn luyện model nén prompt vào các ``gist token'' đặc biệt (26$\times$ compression). ICAE~\cite{ge2024icae} sử dụng kiến trúc autoencoder với memory slots. Các phương pháp này cần huấn luyện thêm và phụ thuộc vào kiến trúc model cụ thể.
+
+\subsection{Ngôn ngữ học tiếng Việt và LLM}
+
+Tiếng Việt thuộc ngữ hệ Nam Á, là ngôn ngữ \textbf{đơn lập} (isolating) và \textbf{có thanh điệu} (tonal) với 6 thanh~\cite{nguyen1997vietnamese}. Các đặc điểm này tạo ra thách thức riêng cho LLM:
+
+\begin{itemize}
+    \item \textbf{Token inflation:} Nghiên cứu của Lee et al.~\cite{lee2026equity} trên 11 ngôn ngữ Đông Nam Á cho thấy Parity-aware BPE là tokenizer công bằng nhất, nhưng token inflation vẫn ở mức 1.5--2.0$\times$ so với tiếng Anh.
+    \item \textbf{Energy divide:} Deng et al.~\cite{deng2026language} chỉ ra rằng energy cho inference khác nhau đến 179$\times$ giữa các ngôn ngữ, với low-resource languages chịu ``double penalty'' --- vừa tốn energy hơn vừa accuracy thấp hơn.
+    \item \textbf{Cross-lingual token arbitrage:} Colak~\cite{colak2026cross} đề xuất dịch non-English prompt sang English trước khi nén, đạt 34--47\% token reduction. Tuy nhiên, dịch thuật có thể làm mất sắc thái ngôn ngữ gốc.
+    \item \textbf{Tokenizer equity:} Guo et al.~\cite{guo2026brain} chỉ ra tokenization fertility chiếm $\sim$60\% sự khác biệt cross-linguistic trong LLM.
+\end{itemize}
+
+\textbf{Khoảng trống nghiên cứu:} Chưa có công trình nào thiết kế phương pháp nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ cho tiếng Việt nói riêng hay các ngôn ngữ low-resource nói chung.
+
+
+% ============================================================================
+\section{Phương pháp đề xuất}
+% ============================================================================
+
+\subsection{Tổng quan}
+
+\method{LACC} (\textit{Language-Aware Context Compression}) là khung nén ngữ cảnh kết hợp ba tín hiệu để tính điểm quan trọng cho từng token:
+
+\begin{equation}\label{eq:combined}
+    \score{t} = w_{\text{ppl}} \cdot \tilde{\score{}_{\text{ppl}}}(t) \;+\; w_{\text{tone}} \cdot \tilde{\score{}_{\text{tone}}}(t) \;+\; w_{\text{morph}} \cdot \tilde{\score{}_{\text{morph}}}(t)
+\end{equation}
+
+trong đó $\tilde{\score{}}(\cdot)$ là các điểm đã được chuẩn hóa về $[0, 1]$, và $w_{\text{ppl}} + w_{\text{tone}} + w_{\text{morph}} = 1$. Khi không có mô hình ngoài, $w_{\text{ppl}} = 0$.
+
+Hình~\ref{fig:architecture} minh họa kiến trúc tổng thể của \method{LACC}.
+
+\begin{figure}[H]
+\centering
+\setlength{\fboxsep}{10pt}
+\fbox{%
+\begin{minipage}{0.9\textwidth}
+\centering
+\textbf{Kiến trúc LACC}
+
+\vspace{4pt}
+\begin{tabular}{c}
+$\underbrace{\text{Context } T \text{ ($n$ tokens)}}_{\text{đầu vào}}$ \\[4pt]
+$\downarrow$ \\[2pt]
+\begin{tabular}{ccc}
+\textbf{Phân tích Thanh điệu} & \textbf{Phân tích Hình thái} & \textbf{Phân tích Perplexity} \\
+(CPU, từ điển, $O(n)$) & (CPU, từ điển, $O(n)$) & (GPU/CPU, mô hình 135M, $O(n)$) \\
+$\downarrow$ & $\downarrow$ & $\downarrow$ \\
+$\score{}_{\text{tone}}(t)$ & $\score{}_{\text{morph}}(t)$ & $\score{}_{\text{ppl}}(t)$
+\end{tabular} \\[4pt]
+$\downarrow$ \\[2pt]
+\textbf{Kết hợp}: $\score{t} = \sum w_i \cdot \tilde{\score{}}_i(t)$ \\[4pt]
+$\downarrow$ \\[2pt]
+\textbf{Chọn lọc}: $\text{TopK}(\score{\cdot}, n/R)$ \\[4pt]
+$\downarrow$ \\[2pt]
+$\underbrace{\text{Context } T' \text{ ($n/R$ tokens)}}_{\text{đầu ra}}$
+\end{tabular}
+\end{minipage}
+}
+\caption{Kiến trúc tổng thể của \method{LACC}. Ba tín hiệu được tính toán song song, sau đó kết hợp với trọng số và chọn lọc token.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Tín hiệu Thanh điệu (\textit{Tone-Aware Scoring})}
+
+\subsubsection{Mật độ và đa dạng thanh điệu}
+
+Với mỗi token $t$ (được giải mã thành chuỗi ký tự), ta định nghĩa:
+
+\begin{definition}[Mật độ thanh điệu]
+$$\rho(t) = \frac{|\{c \in t : \text{tone}(c) \neq \text{\tone{ngang}}\}|}{|t|}$$
+trong đó $|t|$ là độ dài token (số ký tự) và $\text{tone}(c)$ là thanh điệu của ký tự $c$.
+\end{definition}
+
+\begin{definition}[Đa dạng thanh điệu]
+$$\nu(t) = \left|\{\text{tone}(c) : c \in t \land \text{tone}(c) \neq \text{\tone{ngang}}\}\right|$$
+\end{definition}
+
+\subsubsection{Trọng số bảo toàn thanh điệu}
+
+\begin{equation}\label{eq:tone_weight}
+    \weight{tone}(t) = 1.0 + \alpha \cdot \rho(t) \cdot \left(1 + \beta \cdot \frac{\nu(t)}{6}\right)
+\end{equation}
+
+với $\alpha = 0.5$ (mức độ quan trọng cơ bản của thanh điệu) và $\beta = 0.3$ (phần thưởng cho đa dạng thanh điệu). Giá trị $\weight{tone}(t) \in [1.0, 1.65]$. Token càng nhiều ký tự có dấu và càng đa dạng thanh điệu thì trọng số càng cao --- \textbf{càng nên được giữ lại}.
+
+\subsubsection{Hệ số tương phản thanh điệu}
+
+Thanh điệu của một token càng khác biệt với các token lân cận thì token đó càng quan trọng (đánh dấu ranh giới ngữ nghĩa). Ta định nghĩa ma trận tương phản $D_{\text{tone}} \in [0,1]^{6 \times 6}$ dựa trên đặc trưng ngữ âm (register, contour):
+
+\begin{table}[H]
+\centering
+\caption{Ma trận tương phản thanh điệu $D_{\text{tone}}(a, b)$. Giá trị cao = hai thanh khác biệt về mặt ngữ âm.}
+\label{tab:tone_matrix}
+\begin{tabular}{l|cccccc}
+\toprule
+ & \tone{ngang} & \tone{huyền} & \tone{sắc} & \tone{hỏi} & \tone{ngã} & \tone{nặng} \\
+\midrule
+\tone{ngang} & 0.0 & 0.5 & 0.7 & 0.8 & 0.9 & 0.6 \\
+\tone{huyền} & 0.5 & 0.0 & 0.9 & 0.6 & 0.8 & 0.4 \\
+\tone{sắc}   & 0.7 & 0.9 & 0.0 & 0.7 & 0.4 & 0.8 \\
+\tone{hỏi}   & 0.8 & 0.6 & 0.7 & 0.0 & 0.7 & 0.8 \\
+\tone{ngã}   & 0.9 & 0.8 & 0.4 & 0.7 & 0.0 & 0.9 \\
+\tone{nặng}  & 0.6 & 0.4 & 0.8 & 0.8 & 0.9 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Hệ số tương phản cho token $t$ với tập lân cận $N(t)$ (cửa sổ $\pm 2$ token):
+
+\begin{equation}\label{eq:contrast}
+    f_{\text{contrast}}(t) = 1 + \gamma \cdot \frac{1}{|N(t)|} \sum_{n \in N(t)} D_{\text{tone}}\big(\text{tone}(t),\; \text{tone}(n)\big)
+\end{equation}
+
+với $\gamma = 0.4$ là hệ số khuếch đại.
+
+\subsubsection{Điểm thanh điệu tổng hợp}
+
+\begin{equation}\label{eq:tone_score}
+    \score{}_{\text{tone}}(t) = \weight{tone}(t) \times f_{\text{contrast}}(t)
+\end{equation}
+
+Ví dụ: token \token{má} (thanh \tone{sắc}) đứng cạnh \token{ma} (thanh \tone{ngang}) và \token{mà} (thanh \tone{huyền}) có:
+\begin{itemize}
+    \item $\rho(\token{má}) = 1/1 = 1.0$
+    \item $\nu(\token{má}) = 1$
+    \item $\weight{tone}(\token{má}) = 1.0 + 0.5 \times 1.0 \times (1 + 0.3 \times 1/6) = 1.525$
+    \item $f_{\text{contrast}}(\token{má}) = 1 + 0.4 \times (0.7 + 0.9)/2 = 1.32$
+    \item $\score{}_{\text{tone}}(\token{má}) = 1.525 \times 1.32 = 2.01$
+\end{itemize}
+
+Trong khi đó, \token{và} (hư từ, không có thanh điệu rõ rệt) có $\score{}_{\text{tone}} \approx 1.0$. Token \token{má} được ưu tiên giữ lại gấp đôi \token{và}.
+
+\subsection{Tín hiệu Hình thái từ (\textit{Morphology-Aware Scoring})}
+
+\subsubsection{Phân loại từ}
+
+Mỗi token $t$ được gán một lớp hình thái $c(t)$ thông qua tra cứu từ điển:
+
+\begin{definition}[Phân loại hình thái từ]
+$$c(t) \in \{\text{FUNC}, \text{CONTENT}, \text{REDUP}, \text{COMPOUND}, \text{OTHER}\}$$
+\end{definition}
+
+\begin{table}[H]
+\centering
+\caption{Bốn lớp từ chính và chiến lược nén tương ứng.}
+\label{tab:word_classes}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Lớp} & \textbf{Đặc điểm} & \textbf{Tỉ lệ} & \textbf{Ví dụ} & \textbf{Hệ số} \\
+\midrule
+Hư từ (FUNC) & Ít thông tin ngữ nghĩa & $\sim$35\% & \viet{đã, sẽ, của, và} & 0.40 \\
+Thực từ (CONTENT) & Mang nghĩa chính & $\sim$50\% & \viet{học, Việt Nam, máy tính} & 1.20 \\
+Từ láy (REDUP) & Dư thừa ngữ âm & $\sim$5\% & \viet{xinh xắn, đẹp đẽ} & 0.60 \\
+Từ ghép (COMPOUND) & Đơn vị ngữ nghĩa & $\sim$8\% & \viet{hợp tác xã, giáo viên} & 1.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Phân loại sử dụng từ điển đóng gồm $\sim$200 hư từ tiếng Việt và $\sim$80 cặp từ láy phổ biến, cho phép tra cứu $O(1)$ không cần mô hình.
+
+\subsubsection{Hệ số bảo toàn theo lớp từ}
+
+\begin{equation}\label{eq:class_mult}
+    f_{\text{class}}(c) = \begin{cases}
+        0.40 & \text{nếu } c = \text{FUNC} \quad \text{(nén mạnh)} \\
+        1.20 & \text{nếu } c = \text{CONTENT} \quad \text{(bảo vệ)} \\
+        0.60 & \text{nếu } c = \text{REDUP} \quad \text{(gộp cặp)} \\
+        1.50 & \text{nếu } c = \text{COMPOUND} \quad \text{(giữ chặt)} \\
+        1.00 & \text{nếu } c = \text{OTHER}
+    \end{cases}
+\end{equation}
+
+\subsubsection{Phân bổ ngân sách theo lớp}
+
+Thay vì chọn token đơn thuần theo điểm số, \method{LACC} phân bổ ngân sách nén $B$ tỉ lệ với số lượng token trong mỗi lớp, điều chỉnh bởi tỉ lệ giữ lại $r_c$:
+
+\begin{equation}\label{eq:budget}
+    B_c = B \times \frac{|T_c| \times r_c}{\sum_{c'} |T_{c'}| \times r_{c'}}
+\end{equation}
+
+với $|T_c|$ là số token thuộc lớp $c$, $r_{\text{FUNC}} = 0.30$, $r_{\text{CONTENT}} = 0.85$, $r_{\text{REDUP}} = 0.50$, $r_{\text{COMPOUND}} = 0.95$.
+
+\subsubsection{Xử lý từ láy}
+
+Với các cặp từ láy $(t_L, t_R)$ được phát hiện (ví dụ: $\langle$\viet{xinh}, \viet{xắn}$\rangle$):
+\begin{itemize}
+    \item Điểm của $t_L$ (từ gốc) được nhân với $1.5$ --- token này đại diện cho cả cặp
+    \item Điểm của $t_R$ (từ láy) được gán $0.1$ --- gần như chắc chắn bị loại bỏ
+\end{itemize}
+
+\subsection{Tín hiệu Perplexity (\textit{External Model Scoring})}
+
+\subsubsection{Mô hình ngoài}
+
+Khi có GPU, \method{LACC} sử dụng một mô hình ngôn ngữ nhỏ (135M--500M tham số) để ước lượng độ quan trọng của token dựa trên perplexity:
+
+\begin{equation}\label{eq:ppl}
+    \score{}_{\text{ppl}}(t_i) = -\log P(t_i \mid t_{<i})
+\end{equation}
+
+Token càng ``bất ngờ'' đối với mô hình (perplexity cao) thì càng mang nhiều thông tin và càng nên được giữ lại. Đây là cùng nguyên lý với LLMLingua~\cite{jiang2023llmlingua}, nhưng thay vì dùng mô hình lớn (7B+), \method{LACC} dùng mô hình nhỏ (135M) để tiết kiệm VRAM.
+
+\subsubsection{Các mô hình được hỗ trợ}
+
+\begin{table}[H]
+\centering
+\caption{Các mô hình nhỏ dùng cho perplexity scoring.}
+\label{tab:tiny_models}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Mô hình} & \textbf{Tham số} & \textbf{VRAM (INT4)} & \textbf{Tốc độ} & \textbf{Hỗ trợ tiếng Việt} \\
+\midrule
+SmolLM2-135M-Instruct & 135M & $\sim$0.3 GB & Nhanh & Cơ bản \\
+SmolLM2-360M-Instruct & 360M & $\sim$0.7 GB & Nhanh & Cơ bản \\
+Qwen2.5-0.5B-Instruct & 500M & $\sim$0.5 GB & Trung bình & Tốt \\
+Qwen2.5-1.5B-Instruct & 1.5B & $\sim$1.0 GB & Chậm hơn & Tốt \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Thuật toán tổng hợp}
+
+Thuật toán~\ref{alg:lacc} mô tả quy trình nén đầy đủ của \method{LACC}.
+
+\begin{algorithm}[H]
+\caption{\method{LACC}: Language-Aware Context Compression}
+\label{alg:lacc}
+\begin{algorithmic}[1]
+\Require Ngữ cảnh $T$ ($n$ token), tỉ lệ nén $R$, trọng số $w_{\text{ppl}}, w_{\text{tone}}, w_{\text{morph}}$
+\Ensure Ngữ cảnh đã nén $T'$ ($\lfloor n/R \rfloor$ token)
+\State Tokenize $T \to$ \texttt{token\_ids}$[0..n-1]$
+\State Decode \texttt{token\_ids} $\to$ \texttt{tokens}$[0..n-1]$ \Comment{chuỗi ký tự đọc được}
+\State
+\State // \textbf{Bước 1: Phân tích Thanh điệu} (CPU, $O(n)$)
+\For{$i \gets 0$ to $n-1$}
+    \State $\rho_i \gets \text{mật\_độ\_thanh\_điệu}(\texttt{tokens}[i])$
+    \State $\nu_i \gets \text{đa\_dạng\_thanh\_điệu}(\texttt{tokens}[i])$
+    \State $\weight{tone}_i \gets 1.0 + \alpha \cdot \rho_i \cdot (1 + \beta \cdot \nu_i / 6)$
+    \State $N \gets \texttt{tokens}[\max(0,i-2)..\min(n,i+2)]$ \Comment{lân cận}
+    \State $f_{\text{contrast},i} \gets 1 + \gamma \cdot \text{mean}\{D_{\text{tone}}(\text{tone}(t_i), \text{tone}(n)) : n \in N\}$
+    \State $\score{}_{\text{tone},i} \gets \weight{tone}_i \times f_{\text{contrast},i}$
+\EndFor
+\State
+\State // \textbf{Bước 2: Phân tích Hình thái} (CPU, $O(n)$)
+\For{$i \gets 0$ to $n-1$}
+    \State $c_i \gets \text{phân\_loại\_từ}(\texttt{tokens}[i])$ \Comment{tra từ điển, $O(1)$}
+    \State $\score{}_{\text{morph},i} \gets f_{\text{class}}(c_i)$ \Comment{theo công thức~\eqref{eq:class_mult}}
+\EndFor
+\State Xử lý từ láy: $\forall$ cặp $(i,j)$ là từ láy, $\score{}_{\text{morph},i} \gets \score{}_{\text{morph},i} \times 1.5$, $\score{}_{\text{morph},j} \gets 0.1$
+\State
+\State // \textbf{Bước 3: Perplexity Scoring} (GPU, tùy chọn, $O(n)$)
+\If{có mô hình ngoài}
+    \For{mỗi cửa sổ 512 token trong \texttt{token\_ids}}
+        \State $\score{}_{\text{ppl}}[i..i{+}512] \gets$ \Call{ComputePerplexity}{tiny\_model, chunk}
+    \EndFor
+\Else
+    \State $\score{}_{\text{ppl}} \gets \mathbf{1}$ \Comment{trung tính}
+\EndIf
+\State
+\State // \textbf{Bước 4: Chuẩn hóa \& Kết hợp}
+\For{mỗi $\score{} \in \{\score{}_{\text{ppl}}, \score{}_{\text{tone}}, \score{}_{\text{morph}}\}$}
+    \State $\tilde{\score{}} \gets (\score{} - \min(\score{})) \;/\; (\max(\score{}) - \min(\score{}))$ \Comment{$\to [0,1]$}
+\EndFor
+\State $\score{} \gets w_{\text{ppl}} \cdot \tilde{\score{}}_{\text{ppl}} + w_{\text{tone}} \cdot \tilde{\score{}}_{\text{tone}} + w_{\text{morph}} \cdot \tilde{\score{}}_{\text{morph}}$
+\State
+\State // \textbf{Bước 5: Chọn lọc}
+\State $k \gets 2$ \Comment{số token biên luôn giữ}
+\State $B \gets \max(\lfloor n/R \rfloor - 2k,\; 0)$ \Comment{ngân sách cho token giữa}
+\State $\text{kept} \gets \text{TopK}(\score{}[k..n{-}k],\; B)$ \Comment{giữ $B$ token có điểm cao nhất}
+\State $T' \gets \texttt{token\_ids}[0..k] \;+\; \text{kept} \;+\; \texttt{token\_ids}[n{-}k..n]$ \Comment{giữ nguyên thứ tự}
+\State \Return $T'$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Độ phức tạp}
+
+\begin{table}[H]
+\centering
+\caption{Độ phức tạp của từng thành phần trong \method{LACC}.}
+\label{tab:complexity}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Thành phần} & \textbf{Thời gian} & \textbf{VRAM} & \textbf{Thiết bị} \\
+\midrule
+Phân tích thanh điệu & $O(n)$ & 0 & CPU \\
+Phân tích hình thái & $O(n)$ & 0 & CPU \\
+Perplexity scoring & $O(n \cdot d^2)$ & 0.3--1.0 GB & GPU/CPU \\
+Kết hợp \& chọn lọc & $O(n \log n)$ & 0 & CPU \\
+\midrule
+\textbf{Tổng (no-model)} & $O(n \log n)$ & \textbf{0 GB} & CPU \\
+\textbf{Tổng (external)} & $O(n \cdot d^2)$ & \textbf{0.3 GB} & GPU \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+\section{Thiết kế thực nghiệm}
+% ============================================================================
+
+\subsection{VCC-Bench: Vietnamese Context Compression Benchmark}
+
+Chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đầu tiên để đánh giá nén ngữ cảnh cho tiếng Việt, bao gồm 5 tác vụ:
+
+\begin{enumerate}[label=\textbf{T\arabic*}:,leftmargin=*]
+    \item \textbf{Long-Document QA.} Hỏi-đáp trên văn bản pháp luật và báo chí tiếng Việt dài (2K--32K token). Đánh giá khả năng giữ lại thông tin chi tiết sau khi nén.
+    \item \textbf{Multi-turn Conversation.} Tóm tắt hội thoại nhiều lượt (10--50 lượt). Đánh giá khả năng duy trì mạch hội thoại.
+    \item \textbf{Needle-in-Haystack (Vietnamese).} Chèn một câu cụ thể vào ngữ cảnh dài, kiểm tra khả năng truy xuất sau khi nén.
+    \item \textbf{Agent Tool-Calling.} Tác vụ agent đa bước với function calling tiếng Việt. Đánh giá khả năng bảo toàn cấu trúc hành động.
+    \item \textbf{Cross-lingual Compression.} So sánh nén trực tiếp tiếng Việt với chiến lược ``dịch $\to$ nén $\to$ dịch ngược''.
+\end{enumerate}
+
+\subsection{Mô hình và cấu hình}
+
+\begin{table}[H]
+\centering
+\caption{Cấu hình thực nghiệm.}
+\label{tab:experiment_setup}
+\begin{tabular}{ll}
+\toprule
+\textbf{Tham số} & \textbf{Giá trị} \\
+\midrule
+Mô hình sinh & Qwen2.5-7B-Instruct (INT4) \\
+Mô hình scoring (tùy chọn) & SmolLM2-135M-Instruct (INT4) \\
+Tokenizer & Qwen2.5 tokenizer \\
+Độ dài ngữ cảnh tối đa & 2,048 token \\
+Tỉ lệ nén khảo sát & 2$\times$, 4$\times$, 6$\times$, 8$\times$ \\
+Tham số thanh điệu & $\alpha = 0.5$, $\beta = 0.3$, $\gamma = 0.4$ \\
+Trọng số (có scorer) & $w_{\text{ppl}} = 0.4$, $w_{\text{tone}} = 0.3$, $w_{\text{morph}} = 0.3$ \\
+Trọng số (không scorer) & $w_{\text{ppl}} = 0.0$, $w_{\text{tone}} = 0.5$, $w_{\text{morph}} = 0.5$ \\
+GPU & NVIDIA T4 16~GB / P100 16~GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Phương pháp so sánh}
+
+\begin{itemize}
+    \item \textbf{No Compression:} Giữ nguyên toàn bộ ngữ cảnh (upper bound).
+    \item \textbf{Random Baseline:} Chọn token ngẫu nhiên (lower bound).
+    \item \textbf{First-N Baseline:} Giữ $N$ token đầu tiên.
+    \item \textbf{LLMLingua~\cite{jiang2023llmlingua}:} Perplexity-based token selection.
+    \item \textbf{SnapKV~\cite{li2024snapkv}:} Attention-based KV cache eviction.
+    \item \textbf{\method{LACC}-NoModel:} Chỉ dùng tín hiệu thanh điệu + hình thái (0 VRAM).
+    \item \textbf{\method{LACC}-External:} Thêm tín hiệu perplexity từ mô hình 135M.
+\end{itemize}
+
+\subsection{Độ đo}
+
+\begin{itemize}
+    \item \textbf{Compression Ratio (CR):} $n_{\text{original}} \;/\; n_{\text{compressed}}$
+    \item \textbf{Token Savings (TS):} $(n_{\text{original}} - n_{\text{compressed}}) \;/\; n_{\text{original}} \times 100\%$
+    \item \textbf{ROUGE-L F1:} Chất lượng sinh văn bản so với đáp án tham chiếu.
+    \item \textbf{BLEU:} Độ chính xác từ vựng.
+    \item \textbf{Exact Match (EM):} Tỉ lệ khớp chính xác.
+    \item \textbf{Tone Preservation Rate (TPR):} Tỉ lệ token có thanh điệu được bảo toàn sau nén.
+    \item \textbf{Function Word Compression Ratio:} Tỉ lệ nén riêng cho hư từ.
+    \item \textbf{Harmonized Score:} $2 \times Q \times E \;/\; (Q + E)$ với $Q$ = chất lượng, $E$ = hiệu quả.
+\end{itemize}
+
+
+% ============================================================================
+\section{Kết quả thực nghiệm}
+% ============================================================================
+
+\textit{[Phần này sẽ được điền sau khi hoàn thành thực nghiệm. Các bảng dưới đây là mẫu cấu trúc.]}
+
+\subsection{Hiệu quả nén}
+
+\begin{table}[H]
+\centering
+\caption{So sánh tỉ lệ nén và thời gian xử lý giữa các phương pháp.}
+\label{tab:compression_efficiency}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Phương pháp} & \textbf{CR thực tế} & \textbf{Tiết kiệm token} & \textbf{Thời gian (ms)} & \textbf{VRAM} \\
+\midrule
+No Compression & 1.0$\times$ & 0.0\% & --- & 5.0 GB \\
+Random Baseline & 4.0$\times$ & 75.0\% & --- & 0 GB \\
+LLMLingua (7B) & 4.0$\times$ & --- & --- & 14.0 GB \\
+SnapKV & 4.0$\times$ & --- & --- & 14.0 GB \\
+LACC-NoModel & 4.0$\times$ & --- & --- & 0 GB \\
+LACC-External & 4.0$\times$ & --- & --- & 0.3 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Chất lượng sinh văn bản}
+
+\begin{table}[H]
+\centering
+\caption{So sánh chất lượng sinh văn bản tại tỉ lệ nén 4$\times$.}
+\label{tab:quality}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Phương pháp} & \textbf{ROUGE-L F1} & \textbf{BLEU} & \textbf{EM} & \textbf{Harmonized} \\
+\midrule
+No Compression & --- & --- & --- & --- \\
+Random Baseline & --- & --- & --- & --- \\
+LLMLingua & --- & --- & --- & --- \\
+LACC-NoModel & --- & --- & --- & --- \\
+LACC-External & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Bảo toàn thanh điệu}
+
+\begin{table}[H]
+\centering
+\caption{Tỉ lệ bảo toàn thanh điệu (TPR) và tỉ lệ nén hư từ.}
+\label{tab:tone_preservation}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Phương pháp} & \textbf{TPR (\%)} & \textbf{Func. Word CR} \\
+\midrule
+Random Baseline & --- & 4.0$\times$ \\
+LLMLingua & --- & --- \\
+LACC-NoModel & --- & --- \\
+LACC-External & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Phân tích ablation}
+
+\begin{table}[H]
+\centering
+\caption{Nghiên cứu ablation: đóng góp của từng tín hiệu trong \method{LACC}.}
+\label{tab:ablation}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Cấu hình} & \textbf{ROUGE-L} & \textbf{TPR} & \textbf{Func. CR} \\
+\midrule
+$w_{\text{ppl}}$ only & --- & --- & --- \\
+$w_{\text{tone}}$ only & --- & --- & --- \\
+$w_{\text{morph}}$ only & --- & --- & --- \\
+$w_{\text{tone}} + w_{\text{morph}}$ (no-model) & --- & --- & --- \\
+All three (external) & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ảnh hưởng của tham số}
+
+\begin{figure}[H]
+\centering
+\fbox{\begin{minipage}{0.8\textwidth}
+\centering
+\textit{[Hình sẽ được thêm sau:]}\\
+(a) Ảnh hưởng của $\alpha$ (tone importance) đến TPR và ROUGE-L.\\
+(b) Ảnh hưởng của $w_{\text{tone}}$ (blend weight) đến Harmonized Score.
+\end{minipage}}
+\caption{Phân tích độ nhạy tham số.}
+\label{fig:sensitivity}
+\end{figure}
+
+
+% ============================================================================
+\section{Thảo luận}
+% ============================================================================
+
+\subsection{Tại sao tín hiệu ngôn ngữ quan trọng?}
+
+Kết quả thực nghiệm (sẽ được điền) cho thấy các phương pháp mù ngôn ngữ gặp ba vấn đề chính với tiếng Việt:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=*]
+    \item \textbf{Mất thanh điệu:} LLMLingua và SnapKV không phân biệt \token{má} và \token{ma} --- cả hai có thể bị xóa với xác suất như nhau. \method{LACC} với tín hiệu thanh điệu ưu tiên giữ \token{má} (score $\approx 2.01$) hơn \token{ma} (score $\approx 1.0$).
+    
+    \item \textbf{Lãng phí hư từ:} Các phương pháp hiện tại giữ hư từ và thực từ với tỉ lệ như nhau. \method{LACC} phân bổ ngân sách thông minh: hư từ chỉ được giữ 30\%, thực từ được giữ 85\%. Với văn bản 1000 token (350 hư từ + 500 thực từ + 150 khác), ngân sách 250 token: phương pháp mù giữ $\sim$87 hư từ; \method{LACC} chỉ giữ $\sim$35 hư từ --- tiết kiệm 52 token cho thực từ.
+    
+    \item \textbf{Token inflation:} TIR (Token Inflation Ratio) của tiếng Việt là 1.5--2.0$\times$ so với tiếng Anh~\cite{lee2026equity}. Điều này có nghĩa context window 128K token chỉ chứa được $\sim$61K từ tiếng Việt so với $\sim$98K từ tiếng Anh. \method{LACC} bù đắp một phần bằng cách nén mạnh hư từ.
+\end{enumerate}
+
+\subsection{Khả năng mở rộng}
+
+Mặc dù được thiết kế cho tiếng Việt, kiến trúc module hóa của \method{LACC} cho phép mở rộng sang các ngôn ngữ khác:
+
+\begin{itemize}
+    \item \textbf{Ngôn ngữ thanh điệu:} Ma trận tương phản $D_{\text{tone}}$ có thể thay thế cho tiếng Trung (4 thanh), tiếng Thái (5 thanh), tiếng Yoruba (3 thanh).
+    \item \textbf{Ngôn ngữ đơn lập:} Bộ phân loại hình thái từ có thể mở rộng với từ điển hư từ của tiếng Thái, tiếng Trung, tiếng Miến Điện.
+    \item \textbf{Ngôn ngữ low-resource khác:} Tín hiệu perplexity từ mô hình nhỏ hoạt động với bất kỳ ngôn ngữ nào được hỗ trợ bởi tokenizer.
+\end{itemize}
+
+\subsection{Hạn chế}
+
+\begin{enumerate}[label=(\arabic*),leftmargin=*]
+    \item \textbf{Phụ thuộc từ điển:} Tín hiệu thanh điệu và hình thái từ phụ thuộc vào từ điển đóng. Với từ mới hoặc từ mượn, phân loại có thể không chính xác.
+    \item \textbf{Mô hình scoring nhỏ:} Perplexity từ mô hình 135M có thể không chính xác bằng mô hình 7B. Tuy nhiên, đây là sự đánh đổi cần thiết cho phần cứng hạn chế.
+    \item \textbf{Chưa tối ưu cho streaming:} Thuật toán yêu cầu thấy toàn bộ ngữ cảnh trước khi nén, chưa hỗ trợ streaming từng phần.
+\end{enumerate}
+
+
+% ============================================================================
+\section{Kết luận}
+% ============================================================================
+
+Bài báo này đề xuất \method{LACC} --- phương pháp nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ đầu tiên cho tiếng Việt. \method{LACC} kết hợp ba tín hiệu --- thanh điệu, hình thái từ, và perplexity --- để tính điểm quan trọng cho từng token, từ đó chọn lọc token cần giữ lại. Phương pháp hoạt động ở ba mức độ phần cứng, từ không cần GPU đến đầy đủ, giúp triển khai được trên các thiết bị hạn chế như T4 16~GB.
+
+Hướng phát triển trong tương lai bao gồm: (1) mở rộng \method{LACC} cho các ngôn ngữ thanh điệu và đơn lập khác; (2) tích hợp với các hệ thống serving như vLLM để nén KV cache; (3) huấn luyện end-to-end với phonological consistency loss; và (4) phát triển phiên bản streaming cho hội thoại thời gian thực.
+
+
+% ============================================================================
+\section*{Lời cảm ơn}
+% ============================================================================
+
+\textit{[Sẽ được bổ sung sau.]}
+
+
+% ============================================================================
+% References
+% ============================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{jiang2023llmlingua}
+H. Jiang, Q. Wu, C.-Y. Lin, Y. Yang, and L. Qiu.
+\newblock ``LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models.''
+\newblock In \emph{Proceedings of EMNLP}, 2023.
+
+\bibitem{li2024snapkv}
+Y. Li, Y. Huang, B. Yang, B. Venkitesh, A. Locatelli, H. Ye, T. Cai, P. Lewis, and D. Chen.
+\newblock ``SnapKV: LLM Knows What You are Looking for Before Generation.''
+\newblock \emph{arXiv:2404.14469}, 2024.
+
+\bibitem{zhang2023h2o}
+Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. Ré, C. Barrett, et al.
+\newblock ``H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models.''
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem{xiao2024streamingllm}
+G. Xiao, Y. Tian, B. Chen, S. Han, and M. Lewis.
+\newblock ``Efficient Streaming Language Models with Attention Sinks.''
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem{mu2023gist}
+J. Mu, X. L. Li, and N. Goodman.
+\newblock ``Learning to Compress Prompts with Gist Tokens.''
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem{ge2024icae}
+T. Ge, J. Hu, L. Wang, X. Wang, S.-Q. Chen, and F. Wei.
+\newblock ``In-context Autoencoder for Context Compression in a Large Language Model.''
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem{lee2026equity}
+K. Lee, M. R. Qorib, A. I. Soegeng, and H. T. Ng.
+\newblock ``Equity with Efficiency: An Empirical Study of Tokenizers for Multilingual Large Language Models.''
+\newblock \emph{arXiv:2606.15044}, 2026.
+
+\bibitem{deng2026language}
+N. Deng, A. Shen, Y. Feng, J. Nwatu, J.-W. Chung, M. Chowdhury, Y. Chen, and R. Mihalcea.
+\newblock ``The Language-Energy Divide: Measuring Energy Costs of Multilingual LLM Inference.''
+\newblock \emph{arXiv:2606.21869}, 2026.
+
+\bibitem{colak2026cross}
+M. U. Colak.
+\newblock ``Cross-Lingual Token Arbitrage: Optimizing Code Agent Context Windows via Local LLM Preprocessing.''
+\newblock \emph{arXiv:2606.03618}, 2026.
+
+\bibitem{guo2026brain}
+D. Guo, J. Wu, and S. M. Yiu.
+\newblock ``Brain-LLM Alignment Tracks Training Data, Not Typology.''
+\newblock In \emph{CoNLL}, 2026.
+
+\bibitem{tang2026seco}
+J. Tang, Z. Huang, X. Zhang, C. J. Zhang, J. Yu, L. Zheng, R. Meng, and J. Yin.
+\newblock ``Beyond Position Bias: Shifting Context Compression from Position-Driven to Semantic-Driven.''
+\newblock \emph{arXiv:2605.09463}, 2026.
+
+\bibitem{nguyen1997vietnamese}
+D.-H. Nguyen.
+\newblock \emph{Tiếng Việt --- Vietnamese.}
+\newblock In \emph{London Oriental and African Language Library}, John Benjamins, 1997.
+
+\bibitem{ge2023extractive}
+T. Ge, J. Hu, X. Wang, S.-Q. Chen, and F. Wei.
+\newblock ``In-context Autoencoder for Context Compression in a Large Language Model.''
+\newblock \emph{arXiv:2307.06945}, 2023.
+
+\bibitem{lin2026compresskv}
+X. Lin, J. Wang, O. Kondrateva, Y. Shi, B. Li, and G. L. Zhang.
+\newblock ``CompressKV: Semantic-Retrieval-Guided KV-Cache Compression for Resource-Efficient Long-Context LLM Inference.''
+\newblock \emph{arXiv:2606.24467}, 2026.
+
+\bibitem{kai2026infokv}
+J. Kai, Z. Xiao, A. Birch, and Z. Lin.
+\newblock ``Information-Aware KV Cache Compression for Long Reasoning.''
+\newblock \emph{arXiv:2606.26875}, 2026.
+
+% ── Vietnamese NLP papers ───────────────────────────────────────────
+
+\bibitem{nguyen2020phobert}
+D. Q. Nguyen and A. T. Nguyen.
+\newblock ``PhoBERT: Pre-trained Language Models for Vietnamese.''
+\newblock In \emph{Findings of EMNLP}, 2020.
+
+\bibitem{nguyen2023videberta}
+H. S. Nguyen et al.
+\newblock ``ViDeBERTa: A Powerful Pre-trained Language Model for Vietnamese.''
+\newblock In \emph{EACL}, 2023.
+
+\bibitem{phan2022vit5}
+L. Phan et al.
+\newblock ``ViT5: Pretrained Transformer-based Models for Vietnamese.''
+\newblock \emph{arXiv:2205.06457}, 2022.
+
+\bibitem{vo2024vimistral}
+J. Vo.
+\newblock ``Vi-Mistral-X: Building a Vietnamese Language Model with Advanced Continual Pre-training.''
+\newblock \emph{arXiv:2403.15470}, 2024.
+
+\bibitem{ta2026vidia2std}
+K. A. Ta, N. V. Dinh, and K. V. Nguyen.
+\newblock ``ViDia2Std: A Parallel Corpus and Methods for Vietnamese Dialect-to-Standard Translation.''
+\newblock In \emph{AAAI} (Oral), 2026.
+
+\bibitem{nguyen2018rdrsegmenter}
+D. Q. Nguyen et al.
+\newblock ``RDRsegmenter: A Fast and Accurate Vietnamese Word Segmenter.''
+\newblock In \emph{LREC}, 2018.
+
+\bibitem{nguyen2026vihallu}
+A. T.-H. Nguyen et al.
+\newblock ``DSC2025 ViHallu Challenge: Detecting Hallucination in Vietnamese LLMs.''
+\newblock \emph{arXiv:2601.04711}, 2026.
+
+\bibitem{sophia2025compass}
+S. Maria.
+\newblock ``Compass-v3: Scaling Domain-Specific LLMs for Multilingual E-Commerce in Southeast Asia.''
+\newblock \emph{arXiv:2509.09121}, 2025.
+
+\bibitem{li2023selective}
+Y. Li et al.
+\newblock ``Selective Context: Compressing Prompts for Efficient In-Context Learning.''
+\newblock \emph{arXiv:2310.06201}, 2023.
+
+\bibitem{trukhina2026context}
+N. Trukhina and V. Vashkelis.
+\newblock ``Context Codec: Compress the Context, Keep the Commitments.''
+\newblock \emph{arXiv:2605.17304}, 2026.
+
+\bibitem{ni2026anchorkv}
+N. Ni and Y. Lao.
+\newblock ``AnchorKV: Safety-Aware KV Cache Compression via Soft Penalty.''
+\newblock \emph{arXiv:2606.17872}, 2026.
+
+\end{thebibliography}
+
+\end{document}

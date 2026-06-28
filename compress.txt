@@ -1,0 +1,875 @@
+================================================================================
+TỔNG HỢP PAPERS & DỰ ÁN VỀ CONTEXT COMPRESSION TRONG LLM
+================================================================================
+
+I. PAPERS CHÍNH
+================================================================================
+
+A. PROMPT COMPRESSION (nén prompt đầu vào)
+--------------------------------------------------------------------------------
+
+1. LLMLingua - Compressing Prompts for Accelerated Inference of LLMs
+   Venue: EMNLP 2023   |   arxiv: 2310.05736
+   Authors: Huiqiang Jiang, Qianhui Wu, Chin-Yew Lin, Yuqing Yang, Lili Qiu (Microsoft)
+   Tóm tắt: Coarse-to-fine prompt compression, budget controller, thuật toán nén
+            token-level lặp. Nén đến 20x, ít mất performance.
+
+2. LongLLMLingua - Improving LLMLingua for Long-Context Scenarios
+   Venue: ACL 2024
+   Tóm tắt: Phiên bản cải tiến của LLMLingua cho long-context scenario.
+
+3. CORE - Less is More: Lightweight Prompt Compression for QA Apps on Edge Devices
+   arxiv: 2606.20571   |   2026
+   Authors: Zihuai Xu, Ruofei Hou, Yang Xu, Hongli Xu, Yunming Liao, Ying Zhu
+   Tóm tắt: Two-stage sentence-level prompt compression, không cần SLM. Triển khai
+            trên Jetson AGX Orin & Huawei Nova. Cải thiện accuracy 30.19%,
+            giảm memory 50.47%, speedup 1.94x. Giảm energy 95.74% vs LLMLingua2.
+
+4. DiffuMask - Diffusion Language Model for Token-level Prompt Pruning
+   arxiv: 2604.06627   |   2026
+   Tóm tắt: Diffusion-based framework, hierarchical shot-level + token-level pruning.
+            Nén 80% prompt length, giữ/tăng accuracy across settings.
+
+5. K-Token Merging - Compressing Sequences in the Latent Embedding Space
+   arxiv: 2604.15153   |   2026
+   Tóm tắt: Gộp K token embeddings thành 1 embedding bằng lightweight encoder.
+            Giảm 75% input length, Pareto frontier perf vs compression.
+
+6. SeCo - Semantic Consistency Context Compression
+   arxiv: 2605.09463   |   2026
+   Tóm tắt: Shift từ position-driven sang semantic-driven compression.
+            Dynamic anchoring trong semantic space. Code open-source.
+
+7. AGORA - Adapter-Grounded Observation-Action Retention for LLM Agents
+   arxiv: 2605.26596   |   2026
+   Tóm tắt: Step-level (không phải token-level) prompt compression cho LLM agents.
+            125M scorer, giữ >=75% uncompressed performance.
+
+8. SPSD - Sentiment Preserving Semantic Distillation for Edge-Based Prompt Compression
+   arxiv: 2606.19364   |   2026
+   Tóm tắt: 4-bit quantised SLM nén prompt trên edge trước khi gửi cloud LLM.
+            Giảm 99.9 tokens/call, chất lượng non-inferior.
+
+9. Lossless Prompt Compression via Dictionary-Encoding and In-Context Learning
+   arxiv: 2604.13066   |   2026
+   Tóm tắt: Dictionary-encoding lossless compression, LLM học encoding keys
+            in-context. Compression ratio lên đến 80%.
+
+10. ReSum - Synergizing LLM Reasoning and Summarization with RL
+    arxiv: 2606.13316   |   2026
+    Tóm tắt: RLVR framework, model tự summarize reasoning trajectory.
+              Cải thiện 4% perf, giảm rollout length 18.6%.
+
+
+B. KV CACHE COMPRESSION (nén bộ nhớ Key-Value cache)
+--------------------------------------------------------------------------------
+
+B1. TRAINING-FREE METHODS (feature-based eviction)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. H2O - Heavy-Hitter Oracle for Efficient LLM Inference
+   Venue: NeurIPS 2023   |   arxiv: 2306.14048
+   Tóm tắt: Giữ token có attention score cao nhất (heavy hitters) + local tokens.
+            Đơn giản, hiệu quả cho long sequence generation.
+
+2. StreamingLLM - Efficient Streaming LLM with Attention Sinks
+   Venue: ICLR 2024   |   arxiv: 2309.17453
+   Authors: Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, Mike Lewis
+   Tóm tắt: Phát hiện "attention sink" phenomenon. Giữ attention sink tokens +
+            recent window tokens, cho phép streaming độ dài vô hạn.
+
+3. SnapKV - LLM Knows What You are Looking for Before Generation
+   arxiv: 2404.14469   |   2024
+   Authors: Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, et al.
+   Tóm tắt: Quan sát attention pattern từ observation window ở cuối prompt.
+            Chọn clustered KV positions quan trọng cho mỗi attention head.
+            3.6x generation speedup, 8.2x memory efficiency.
+
+4. FastGen - Model Tells You What to Discard: Adaptive KV Cache Compression
+   Venue: ICLR 2024   |   arxiv: 2310.07240
+   Tóm tắt: Adaptive compression policy per attention head dựa trên behavior.
+
+5. PyramidKV - Budget phân bổ theo pyramid
+   2024
+   Tóm tắt: Budget KV cache giảm dần theo layer depth. Các lớp dưới giữ nhiều KV,
+            các lớp trên giữ ít hơn. Phù hợp GQA-based LLMs.
+
+6. CompressKV - Semantic-Retrieval-Guided KV-Cache Compression
+   arxiv: 2606.24467   |   2026
+   Tóm tắt: Xác định Semantic Retrieval Heads (SRHs). Giữ >97% full-cache perf
+            chỉ với 3% KV cache. 90% accuracy với 0.7% KV storage.
+            Code: github.com/TUDa-HWAI/CompressKV
+
+7. InfoKV - Information-Aware KV Cache Compression for Long Reasoning
+   arxiv: 2606.26875   |   2026
+   Tóm tắt: Forward Influence metric, entropy-aware framework. Kết hợp
+            information-theoretic signals với attention scores.
+
+8. AnchorKV - Safety-Aware KV Cache Compression via Soft Penalty
+   arxiv: 2606.17872   |   2026
+   Tóm tắt: Drop-in modification, bias token retention scores tránh harmful
+            directions. Chống jailbreak trong KV cache compression.
+
+9. ReasonAlloc - Hierarchical Decoding-Time KV Cache Budget Allocation
+   arxiv: 2606.11164   |   2026
+   Tóm tắt: Two-level budget allocation: offline layer-wise + online head-wise.
+            "Reasoning Wave" pattern cho reasoning models.
+
+10. EntropyInfer - Entropy-Guided Adaptive Inference for Long-Context LLMs
+    arxiv: 2606.09508   |   2026
+    Tóm tắt: Rigid vs Dynamic Heads phân loại bằng attention entropy.
+             2.39x end-to-end speedup. Code: github.com/SHA-4096/EntropyInfer
+
+11. GRKV - Global Regression for Training-Free KV Cache Compression
+    arxiv: 2605.31105   |   2026
+    Tóm tắt: Ridge-regression-based merging. Phân bổ đều thông tin từ evicted
+             tokens qua retained tokens. Performance improvement duy nhất
+             trong merging methods.
+
+12. STAR-KV - Low-Rank KV Cache Compression via Soft Thresholding
+    arxiv: 2606.08382   |   2026
+    Tóm tắt: Adaptive low-rank compression, differentiable thresholding.
+             Lên đến 75% KV compression, 20x overall khi kết hợp quantization.
+             6.9x speedup attention module, 3.1x end-to-end throughput.
+
+13. HeteroCache - Heterogeneous KV Cache Compression
+    Venue: ACL 2026
+    Tóm tắt: Dynamic retrieval approach cho heterogeneous KV cache compression.
+
+14. AdaReTaKe / UniReTaKe - Unified KV Cache Compression for Long Video
+    Venue: ACL 2025
+    Tóm tắt: Training-free, unified KV cache compression cho video understanding
+             và generation.
+
+B2. QUANTIZATION-BASED (lượng tử hóa)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. TurboQuant - Near-Lossless KV Cache Quantization for LLMs
+   Venue: ICLR 2026 (Google)
+   Tóm tắt: 5x KV cache compression ở 3-bit, 99.5% attention fidelity.
+            Nhiều impl open-source (PyTorch, MLX, Rust, GGML, llama.cpp).
+
+2. GEAR - An Efficient KV Cache Compression Recipe for Near-Lossless Inference
+   Open-source: opengear-project/GEAR
+   Tóm tắt: Quantization + sparse matrix decomposition. Near-lossless quality.
+
+3. HyperQuant - Rate-Distortion-Optimal Quantization Pipeline
+   arxiv: 2606.23406   |   2026
+   Tóm tắt: Hadamard + optimal lattice (E8, D4, A2, Z) + Rice coding.
+            Compress weights 3.9x + KV cache 3.79x at near-lossless quality.
+
+4. OCTOPUS - Low-bit KV Cache Quantization
+   2026
+   Tóm tắt: Low-bit quantization technique cho KV cache.
+
+5. PolarQuant-KV / NexusQuant - Lattice-based KV quantization
+   2026
+   Tóm tắt: E8 lattice quantization, training-free. Fits longer context trong
+            cùng VRAM.
+
+B3. SYSTEMS-LEVEL (tối ưu hệ thống)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. RocketKV - Accelerating Long-Context LLM Inference via Two-Stage KV Cache Compression
+   Venue: ICML 2025   |   NVlabs
+   Tóm tắt: Two-stage compression pipeline. High throughput serving.
+            Code: github.com/NVlabs/RocketKV
+
+2. Dustin - Draft-Augmented Sparse Verification for Long-Context Speculative Decoding
+   Venue: ICML 2026   |   arxiv: 2606.24957
+   Tóm tắt: Sparse verification framework. 27.85x speedup self-attention,
+             9.17x end-to-end decoding speedup tại 32k context.
+
+3. FlashMemory-DeepSeek-V4 - Lightning Index Ultra-Long Context
+   arxiv: 2606.09079   |   2026
+   Tóm tắt: Neural Memory Indexer, backbone-free training. Chỉ 13.5% KV cache
+            footprint. Tại 500K context, giảm overhead >90%.
+
+4. Tangram - Unlocking Non-Uniform KV Cache Compression for Multi-turn Serving
+   arxiv: 2606.06302   |   2026
+   Tóm tắt: Static budget reservation, ragged paging, ahead-of-time load balancing.
+             2.6x throughput improvement. Triển khai trên vLLM.
+
+5. RedKnot - Efficient Long-Context LLM Serving with Head-Aware KV Reuse
+   arxiv: 2606.06256   |   2026
+   Tóm tắt: Decompose KV cache theo KV heads. Structured memory object.
+            Hỗ trợ KV reuse, prefix compression, hot/cold separation.
+
+6. SCOPE - Optimizing KV Cache Compression in Long-context Generation
+   Venue: ACL 2025 Oral   |   Linking-ai
+   Tóm tắt: Tối ưu KV cache compression trong long-context generation.
+            Code: github.com/Linking-ai/SCOPE
+
+7. RepairKV - Cache You Later: Post-Compression KV Repair for Agentic LLM
+   Venue: ICML 2026 AdaptFM
+   Tóm tắt: Post-compression KV repair cho long-context agentic inference.
+
+8. FastKV - Decoupling Context Reduction and KV Cache Compression
+   Venue: ACL Findings 2026
+   Tóm tắt: Tách biệt context reduction & KV cache compression cho prefill-
+            decoding acceleration.
+
+9. QCFuse - Query-Aware Cache Fusion via Compressed View for Efficient RAG
+   arxiv: 2606.05875   |   2026
+   Tóm tắt: Compressed-view query-aware selector cho RAG cache fusion.
+             1.7x prefill-time speedup.
+
+10. OmniMem - Perturbation-aware Memory Compression for Streaming Audio-Visual LLMs
+    arxiv: 2606.07577   |   2026   |   ByteDance
+    Tóm tắt: Modality-aware memory allocation. Cải thiện 2-4% absolute accuracy.
+
+11. ViCoStream - Streaming VideoLLMs Can Run Beyond 100 FPS
+    arxiv: 2606.19849   |   2026
+    Tóm tắt: Stage-wise coordinated streaming framework. 134 FPS, <50ms TTFT
+             trên A100.
+
+12. SPECTRE - Hybrid Ordinary-Parallel Speculative Serving
+    arxiv: 2605.08151   |   2026
+    Tóm tắt: Reuse underutilized tail-model services làm remote drafters.
+             2.28x speedup over autoregressive.
+
+13. YouZhi - Adaptive GQA-to-MLA Transition for Financial LLMs
+    arxiv: 2606.05868   |   2026
+    Tóm tắt: Layer-adaptive GQA-to-MLA transition framework. 2.69x concurrency
+             boost, KV-cache compression + domain expertise.
+
+14. SubFit - Rethinking Granularity in Replacement-Based LLM Compression
+    arxiv: 2606.02559   |   2026
+    Tóm tắt: Submodule-level fitted residual replacement. 84.6% accuracy tại 25%
+             sparsity. KV-cache savings + inference speedup.
+
+
+C. MEMORY & CONTEXT MANAGEMENT CHO AGENT
+--------------------------------------------------------------------------------
+
+1. Plans Don't Persist: Why Context Management Is Load Bearing for LLM Agents
+   arxiv: 2606.22953   |   2026
+   Authors: Aman Mehta, Anupam Datta
+   Tóm tắt: Plan signal suy giảm nhanh trong context. Context management là
+            load-bearing. Probe-gated re-surfacing. ALFWorld giảm 34.7pp
+            khi plan bị evict.
+
+2. RaMem - Contextual Reinstatement for Long-term Agentic Memory
+   arxiv: 2606.22844   |   2026
+   Tóm tắt: Chuyển retrieved memory fragments thành contextually verifiable
+            evidence. 4 giai đoạn: evidence anchoring, recall condition,
+            validity-aware retrieval, context-preserved synthesis.
+            Average F1 gain >10% across backbones.
+
+3. PACMS - Submodular Context Selection as a Pluggable Engine for LLM Agents
+   arxiv: 2606.20047   |   2026
+   Tóm tắt: Submodular optimization chọn subset từ memory entries,
+            conversation turns, tool outputs. Query-aware selection.
+
+4. ContextWeaver - Selective and Dependency-Structured Memory Construction
+   arxiv: 2604.23069   |   2026
+   Tóm tắt: Graph-organized interaction trace, dependency-based construction.
+            Cải thiện SWE-Bench Verified & Lite.
+
+5. Hallucination as Context Drift: Synchronization Protocols for Multi-Agent
+   arxiv: 2606.21666   |   2026
+   Tóm tắt: Context Divergence Score (CDS) + Shared State Verification Protocol.
+            Giảm hallucination trong multi-agent systems.
+
+6. H2MT - Semantic Hierarchy-Aware Hierarchical Memory Transformer
+   arxiv: 2605.24930   |   2026
+   Tóm tắt: Semantic hierarchy offline, memory embedding qua bottom-up
+            aggregation. Coarse-to-fine pruning. Competitive quality-efficiency.
+
+7. Context Codec - A Formal Framework for Verifiable LLM Context Compression
+   arxiv: 2605.17304   |   2026
+   Tóm tắt: Commitment-level framework. Context Compression Language (CCL).
+            5 concerns: extraction, normalization, representation, rendering,
+            verification. Metrics: Critical Atom Recall, Commitment Density.
+
+8. Relink - Safe to Check, Unsafe to Use: Relinking at Compression Boundary
+   arxiv: 2606.21732   |   2026
+   Tóm tắt: Compression-boundary vulnerability. 86.9% Relink Rate vs 17.0%
+            clean-split. KBRA defense giảm residual Backend Action Rate về 0%.
+
+9. Multi-Turn Reasoning When Context Arrives in Pieces
+   arxiv: 2606.12941   |   2026
+   Tóm tắt: LLM accuracy giảm đến 65% khi context phân tán qua multiple turns.
+            Scalable sharding & memory-augmented RL approach.
+
+10. Agent Capsules - Quality-Gated Granularity Control for Multi-Agent Pipelines
+    arxiv: 2605.00410   |   2026
+    Tóm tắt: Adaptive execution runtime. Giảm 51% fine-mode tokens, 42% fewer
+              compound-mode tokens. Quality parity or better.
+
+11. TriMem - Beyond Atomic Facts in Lifelong LLM Agent Memory
+    arxiv: 2605.19952   |   2026
+    Tóm tắt: 3 representation granularities: raw dialogue, atomic facts,
+             synthesized profiles. TextGrad-based prompt optimization.
+
+12. LATTE - Forecasting Peer Anchored Preference Trajectories
+    arxiv: 2605.26612   |   2026
+    Tóm tắt: Peer-anchored relative preference state. Single anchored soft token
+             injection. Cải thiện ROUGE-L over static/baselines.
+
+
+D. LATENT/SEMANTIC COMPRESSION & ĐÁNH GIÁ
+--------------------------------------------------------------------------------
+
+1. Local-Splitter - Measurement Study of Seven Tactics for Reducing Cloud LLM Token
+   arxiv: 2604.12301   |   2026
+   Tóm tắt: Tiết kiệm 45-79% cloud tokens (local routing + compression).
+            Optimal tactic subset phụ thuộc workload.
+
+2. Prompt Compression in the Wild: Measuring Latency, Rate, Quality
+   Venue: ECIR 2026   |   arxiv: 2604.02985
+   Tóm tắt: LLMLingua đạt 18% end-to-end speed-up khi prompt length,
+            compression ratio & hardware matched.
+
+3. The Compression Paradox: Provider-Dependent Energy Effects
+   arxiv: 2603.23528   |   2026
+   Tóm tắt: Compression không luôn dẫn đến energy saving. DeepSeek có output
+            expansion +2140% energy. Output-length control quan trọng hơn.
+
+4. Compression Method Matters: Benchmark-Dependent Output Dynamics
+   arxiv: 2603.23527   |   2026
+   Tóm tắt: Instruction Survival Probability (Psi). Compression Robustness Index
+            (CRI). Benchmark-diverse testing là cần thiết.
+
+5. AVOC - Enhancing Hour-Level Audio-Video Understanding via Retrieval-Inspired
+   arxiv: 2606.24286   |   2026
+   Tóm tắt: Top-K retrieval problem formulation. Relevance, importance, diversity.
+            SOTA trên OmniVideoBench & LVOmniBench. Audio-video lên đến 1 giờ.
+
+6. Beyond Uniform Tokens: Adaptive Compression for Time Series Language Models
+   arxiv: 2606.13624   |   2026
+   Tóm tắt: Asymmetric token compression. 7.68x inference acceleration.
+            78% setting performance gains.
+
+7. Small Initialization Matters for Large Language Models
+   arxiv: 2606.17945   |   2026
+   Tóm tắt: "Compression is intelligence" - small init drives low-complexity
+            structures first, then richer representations.
+
+8. The Benchmark Illusion: Pruned LLMs Can Pass Multiple Choice but Fail to Answer
+   arxiv: 2606.17609   |   2026
+   Tóm tắt: Pruned models pass MC nhưng fail open generation. "Recognition-only
+            errors". Multiple-choice overstates usability.
+
+9. Beyond tokens: A Unified Framework for Latent Communication in LLM Multi-Agent
+   arxiv: 2606.05711   |   2026
+   Tóm tắt: 3-axis framework: WHAT (embeddings/hidden states/KV-caches),
+            WHICH (alignment), HOW (fusion). Khảo sát 18 methods (2024-2026).
+
+
+================================================================================
+II. DỰ ÁN MÃ NGUỒN MỞ (GITHUB REPOS)
+================================================================================
+
+A. PROMPT COMPRESSION
+--------------------------------------------------------------------------------
+| microsoft/LLMLingua          | https://github.com/microsoft/LLMLingua          | 6364⭐ |
+| jia-gao/leanctx              | https://github.com/jia-gao/leanctx              |  312⭐ |
+| thom-heinrich/chonkify       | https://github.com/thom-heinrich/chonkify       |   20⭐ |
+| mo-tunn/TokenPack            | https://github.com/mo-tunn/TokenPack            |   10⭐ |
+| centminmod/or-cli            | https://github.com/centminmod/or-cli            |   22⭐ |
+| atjsh/llmlingua-2-js         | https://github.com/atjsh/llmlingua-2-js         |   28⭐ |
+
+B. KV CACHE COMPRESSION
+--------------------------------------------------------------------------------
+| NVIDIA/kvpress               | https://github.com/NVIDIA/kvpress               | 1120⭐ |
+| tonbistudio/turboquant-pytorch | https://github.com/tonbistudio/turboquant-pytorch | 1020⭐ |
+| quantumaikr/quant.cpp        | https://github.com/quantumaikr/quant.cpp        |  394⭐ |
+| opengear-project/GEAR        | https://github.com/opengear-project/GEAR        |  183⭐ |
+| IsaacRe/vllm-kvcompress      | https://github.com/IsaacRe/vllm-kvcompress      |  158⭐ |
+| PacifAIst/Quansloth          | https://github.com/PacifAIst/Quansloth          |  149⭐ |
+| OnlyTerp/turboquant          | https://github.com/OnlyTerp/turboquant          |   75⭐ |
+| DevTechJr/turboquant_cutile  | https://github.com/DevTechJr/turboquant_cutile  |   61⭐ |
+| hilllief/polarquant-kv       | https://github.com/hilllief/polarquant-kv       |   57⭐ |
+| manjunathshiva/turboquant-mlx | https://github.com/manjunathshiva/turboquant-mlx |   53⭐ |
+| NVlabs/RocketKV              | https://github.com/NVlabs/RocketKV              |   47⭐ |
+| machilusZ/FastGen            | https://github.com/machilusZ/FastGen            |   43⭐ |
+| onur-gokyildiz-bhi/tq-kv     | https://github.com/onur-gokyildiz-bhi/tq-kv     |   39⭐ |
+| Linking-ai/SCOPE             | https://github.com/Linking-ai/SCOPE             |   36⭐ |
+| dongwonjo/FastKV             | https://github.com/dongwonjo/FastKV             |   32⭐ |
+| sjtu-zhao-lab/ClusterKV      | https://github.com/sjtu-zhao-lab/ClusterKV      |   31⭐ |
+| jhammant/Turbo1bit           | https://github.com/jhammant/Turbo1bit           |   29⭐ |
+| aivrar/multi-turboquant      | https://github.com/aivrar/multi-turboquant      |   22⭐ |
+| iKislay/copium               | https://github.com/iKislay/copium               |    3⭐ |
+| asvilesov/MMCompressor       | https://github.com/asvilesov/MMCompressor       |    2⭐ |
+| Nover11/SAKV                 | https://github.com/Nover11/SAKV                 |    1⭐ |
+| ki-lw/UniReTaKe              | https://github.com/ki-lw/UniReTaKe              |    1⭐ |
+| arusli1/RepairKV             | https://github.com/arusli1/RepairKV             |    3⭐ |
+| ponytaill/HeteroCache        | https://github.com/ponytaill/HeteroCache        |    3⭐ |
+| GinkgoQ/TurboQuant           | https://github.com/GinkgoQ/TurboQuant           |    1⭐ |
+| yzamari/mlx-turboquant       | https://github.com/yzamari/mlx-turboquant       |    3⭐ |
+| animehacker/llama-turboquant | https://github.com/animehacker/llama-turboquant  |   47⭐ |
+| jagmarques/nexusquant        | https://github.com/jagmarques/nexusquant        |   18⭐ |
+
+C. BENCHMARKING
+--------------------------------------------------------------------------------
+| henryzhongsc/longctx_bench   | https://github.com/henryzhongsc/longctx_bench   |   90⭐ |
+
+D. CONTEXT OPTIMIZATION / MEMORY
+--------------------------------------------------------------------------------
+| SharpAI/SwiftLM              | https://github.com/SharpAI/SwiftLM              |  699⭐ |
+| artalis-io/bitnet.c          | https://github.com/artalis-io/bitnet.c          |   20⭐ |
+| rohansx/tq                   | https://github.com/rohansx/tq                   |    1⭐ |
+| brandonkeung/hpml-longctx-optim | https://github.com/brandonkeung/hpml-longctx-optim |    3⭐ |
+| selmand/turboquant-llamacpp  | https://github.com/selmand/turboquant-llamacpp  |    1⭐ |
+| agoracompression (AGORA)     | https://github.com/ranranrannervous/agoracompression | ref |
+
+E. RESEARCH / AGENT CONTEXT TOOLS
+--------------------------------------------------------------------------------
+| upstash/context7             | https://github.com/upstash/context7             | 58217⭐ |
+| tirth8205/code-review-graph  | https://github.com/tirth8205/code-review-graph  | 18961⭐ |
+| volcengine/OpenViking        | https://github.com/volcengine/OpenViking        | 26121⭐ |
+
+
+================================================================================
+III. CÁC HƯỚNG NGHIÊN CỨU CHÍNH
+================================================================================
+
+1. TRAINING-FREE KV EVICTION
+   SnapKV, PyramidKV, CompressKV, InfoKV, FastGen, H2O, StreamingLLM,
+   EntropyInfer, ReasonAlloc, AnchorKV, GRKV, ClusterKV, HeteroCache
+
+2. KV QUANTIZATION
+   TurboQuant, HyperQuant, GEAR, PolarQuant, OCTOPUS, NexusQuant
+
+3. PROMPT PRUNING / COMPRESSION
+   LLMLingua, LongLLMLingua, CORE, DiffuMask, K-Token Merging, SPSD,
+   ReSum, Selective Context
+
+4. LATENT-SPACE COMPRESSION
+   SeCo, STAR-KV, Gist tokens, ICAE, AutoCompressor, MMCompressor
+
+5. AGENT CONTEXT MANAGEMENT
+   AGORA, PACMS, RaMem, ContextWeaver, Context Codec, TriMem,
+   Plans Don't Persist, Relink, Agent Capsules
+
+6. SERVING SYSTEM OPTIMIZATION
+   RocketKV, Dustin, Tangram, RedKnot, FlashMemory, QCFuse, vllm-kvcompress
+
+7. SEMANTIC & MEMORY HIERARCHY
+   H2MT, Context Codec, CompressKV, AVOC, SproutRAG
+
+8. MULTI-MODAL / AUDIO-VIDEO COMPRESSION
+   AVOC, OmniMem, ViCoStream, UniReTaKe, Unlimited OCR
+
+
+================================================================================
+IV. CÁC BENCHMARK PHỔ BIẾN DÙNG ĐỂ ĐÁNH GIÁ
+================================================================================
+
+- LongBench (QA, summarization, few-shot)
+- Needle-in-a-Haystack (retrieval trong long context)
+- RULER (retrieval tasks)
+- LongBench-v2 (agentic tasks)
+- MATH-500 / AIME 2024 (math reasoning)
+- GSM8K / BBH (reasoning)
+- SWE-Bench Verified & Lite (coding agents)
+- PG-19 / NarrativeQA (long document)
+- HotpotQA / QASPER (multi-hop QA)
+- ALFWorld (agent tasks)
+- LoCoMo / PerLTQA (agent long-term memory)
+- VideoMME Long / LVBench / LVOmniBench / OmniVideoBench (video)
+- LongMemEval (memory tasks)
+- HumanEval / MBPP (code generation)
+- MMLU (knowledge)
+
+
+================================================================================
+V. MỘT SỐ KEY INSIGHTS ĐÁNG LƯU Ý
+================================================================================
+
+1. Attention không phải là tín hiệu duy nhất: nhiều paper gần đây (InfoKV,
+   CompressKV, EntropyInfer) đã chỉ ra rằng attention scores không đủ để
+   xác định token quan trọng. Cần kết hợp information-theoretic signals,
+   semantic signals, và query-relevant signals.
+
+2. Head-level heterogeneity: các attention head có functional roles khác nhau.
+   GQA-based LLMs có head-wise budget allocation tốt hơn uniform allocation.
+
+3. Compression có thể gây security vulnerabilities (Relink, AnchorKV).
+
+4. Compression không luôn đồng nghĩa với energy saving (The Compression Paradox).
+
+5. Multi-turn / agent scenarios đặc biệt nhạy cảm với compression vì
+   task-critical information (plans, action tokens) dễ bị evict.
+
+6. Training-free methods đang thống trị vì không cần fine-tuning.
+
+7. Quantization-based (TurboQuant, HyperQuant) đạt near-lossless quality
+   tại extreme compression ratios.
+
+8. Xu hướng kết hợp nhiều kỹ thuật: eviction + merging + quantization.
+
+9. "Compression is intelligence" - small initialization đóng vai trò
+   quan trọng trong quá trình huấn luyện LLM.
+
+10. Lựa chọn benchmark rất quan trọng: multiple-choice có thể overstate
+    usability của compressed models.
+
+
+================================================================================
+VI. MÔ TẢ CHI TIẾT CÁC HƯỚNG NGHIÊN CỨU CHÍNH
+================================================================================
+
+
+1. TRAINING-FREE KV EVICTION
+   (SnapKV, PyramidKV, CompressKV, InfoKV, FastGen, H2O, StreamingLLM, EntropyInfer,
+    ReasonAlloc, AnchorKV, GRKV, ClusterKV, HeteroCache)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   Khi xử lý long context (hàng chục đến hàng trăm nghìn token), KV cache phát sinh
+   từ self-attention chiếm dụng GPU memory rất lớn, gấp nhiều lần trọng số mô hình.
+   Ví dụ: với context 128K tokens trên Llama-2-7B, KV cache chiếm ~64GB VRAM.
+   Điều này là bottleneck chính cho việc serving long-context LLMs.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   Thay vì giữ toàn bộ KV cache của tất cả token, các phương pháp này chọn lọc chỉ
+   giữ lại KV của những token "quan trọng nhất". Việc chọn lọc hoàn toàn dựa trên
+   feature/pattern từ chính model đã được pre-trained, không cần train thêm
+   (training-free). Các tiêu chí chọn lọc chính bao gồm:
+
+   a) Attention-score-based: Giữ token có cumulative attention score cao.
+      - H2O: dùng attention score tích lũy, giữ "heavy hitters" + local tokens.
+      - StreamingLLM: phát hiện "attention sink" — một vài token đầu luôn có
+        attention cao bất kể nội dung, giữ chúng + recent tokens.
+
+   b) Pattern-based: Quan sát pattern attention của model để dự đoán token quan trọng.
+      - SnapKV: dùng "observation window" ở cuối prompt để tìm pattern,
+        chọn clustered KV positions cho mỗi head.
+      - FastGen: adaptive per-head compression policy dựa trên behavior head.
+
+   c) Budget-aware: Phân bổ ngân sách KV cache không đồng đều giữa các layer.
+      - PyramidKV: budget giảm dần theo layer depth (pyramid shape).
+      - ReasonAlloc: "Reasoning Wave" pattern, hai cấp: offline layer-wise +
+        online head-wise allocation.
+
+   d) Semantic/information-aware: Kết hợp tín hiệu ngữ nghĩa để chọn token.
+      - CompressKV: xác định Semantic Retrieval Heads (SRHs) — chỉ dùng một số head
+        đặc biệt để chọn token quan trọng. Giữ 97% perf với 3% KV cache.
+      - InfoKV: Forward Influence metric + entropy-aware, kết hợp
+        information-theoretic signals với attention scores.
+      - EntropyInfer: phân loại Rigid Heads vs Dynamic Heads dựa trên entropy.
+
+   e) Safety-aware:
+      - AnchorKV: bias retention scores tránh harmful directions, chống jailbreak.
+
+   f) Merging-based (thay vì eviction):
+      - GRKV: dùng ridge regression để phân phối thông tin từ evicted tokens vào
+        retained tokens, giảm mất mát thông tin.
+
+   g) Retrieval-based:
+      - ClusterKV: phân cụm KV trong semantic space, nén recallable.
+      - HeteroCache: dynamic retrieval approach cho heterogeneous compression.
+
+   Ưu điểm: Không cần training/fine-tuning, áp dụng được ngay với model có sẵn.
+   Nhược điểm: Có thể mất thông tin quan trọng nếu tiêu chí chọn không chính xác,
+               đặc biệt trong multi-turn và agent scenarios.
+
+
+2. KV QUANTIZATION
+   (TurboQuant, HyperQuant, GEAR, PolarQuant, OCTOPUS, NexusQuant)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   KV cache được lưu ở dạng float16 hoặc bfloat16, chiếm bộ nhớ lớn. Quantization
+   (lượng tử hóa) giảm số bit biểu diễn mỗi phần tử KV cache (từ 16-bit xuống
+   2-4 bit), giúp giảm dung lượng bộ nhớ mà vẫn giữ được chất lượng gần như
+   không đổi.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Scalar quantization:
+      - TurboQuant (Google, ICLR 2026): áp dụng các kỹ thuật như Hadamard
+        transform để làm phân phối values đồng đều hơn trước khi quantize.
+        Đạt 5x compression ở 3-bit, 99.5% attention fidelity.
+      - PolarQuant: dual compression K+V, 73-99% VRAM savings.
+
+   b) Lattice-based quantization:
+      - HyperQuant: dùng optimal lattice (E8, D4, A2, Z) thay vì uniform grid.
+        Kết hợp Randomized Hadamard Transform + Rice coding.
+        Compress weights 3.9x + KV cache 3.79x near-lossless.
+      - NexusQuant: E8 lattice quantization, training-free.
+
+   c) Hybrid (quantization + decomposition):
+      - GEAR: kết hợp quantization với sparse matrix decomposition.
+      - STAR-KV: kết hợp low-rank decomposition với mixed-precision quantization.
+        Lên đến 20x overall KV cache reduction.
+
+   d) Low-bit extremes:
+      - OCTOPUS: nghiên cứu low-bit quantization cho KV cache.
+      - Turbo1bit: kết hợp 1-bit weights + TurboQuant KV compression.
+
+   Ưu điểm: Near-lossless quality, giảm memory rất mạnh (3-20x).
+   Nhược điểm: Cần custom kernels để đạt tốc độ decode thực tế, một số phương pháp
+               cần calibration data.
+
+
+3. PROMPT PRUNING / COMPRESSION
+   (LLMLingua, LongLLMLingua, CORE, DiffuMask, K-Token Merging, SPSD, ReSum,
+    Selective Context, Chonkify, TokenPack)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   Prompt ngày càng dài do CoT (Chain-of-Thought), ICL (In-Context Learning),
+   RAG (Retrieval-Augmented Generation). Prompt dài làm tăng chi phí prefill
+   (O(n^2) với self-attention), tăng latency, và tăng token cost (với API-based LLMs).
+   Tuy nhiên, phần lớn nội dung trong prompt là redundant hoặc ít liên quan đến query.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Extractive compression (loại bỏ token/câu không quan trọng):
+      - LLMLingua (Microsoft, EMNLP 2023): coarse-to-fine, budget controller
+        kiểm soát semantic integrity, token-level iterative compression.
+        Nén đến 20x, ít mất performance.
+      - LongLLMLingua (ACL 2024): cải tiến cho long-context scenarios.
+      - Selective Context: chọn lọc context dựa trên relevance.
+      - CORE: sentence-level compression không cần SLM, nhắm edge devices.
+      - SPSD: nén prompt trên edge trước khi gửi cloud, loại bỏ "social scaffolding"
+        (politeness markers, apologetic preamble...).
+      - Chonkify: extractive document compression, +69% vs LLMLingua.
+
+   b) Generative/abstractive compression:
+      - ReSum: model tự summarize reasoning trajectory qua RL.
+      - DiffuMask: diffusion-based parallel token pruning.
+
+   c) Latent merging:
+      - K-Token Merging: gộp K token embeddings thành 1 trong latent space.
+
+   d) Lossless / dictionary-based:
+      - Lossless Prompt Compression: dictionary-encoding, LLM học encoding keys
+        in-context, không cần fine-tuning. Nén đến 80%.
+
+   e) Agent-specific:
+      - AGORA: step-level (không phải token-level) compression cho agents.
+        Token-level compressors phá hủy "action-grammar" của agents.
+
+   Ưu điểm: Giảm trực tiếp token count và chi phí API/prefill.
+   Nhược điểm: Có thể làm mất thông tin quan trọng, cần balance compression ratio
+               vs task performance. Đặc biệt nguy hiểm với agent tasks.
+
+
+4. LATENT-SPACE COMPRESSION
+   (SeCo, STAR-KV, Gist tokens, ICAE, AutoCompressor, MMCompressor)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   Các phương pháp compression trong token space (xóa token) có giới hạn: mỗi token
+   bị xóa là mất vĩnh viễn thông tin. Latent-space compression giải quyết vấn đề này
+   bằng cách nén thông tin vào continuous embeddings thay vì xóa token rời rạc.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Soft prompt / memory tokens:
+      - Gist tokens (ICLR 2024): huấn luyện model nén context vào một tập "gist tokens"
+        đặc biệt, sau đó dùng các token này thay cho context gốc.
+      - ICAE (In-context Autoencoder): autoencoder nén context thành memory tokens.
+      - AutoCompressor: nén document thành summary tokens qua recursive compression.
+      - MMCompressor: nén multi-modal content (text, image, video) vào memory tokens
+        trong KV cache.
+
+   b) Semantic-space compression:
+      - SeCo: thay vì nhóm token theo vị trí vật lý (position-driven), chọn
+        "semantic centers" dựa trên query relevance và gộp token xung quanh
+        bằng consistency-weighted merging.
+
+   c) Low-rank latent compression:
+      - STAR-KV: adaptive low-rank projection trong hidden dimension space.
+        Soft thresholding để chọn rank tối ưu cho từng head và block.
+
+   d) Cross-modal latent compression:
+      - AVOC: nén multi-modal token thành compact representation dùng
+        retrieval-inspired criteria (relevance, importance, diversity).
+
+   Ưu điểm: Bảo toàn thông tin tốt hơn extractive methods, linh hoạt hơn.
+   Nhược điểm: Thường cần training/fine-tuning model; soft tokens khó interpret
+               và debug; alignment giữa compressed representation và LLM decoder.
+
+
+5. AGENT CONTEXT MANAGEMENT
+   (AGORA, PACMS, RaMem, ContextWeaver, Context Codec, TriMem, Plans Don't Persist,
+    Relink, Agent Capsules)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   LLM agents hoạt động qua nhiều turn, tích lũy lượng lớn context từ:
+   - Lịch sử hội thoại (conversation turns)
+   - Kết quả tool calls (API responses, file reads, search results)
+   - Memory entries (facts, preferences, plans)
+   - System prompts và instructions
+
+   Khác với single-turn QA, agent context có cấu trúc đặc biệt:
+   - Plan/thông tin được viết sớm nhưng cần dùng xuyên suốt nhiều bước.
+   - Action tokens (identifiers, brackets) dễ bị token-level compressors xóa.
+   - Thông tin phân tán qua nhiều turn, cần dependency tracking.
+   - Context management là "load-bearing" — nếu xóa sai, agent fail thảm hại.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Step-level (thay vì token-level):
+      - AGORA: structural prompt parser + always-keep floor cho format-critical
+        content + 125M learned relevance scorer. Giữ >=75% uncompressed perf.
+
+   b) Dependency-tracking:
+      - ContextWeaver: tổ chức interaction trace thành graph, link steps theo
+        causal dependency. Compact dependency summarization.
+      - Plans Don't Persist (2026): chứng minh plan signal suy giảm nhanh sau khi
+        viết, agents phụ thuộc vào plan trong context. Đề xuất probe-gated
+        re-surfacing.
+
+   c) Memory retrieval & reinstatement:
+      - RaMem: 4-stage framework — evidence anchoring, recall condition induction,
+        validity-aware retrieval, context-preserved synthesis.
+      - PACMS: submodular optimization chọn subset từ memory + conversation + tools.
+      - TriMem: 3 cấp granularity — raw dialogue, atomic facts, synthesized profiles.
+
+   d) Formal verification:
+      - Context Codec: commitment-level framework. Biểu diễn dialogue state thành
+        typed semantic atoms. Context Compression Language (CCL).
+        5 concerns: extraction → normalization → representation → rendering →
+        verification. Metrics: Critical Atom Recall, Commitment Density.
+
+   e) Security:
+      - Relink: phát hiện vulnerability khi compressor vô tình ghép các fragment
+        vô hại thành malicious instruction. KBRA defense.
+
+   f) Multi-agent coordination:
+      - Hallucination as Context Drift: Context Divergence Score (CDS) +
+        Shared State Verification Protocol (SSVP). Giảm hallucination do context
+        mismatch giữa các agent.
+
+   Ưu điểm: Xử lý được đặc thù của agent workloads, bảo toàn action-critical info.
+   Nhược điểm: Phức tạp hơn single-turn methods, có thể cần instrumentation của
+               agent framework.
+
+
+6. SERVING SYSTEM OPTIMIZATION
+   (RocketKV, Dustin, Tangram, RedKnot, FlashMemory, QCFuse, vllm-kvcompress, SCOPE,
+    FastKV, RepairKV, OmniMem, ViCoStream, SPECTRE, YouZhi, SubFit)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   Các thuật toán compression (training-free eviction, quantization...) là cần thiết
+   nhưng chưa đủ. Khi triển khai thực tế trên serving systems (vLLM, SGLang,
+   TensorRT-LLM), phát sinh nhiều vấn đề kỹ thuật:
+   - Page fragmentation: KV cache pages có kích thước cố định, non-uniform compression
+     gây lãng phí bộ nhớ do các head giữ số lượng token khác nhau.
+   - Scheduling: cần quyết định khi nào compress, compress bao nhiêu.
+   - Multi-turn: KV cache tích lũy qua nhiều turn, cần reuse hiệu quả.
+   - Distributed serving: KV cache phân tán qua nhiều GPU/nodes.
+   - Prefill vs decode trade-off: compress lúc prefill hay decode?
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Two-stage pipeline:
+      - RocketKV (NVlabs, ICML 2025): tách prefill compression và decode compression
+        thành 2 stage riêng, tối ưu từng stage.
+      - FastKV: decoupling context reduction & KV cache compression.
+
+   b) Non-uniform compression serving:
+      - Tangram: giải quyết vấn đề page fragmentation khi các head có budget khác
+        nhau. Budget Reservation (cố định footprint từ lúc schedule), Ragged Paging
+        (nhóm head cùng budget vào page tables riêng), Ahead-of-Time Load Balancing.
+        Triển khai trên vLLM, 2.6x throughput.
+      - RedKnot: decompose KV cache theo head, tạo "structured memory object".
+        Hỗ trợ KV reuse, prefix compression, hot/cold separation.
+
+   c) Sparse attention serving:
+      - Dustin (ICML 2026): sparse verification cho speculative decoding.
+        Giảm KV cache loading latency. 27.85x self-attention speedup, 9.17x
+        end-to-end tại 32k context.
+      - FlashMemory-DeepSeek-V4: Neural Memory Indexer, dự đoán trước context nào
+        cần. Chỉ giữ 13.5% KV cache, 500K context với >90% overhead reduction.
+
+   d) RAG-specific:
+      - QCFuse: compressed-view query-aware selector cho RAG cache fusion.
+        1.7x prefill speedup.
+
+   e) Multi-modal streaming:
+      - OmniMem (ByteDance): modality-aware memory allocation cho audio-visual LLMs.
+      - ViCoStream: stage-wise coordinated streaming, 134 FPS video throughput.
+
+   f) Post-compression repair:
+      - RepairKV (ICML 2026 AdaptFM): sửa lỗi sau khi nén KV cache.
+
+   g) Speculative decoding:
+      - SPECTRE: reuse tail-model làm remote drafters. Draft-side prompt compression.
+        2.28x speedup.
+
+   h) Architecture co-design:
+      - YouZhi: GQA-to-MLA transition framework, 2.69x concurrency, giảm KV cache.
+      - SubFit: submodule-level fitted residual replacement, vừa nén model vừa
+        giảm KV cache.
+
+   Ưu điểm: Giải quyết vấn đề thực tế trong production serving.
+   Nhược điểm: Phức tạp implementation, thường yêu cầu sửa đổi serving stack.
+
+
+7. SEMANTIC & MEMORY HIERARCHY
+   (H2MT, Context Codec, CompressKV, AVOC, SproutRAG)
+
+   Vấn đề cốt lõi:
+   --------------------------------------------------
+   Các phương pháp compression thông thường xử lý context như một chuỗi token phẳng
+   (flat sequence), bỏ qua cấu trúc ngữ nghĩa phân cấp của thông tin. Điều này dẫn đến:
+   - Mất coherence: thông tin bị cắt rời rạc, mất context xung quanh.
+   - Không tận dụng được cấu trúc tài liệu (mục lục, section, subsection).
+   - Compression không "hiểu" được semantic importance của các phần khác nhau.
+   - Khó đảm bảo các "commitments" (ràng buộc, quyết định) được bảo toàn.
+
+   Hướng giải quyết:
+   --------------------------------------------------
+   a) Hierarchical document structure:
+      - H2MT: xây dựng semantic hierarchy offline (dạng cây), mỗi node có memory
+        embedding qua bottom-up aggregation. Khi query, coarse-to-fine pruning
+        theo cây. Giảm peak GPU memory và TTFT.
+      - SproutRAG: attention-guided binary chunking tree. Sentence-level chunks
+        organized thành progressively larger semantically coherent units.
+        Hierarchical beam search retrieval.
+
+   b) Semantic retrieval heads:
+      - CompressKV: phát hiện một số attention head đặc biệt (Semantic Retrieval
+        Heads - SRHs) chuyên capture initial/final tokens và mid-context evidence
+        quan trọng về mặt ngữ nghĩa. Chỉ dùng SRHs để chọn token giữ lại.
+
+   c) Commitment-level compression:
+      - Context Codec: thay vì nén token, nén "commitments" — các ràng buộc ngữ
+        nghĩa như goals, constraints, decisions, preferences, safety boundaries.
+        Context Compression Language (CCL) — ASCII-first compact rendering.
+
+   d) Multi-modal semantic compression:
+      - AVOC: retrieval-inspired compression cho audio-video. Relevance,
+        importance, diversity criteria. SOTA trên OmniVideoBench, LVOmniBench.
+
+   e) Dependency structure:
+      - ContextWeaver: dependency-based construction và traversal. Link từng step
+        đến các step trước nó dựa vào. Compact dependency summarization.
+
+   Ưu điểm: Bảo toàn cấu trúc ngữ nghĩa và coherence tốt hơn flat methods.
+   Nhược điểm: Cần preprocessing/indexing offline (tăng storage), phức tạp hơn.
+               Khó áp dụng cho streaming/online scenarios.
+
+
+================================================================================
+TÓM LƯỢC SO SÁNH CÁC HƯỚNG
+================================================================================
+
+ Hướng               | Training | Compression | Áp dụng      | Mức độ
+                      | cần?     | ratio       | được ngay?   | phức tạp
+----------------------+----------+-------------+--------------+----------
+1. KV Eviction        | Không    | 2-30x       | Có           | Thấp-Trung bình
+2. KV Quantization    | Không*   | 3-20x       | Có*          | Trung bình
+3. Prompt Compression | Không/Có | 2-20x       | Có           | Thấp-Trung bình
+4. Latent Compression | Có       | 5-100x      | Không        | Cao
+5. Agent Management   | Không/Có | Task-specific| Có          | Cao
+6. Serving Systems    | Không    | 2-27x       | Kèm serving  | Rất cao
+7. Semantic Hierarchy | Có/Không | Task-specific| Không/Có    | Cao
+
+* Một số quantization methods cần calibration data/nhưng không cần gradient-based training.
+* Cần custom GPU kernels để đạt speedup thực tế.
+
+
+================================================================================
+Tổng hợp bởi: Thanthien | Ngày: 28/06/2026
+================================================================================
