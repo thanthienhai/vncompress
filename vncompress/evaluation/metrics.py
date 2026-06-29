@@ -28,7 +28,7 @@ Reference:
   - arxiv:2606.03618 "Cross-Lingual Token Arbitrage"
 """
 
-import torch
+from __future__ import annotations
 import time
 import json
 import os
@@ -36,7 +36,18 @@ from typing import List, Dict, Tuple, Optional, Any, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
 import numpy as np
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
+
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    torch = None
+    _HAS_TORCH = False
 
 
 # ============================================================================
@@ -480,13 +491,13 @@ class VCCBench:
                     if 'mean_efficiency_score' in metrics:
                         efficiency_scores.append(metrics['mean_efficiency_score'])
             
+            mq = np.mean(quality_scores) if quality_scores else 0
+            me = np.mean(efficiency_scores) if efficiency_scores else 0
             summary[method_name] = {
-                'avg_quality': np.mean(quality_scores) if quality_scores else 0,
-                'avg_efficiency': np.mean(efficiency_scores) if efficiency_scores else 0,
+                'avg_quality': mq,
+                'avg_efficiency': me,
                 'harmonized_score': (
-                    2 * np.mean(quality_scores) * np.mean(efficiency_scores) /
-                    (np.mean(quality_scores) + np.mean(efficiency_scores) + 1e-8)
-                    if quality_scores and efficiency_scores else 0
+                    2 * mq * me / (mq + me + 1e-8)
                 ),
             }
         

@@ -433,6 +433,6 @@ _default_analyzer: Optional[VietnameseToneAnalyzer] = None
 def get_tone_analyzer(**kwargs) -> VietnameseToneAnalyzer:
     """Get or create the default VietnameseToneAnalyzer instance."""
     global _default_analyzer
-    if _default_analyzer is None:
+    if _default_analyzer is None or kwargs:
         _default_analyzer = VietnameseToneAnalyzer(**kwargs)
     return _default_analyzer

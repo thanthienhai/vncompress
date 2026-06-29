@@ -70,7 +70,7 @@ def detect_gpu() -> dict:
     
     # VRAM detection
     props = torch.cuda.get_device_properties(0)
-    info['vram_gb'] = props.total_mem / (1024**3)
+    info['vram_gb'] = props.total_memory / (1024**3)
     
     # Detect environment
     if 'COLAB_GPU' in os.environ:
@@ -130,7 +130,7 @@ def load_model_4bit(
     
     print(f"[LIGHTWEIGHT] Loading {model_name} in INT4...")
     print(f"  GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
-    print(f"  VRAM: {torch.cuda.get_device_properties(0).total_mem/(1024**3):.1f} GB" if torch.cuda.is_available() else "")
+    print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory/(1024**3):.1f} GB" if torch.cuda.is_available() else "")
     
     # INT4 config
     bnb_config = BitsAndBytesConfig(
@@ -152,12 +152,13 @@ def load_model_4bit(
     if max_memory:
         model_kwargs['max_memory'] = max_memory
     
-    # Flash Attention 2 (optional, requires compatible GPU)
+    # Flash Attention 2 (optional, requires compatible GPU + flash-attn package)
     if use_flash_attention:
         try:
+            import flash_attn
             model_kwargs['attn_implementation'] = 'flash_attention_2'
             print("  Flash Attention 2 enabled")
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             print("  Flash Attention 2 not available, using default")
     
     # Load tokenizer
@@ -179,7 +180,7 @@ def load_model_4bit(
         allocated = torch.cuda.memory_allocated(0) / (1024**3)
         reserved = torch.cuda.memory_reserved(0) / (1024**3)
         print(f"  GPU memory: {allocated:.1f} GB allocated, {reserved:.1f} GB reserved")
-        print(f"  Free: {(torch.cuda.get_device_properties(0).total_mem/(1024**3) - reserved):.1f} GB")
+        print(f"  Free: {(torch.cuda.get_device_properties(0).total_memory/(1024**3) - reserved):.1f} GB")
     
     return model, tokenizer
 
@@ -199,6 +200,7 @@ def load_model_8bit(
         quantization_config=bnb_config,
         device_map=device_map,
         trust_remote_code=trust_remote_code,
+        torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
     )
     
@@ -291,7 +293,7 @@ def get_vram_info() -> dict:
     
     alloc = torch.cuda.memory_allocated(0) / (1024**3)
     reserv = torch.cuda.memory_reserved(0) / (1024**3)
-    total = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+    total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     
     return {
         'allocated_gb': round(alloc, 2),

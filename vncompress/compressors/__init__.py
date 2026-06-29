@@ -51,15 +51,9 @@ except ImportError:
     create_tiny_scorer = None
     TINY_MODEL_IDS = {}
 
-# Lazy imports for torch-dependent compressors
+# Lazy imports for torch-dependent compressors — NOT pre-assigned here
+# so that __getattr__ triggers on first access.
 _compressors_loaded = False
-BaseCompressor = CompressionResult = CompressionConfig = None
-NoCompressor = RandomCompressor = None
-LLMLinguaCompressor = LLMLinguaWithSmallModel = None
-SnapKVCompressor = SelectiveContextCompressor = None
-ToneAwareCompressor = MorphologyAwareCompressor = CombinedCompressor = None
-COMPRESSOR_REGISTRY = {}
-create_compressor = None
 
 def _ensure_compressors():
     global _compressors_loaded, BaseCompressor, CompressionResult, CompressionConfig
@@ -142,7 +136,8 @@ def __getattr__(name):
     if name in (
         'BaseCompressor', 'CompressionResult', 'CompressionConfig',
         'NoCompressor', 'RandomCompressor',
-        'LLMLinguaCompressor', 'SnapKVCompressor',
+        'LLMLinguaCompressor', 'LLMLinguaWithSmallModel',
+        'SnapKVCompressor', 'SelectiveContextCompressor',
         'ToneAwareCompressor', 'MorphologyAwareCompressor', 'CombinedCompressor',
         'COMPRESSOR_REGISTRY', 'create_compressor',
     ):
@@ -162,7 +157,8 @@ __all__ = [
     # Torch-dependent (lazy load via _ensure_compressors())
     "BaseCompressor", "CompressionResult", "CompressionConfig",
     "NoCompressor", "RandomCompressor",
-    "LLMLinguaCompressor", "SnapKVCompressor",
+    "LLMLinguaCompressor", "LLMLinguaWithSmallModel",
+    "SnapKVCompressor", "SelectiveContextCompressor",
     "ToneAwareCompressor", "MorphologyAwareCompressor", "CombinedCompressor",
     "COMPRESSOR_REGISTRY", "create_compressor",
 ]

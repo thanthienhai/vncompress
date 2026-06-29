@@ -408,7 +408,7 @@ def evaluate_no_model(
     for name, comp in compressors.items():
         result = comp.compress(input_ids, target_ratio)
         results[name] = result
-        print(f"  {name:25s}: {result.original_length:>5d} → "
+        print(f"  {name:25s}: {result.original_length:>5d} -> "
               f"{result.compressed_length:>5d} tokens "
               f"({result.compression_ratio:.1f}x, {result.token_savings_pct:.0f}% saved) "
               f"in {result.processing_time_ms:.1f}ms")

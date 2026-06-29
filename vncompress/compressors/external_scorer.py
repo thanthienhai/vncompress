@@ -383,7 +383,7 @@ class VRAMManager:
             return {'used_gb': 0, 'free_gb': 0, 'total_gb': 0}
         import torch
         used = torch.cuda.memory_allocated(0) / (1024**3)
-        total = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         return {
             'used_gb': round(used, 2),
             'free_gb': round(total - used, 2),
@@ -556,7 +556,6 @@ class EnhancedCompressor:
         if self.scorer is not None and self.weights.perplexity > 0:
             ppl_scores = self.scorer.compute_perplexity_scores(input_ids)
         else:
-            import torch
             ppl_scores = torch.ones(n) * 0.5  # Neutral
         
         # 2. Tone scores (always available, CPU)

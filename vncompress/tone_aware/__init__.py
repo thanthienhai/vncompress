@@ -22,13 +22,9 @@ from .vietnamese_tones import (
     get_tone_analyzer,
 )
 
-# Lazy import for torch-dependent classes
+# Lazy import for torch-dependent classes — NOT pre-assigned here
+# so that __getattr__ triggers on first access.
 _tone_scoring_available = False
-ToneAwareConfig = None
-ToneAwareScorer = None
-ToneEmbeddingAugmentation = None
-PhonologicalConsistencyLoss = None
-ToneAugmentedTrainer = None
 
 def _ensure_tone_scoring():
     global ToneAwareConfig, ToneAwareScorer, ToneEmbeddingAugmentation
@@ -48,6 +44,15 @@ def _ensure_tone_scoring():
         ToneAugmentedTrainer = _TAT
         _tone_scoring_available = True
 
+def __getattr__(name):
+    if name in (
+        'ToneAwareConfig', 'ToneAwareScorer', 'ToneEmbeddingAugmentation',
+        'PhonologicalConsistencyLoss', 'ToneAugmentedTrainer',
+    ):
+        _ensure_tone_scoring()
+        return globals()[name]
+    raise AttributeError(f"module 'vncompress.tone_aware' has no attribute '{name}'")
+
 __all__ = [
     "VietnameseToneAnalyzer",
     "ToneInfo",
@@ -59,4 +64,9 @@ __all__ = [
     "strip_tone",
     "extract_tone_marks",
     "get_tone_analyzer",
+    "ToneAwareConfig",
+    "ToneAwareScorer",
+    "ToneEmbeddingAugmentation",
+    "PhonologicalConsistencyLoss",
+    "ToneAugmentedTrainer",
 ]

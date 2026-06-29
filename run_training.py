@@ -43,7 +43,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vncompress.tone_aware import (
     VietnameseToneAnalyzer,

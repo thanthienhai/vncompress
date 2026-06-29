@@ -216,42 +216,34 @@ class MorphologyAnalyzer:
         Classify a token into Vietnamese word class.
 
         Priority:
-          1. Check reduplicative with original underscore
-          2. Function word dictionary match
-          3. Reduplicative pattern match (after cleaning)
-          4. Compound detection (has underscore)
-          5. Heuristic: short + no meaning → likely function
-          6. Default: content word
+          1. Function word dictionary match
+          2. Reduplicative pattern match
+          3. Compound detection (has underscore)
+          4. Heuristic: short + no meaning → likely other
+          5. Default: content word
         """
         token_lower = token.strip().lower()
-        token_clean = token_lower.replace('_', ' ')
+
+        # Check function word dictionary
+        if token_lower in self.function_words:
+            return WordClass.FUNC
 
         # Check reduplicative in original form (with underscore)
         if token_lower in self.redup_pairs:
             return WordClass.REDUP
-        
-        # Check function word dictionary (with spaces from underscores)
-        if token_clean in self.function_words or token_lower in self.function_words:
-            return WordClass.FUNC
-        
-        # Check reduplicative patterns after cleaning
-        if token_clean in self.redup_pairs:
-            return WordClass.REDUP
-        
-        # Check individual words in compound-like tokens
+
+        # Check compound-like tokens
         if '_' in token_lower:
-            # Has underscore → likely compound or reduplicative
             parts = token_lower.split('_')
-            # Check if any part is a reduplicative partner
             for part in parts:
                 if part in self.redup_pairs:
                     return WordClass.REDUP
             return WordClass.COMPOUND
-        
+
         # Heuristics for unknown words
         if len(token_lower) <= 2 and token_lower.isalpha():
             return WordClass.OTHER
-        
+
         # Default: content word
         return WordClass.CONTENT
 

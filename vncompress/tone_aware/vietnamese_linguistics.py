@@ -530,25 +530,24 @@ for morph1 in SINO_VIETNAMESE_MORPHEMES:
                 SINO_VIETNAMESE_COMPOUNDS.add(compound)
 
 # 3d. CRITICAL PATTERNS (must never be compressed)
-import re as _re
 
 CRITICAL_PATTERNS = {
-    'numbers': _re.compile(
+    'numbers': re.compile(
         r'\d+[\.,\d]*\s*(?:tỷ|triệu|nghìn|ngàn|trăm|đồng|USD|VND|%|phần_trăm)?',
-        _re.IGNORECASE
+        re.IGNORECASE
     ),
-    'dates': _re.compile(
+    'dates': re.compile(
         r'\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}',
     ),
-    'proper_names': _re.compile(
+    'proper_names': re.compile(
         r'[A-ZĐ][a-zàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]+(?:\s+[A-ZĐ][a-zà-ỹ]+)*',
     ),
-    'legal_refs': _re.compile(
+    'legal_refs': re.compile(
         r'(?:Điều|Khoản|Mục|Chương|Phần)\s+\d+',
-        _re.IGNORECASE
+        re.IGNORECASE
     ),
-    'emails': _re.compile(r'[\w\.-]+@[\w\.-]+\.\w+'),
-    'urls': _re.compile(r'https?://[^\s]+'),
+    'emails': re.compile(r'[\w\.-]+@[\w\.-]+\.\w+'),
+    'urls': re.compile(r'https?://[^\s]+'),
 }
 
 

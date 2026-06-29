@@ -206,8 +206,9 @@ class SnapKVCompressor(BaseCompressor):
         # First 4 tokens = attention sinks (very high importance)
         importance[0, :4] = 1.0
         # Recent tokens (last window)
-        window = min(self.window_size, n_tokens)
-        importance[0, -window:] = 0.8
+        window = min(self.window_size, n_tokens - 4)
+        if window > 0:
+            importance[0, -window:] = 0.8
         # Middle tokens: low importance
         middle_start, middle_end = 4, n_tokens - window
         if middle_start < middle_end:
@@ -314,7 +315,8 @@ class SnapKVCompressor(BaseCompressor):
         compressed_ids = [input_ids[i] for i in keep_indices]
         
         # Estimate memory saved
-        bytes_per_kv = 2 * num_heads * 128 * 2  # 2(K+V) × heads × head_dim × bytes_per_elem
+        head_dim = self.model.config.hidden_size // self.model.config.num_attention_heads
+        bytes_per_kv = 2 * num_heads * head_dim * 2  # 2(K+V) × heads × head_dim × bytes_per_elem
         kv_memory_saved = (n - len(compressed_ids)) * bytes_per_kv
         
         elapsed = (time.time() - start) * 1000

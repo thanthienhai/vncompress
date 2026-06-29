@@ -360,7 +360,7 @@ def main():
     tokens = []
     for tid in sample_ids[:20]:
         t = tokenizer.decode([tid])
-        t = t.replace('\u2581', ' ').replace('\u0130', ' ').strip()
+        t = t.replace('\u2581', ' ').replace('Ġ', ' ').strip()
         tokens.append(t)
     
     tone_infos = tone_analyzer.analyze_tokens(tokens)

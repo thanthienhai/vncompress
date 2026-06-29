@@ -25,7 +25,7 @@ import time
 import torch
 
 # Add parent to path for local imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vncompress.evaluation import (
     VCCBench, VCCBenchConfig, VCCBenchSample,
@@ -355,8 +355,8 @@ def quick_demo(model_name: str = 'Qwen/Qwen2.5-7B-Instruct', device: str = 'cuda
         print(f"  Compression: {metric.compression_ratio:.1f}x")
         print(f"  Token savings: {metric.token_savings_pct:.1f}%")
         print(f"  Processing: {metric.processing_time_ms:.1f}ms")
-        print(f"  ROUGE-L F1: {metric.rouge_l_f1:.4f}" if metric.rouge_l_f1 else "  ROUGE-L: N/A")
-        print(f"  BLEU: {metric.bleu_score:.4f}" if metric.bleu_score else "  BLEU: N/A")
+        print(f"  ROUGE-L F1: {metric.rouge_l_f1:.4f}" if metric.rouge_l_f1 is not None else "  ROUGE-L: N/A")
+        print(f"  BLEU: {metric.bleu_score:.4f}" if metric.bleu_score is not None else "  BLEU: N/A")
         print(f"  Quality: {metric.quality_score:.4f}")
         print(f"  Efficiency: {metric.efficiency_score:.4f}")
 
@@ -418,7 +418,13 @@ def main():
         return
     
     methods = args.methods.split(',') if args.methods else None
-    ratios = [float(r) for r in args.ratios.split(',')] if args.ratios else None
+    ratios = None
+    if args.ratios:
+        try:
+            ratios = [float(r) for r in args.ratios.split(',')]
+        except ValueError:
+            parser.error(f"Invalid compression ratios: '{args.ratios}'. "
+                         "Use comma-separated numbers, e.g. --ratios 2,4,8")
     
     run_benchmark(
         model_name=args.model,
