@@ -401,6 +401,13 @@ def main():
     # ================================================================
     # STEP 5: Generation (GPU needed)
     # ================================================================
+    all_results = {
+        'hardware': hw,
+        'mode': args.mode,
+        'model': args.model,
+        'compression': compression_results,
+    }
+
     if args.skip_generation or args.mode == 'cpu_only':
         print(f"\n{'='*70}")
         print(f"  STEP 4: SKIPPED (--skip-generation / cpu_only)")

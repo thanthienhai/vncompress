@@ -68,25 +68,32 @@ def _ensure_compressors():
     global SnapKVCompressor, SelectiveContextCompressor
     global ToneAwareCompressor, MorphologyAwareCompressor, CombinedCompressor
     global COMPRESSOR_REGISTRY, create_compressor
-    
+
     if _compressors_loaded:
         return
-    
-    from .base import (
-        BaseCompressor as _BC, CompressionResult as _CR, CompressionConfig as _CC,
-        NoCompressor as _NC, RandomCompressor as _RC,
-    )
-    from .llmlingua import (
-        LLMLinguaCompressor as _LL, LLMLinguaWithSmallModel as _LLS,
-    )
-    from .snapkv import (
-        SnapKVCompressor as _SKV, SelectiveContextCompressor as _SCC,
-    )
-    from .tone_aware import (
-        ToneAwareCompressor as _TAC, MorphologyAwareCompressor as _MAC,
-        CombinedCompressor as _CCB,
-    )
-    
+
+    try:
+        from .base import (
+            BaseCompressor as _BC, CompressionResult as _CR, CompressionConfig as _CC,
+            NoCompressor as _NC, RandomCompressor as _RC,
+        )
+        from .llmlingua import (
+            LLMLinguaCompressor as _LL, LLMLinguaWithSmallModel as _LLS,
+        )
+        from .snapkv import (
+            SnapKVCompressor as _SKV, SelectiveContextCompressor as _SCC,
+        )
+        from .tone_aware import (
+            ToneAwareCompressor as _TAC, MorphologyAwareCompressor as _MAC,
+            CombinedCompressor as _CCB,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "Cannot load torch-dependent compressors. "
+            "Install torch + transformers or use no_model compressors only. "
+            f"Original error: {e}"
+        )
+
     BaseCompressor = _BC
     CompressionResult = _CR
     CompressionConfig = _CC
@@ -99,7 +106,7 @@ def _ensure_compressors():
     ToneAwareCompressor = _TAC
     MorphologyAwareCompressor = _MAC
     CombinedCompressor = _CCB
-    
+
     COMPRESSOR_REGISTRY = {
         'none': NoCompressor,
         'random': RandomCompressor,
@@ -111,7 +118,7 @@ def _ensure_compressors():
         'morphology_aware': MorphologyAwareCompressor,
         'combined': CombinedCompressor,
     }
-    
+
     def _create_compressor(method, tokenizer, model=None, config=None, device='cuda', **kwargs):
         if method not in COMPRESSOR_REGISTRY:
             raise ValueError(f"Unknown method: {method}. Available: {list(COMPRESSOR_REGISTRY.keys())}")
@@ -126,9 +133,22 @@ def _ensure_compressors():
             return cls(tokenizer, model, config, device, **kwargs)
         else:
             return cls(tokenizer, model, config)
-    
+
     create_compressor = _create_compressor
     _compressors_loaded = True
+
+
+def __getattr__(name):
+    if name in (
+        'BaseCompressor', 'CompressionResult', 'CompressionConfig',
+        'NoCompressor', 'RandomCompressor',
+        'LLMLinguaCompressor', 'SnapKVCompressor',
+        'ToneAwareCompressor', 'MorphologyAwareCompressor', 'CombinedCompressor',
+        'COMPRESSOR_REGISTRY', 'create_compressor',
+    ):
+        _ensure_compressors()
+        return globals()[name]
+    raise AttributeError(f"module 'vncompress.compressors' has no attribute '{name}'")
 
 __all__ = [
     # No-model (always available)

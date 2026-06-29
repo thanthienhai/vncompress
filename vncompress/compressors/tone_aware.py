@@ -290,7 +290,6 @@ class ToneAwareCompressor(BaseCompressor):
         preserved_tones = 0
         compressed_tokens = self._decode_tokens(compressed)
         for ct in compressed_tokens:
-            preserved_tones += len(self.tone_analyzer.get_tone_sequence(ct))
             for t in self.tone_analyzer.get_tone_sequence(ct):
                 if t > 0:  # non-ngang
                     preserved_tones += 1

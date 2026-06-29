@@ -29,6 +29,7 @@ References:
 """
 
 import re
+import unicodedata
 from typing import List, Dict, Tuple, Optional, Set
 
 
@@ -94,7 +95,6 @@ for initial in _INITIALS:
         for tone_name, tone_mark in _TONE_MARKS.items():
             syllable = initial + rhyme + tone_mark
             # Normalize to NFC
-            import unicodedata
             syllable = unicodedata.normalize('NFC', syllable)
             VIETNAMESE_SYLLABLE_TONES[syllable] = tone_name
 
@@ -151,7 +151,6 @@ def get_syllable_tone(syllable: str) -> Optional[str]:
         return VIETNAMESE_SYLLABLE_TONES[syllable]
     
     # Try without diacritics (character-level fallback)
-    import unicodedata
     decomposed = unicodedata.normalize('NFD', syllable)
     for char in decomposed:
         if char in ['\u0300', '\u0301', '\u0303', '\u0309', '\u0323']:
