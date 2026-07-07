@@ -1,12 +1,66 @@
 # Cải tiến LACC từ Nghiên cứu Tiếng Việt
 
-**Ngày:** 28/06/2026
+**Ngày:** 06/07/2026 | **Cập nhật:** Triển khai pipeline training$\to$inference khép kín
 
 ---
 
 ## Tổng quan
 
-Qua khảo sát ~44 paper arXiv + 20 repo GitHub về NLP tiếng Việt, xác định **7 cải tiến** cho thuật toán LACC hiện tại:
+Qua khảo sát ~44 paper arXiv + 20 repo GitHub về NLP tiếng Việt, xác định **7 cải tiến** cho thuật toán LACC hiện tại. Các cải tiến đã được triển khai trong codebase tại:
+- `run_training.py` — training pipeline với PhonologicalConsistencyLoss
+- `vncompress/tone_aware/tone_scoring.py` — TonePreservationProbe, model-based scoring
+- `vncompress/morphology/merge_policy.py` — Sino-Vietnamese, phonetic reduplication
+- `vncompress/compressors/tone_aware.py` — Model-based tone scoring, SnapKV attention
+
+---
+
+## Cải tiến đã triển khai ✅
+
+### ✅ A. Pipeline Training→Inference khép kín (MỚI — 06/07/2026)
+
+**Vấn đề cũ:** Training với PhonologicalConsistencyLoss nhưng inference vẫn dùng rule-based text analysis → đứt gãy hoàn toàn.
+
+**Giải pháp đã implement:**
+```
+Training:  input_ids (compressed) → model → hidden_states
+                ↓                                  ↓
+           tone_labels (compressed)    PhonologicalConsistencyLoss (CE)
+                ↓                                  ↓
+           [model học mã hóa tone]    [tone_classifier trained]
+
+Inference: input_ids → model → hidden_states
+                              ↓
+                    tone_classifier.score_importance()
+                              ↓
+                    tone_weight × base_score = compression decision
+```
+
+**Files thay đổi:**
+- `run_training.py`: Sửa lỗi dimension mismatch (tone_labels giờ khớp với compressed positions)
+- `tone_scoring.py`: `PhonologicalConsistencyLoss` nhận `hidden_dim` từ đầu, MLP 3-layer, có `score_importance()` cho inference. `TonePreservationProbe` để đánh giá TPR.
+- `tone_aware.py`: `ToneAwareCompressor` có `use_model_tone=True` → dùng hidden states thay vì text analysis
+
+### ✅ B. Phonetic Reduplicative Detection (MỚI — 06/07/2026)
+
+**Vấn đề cũ:** Chỉ detect từ láy qua dictionary tĩnh (~80 cặp).
+
+**Giải pháp:** Thêm `_phonetic_similarity()` phân tích âm đầu (initial consonant) + vần (rhyme):
+```python
+sim(a, b) = 0.4 × [same initial] + 0.6 × [same rhyme]
+```
+Nếu sim ≥ 0.6 → coi là từ láy → merge.
+
+### ✅ C. Sino-Vietnamese Preservation (MỚI — 06/07/2026)
+
+Thêm lớp `WordClass.SINO` với `f_sino = 1.5` (ngang từ ghép), từ điển ~60 morpheme Hán-Việt phổ biến.
+
+### ✅ D. SnapKV-style Attention Importance (MỚI — 06/07/2026)
+
+`CombinedCompressor._compute_attention_importance()`: aggregate attention từ observation window → blend với tone/morph weights qua `attention_weight`.
+
+### ✅ E. TonePreservationRate thực sự (MỚI — 06/07/2026)
+
+`ToneAugmentedTrainer.compute_tone_preservation_rate()`: train probe classifier trên frozen hidden states → đo TPR accuracy (0-1). Không còn placeholder `return 0.0`.
 
 ---
 
@@ -209,13 +263,18 @@ def is_function_word_in_context(word: str, context: str) -> bool:
 |----------|--------|--------|-----------|------------|
 | 1. Word Segmentation | 🟢 Thấp | 🔴 Cao | 1 tuần | Chưa làm |
 | 2. Syllable-Level Tone | 🟢 Thấp | 🔴 Cao | 3 ngày | Chưa làm |
-| 3. Từ điển Mở rộng | 🟢 Thấp | 🟡 Trung bình | 2 ngày | Chưa làm |
+| 3. Từ điển Mở rộng | 🟢 Thấp | 🟡 Trung bình | 2 ngày | ✅ Đã làm |
 | 4. Frequency Weighting | 🟢 Thấp | 🟡 Trung bình | 1 ngày | Chưa làm |
 | 5. Critical Word Detection | 🟢 Thấp | 🟡 Trung bình | 2 ngày | Chưa làm |
 | 6. Semantic Similarity | 🟡 Trung bình | 🟢 Thấp | 1 tuần | Chưa làm |
 | 7. Context-Aware Detection | 🔴 Cao | 🟢 Thấp | 2 tuần | Chưa làm |
+| **A. Pipeline Training→Inference** | 🔴 Cao | 🔴 Rất cao | 3 ngày | ✅ Đã làm (06/07/2026) |
+| **B. Phonetic Reduplication** | 🟡 Trung bình | 🟡 Trung bình | 1 ngày | ✅ Đã làm (06/07/2026) |
+| **C. Sino-Vietnamese Class** | 🟢 Thấp | 🟡 Trung bình | 1 ngày | ✅ Đã làm (06/07/2026) |
+| **D. SnapKV Attention Blend** | 🟡 Trung bình | 🟡 Trung bình | 1 ngày | ✅ Đã làm (06/07/2026) |
+| **E. Real TonePreservationRate** | 🟡 Trung bình | 🔴 Cao | 1 ngày | ✅ Đã làm (06/07/2026) |
 
-**Khuyến nghị:** Làm 1→2→3→5→4 trước (impact cao, dễ làm), 6→7 sau (phức tạp hơn).
+**Khuyến nghị:** Làm 1→2→5→4 trước (impact cao, dễ làm), 6→7 sau (phức tạp hơn).
 
 ---
 

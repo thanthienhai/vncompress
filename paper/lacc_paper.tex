@@ -91,6 +91,7 @@ Tất cả các phương pháp trên đều \textbf{mù ngôn ngữ} --- chúng 
     \item \textbf{Tín hiệu thanh điệu} (\textit{Tone-Aware Scoring}): sử dụng ma trận tương phản 6 thanh điệu để tính trọng số bảo toàn cho từng token, ưu tiên giữ token có thanh điệu khác biệt với ngữ cảnh xung quanh.
     \item \textbf{Tín hiệu hình thái từ} (\textit{Morphology-Aware Scoring}): phân loại token thành 4 lớp (hư từ, thực từ, từ láy, từ ghép) và áp dụng chiến lược nén khác nhau cho từng lớp.
     \item \textbf{Kiến trúc module hóa}: cho phép vận hành ở ba mức độ phần cứng --- không cần GPU (chỉ tín hiệu ngôn ngữ), GPU hạn chế (thêm mô hình 135M), và đầy đủ (kết hợp INT4 7B).
+    \item \textbf{Huấn luyện end-to-end}: đề xuất \textit{Phonological Consistency Loss} --- một auxiliary loss huấn luyện mô hình dự đoán thanh điệu từ hidden states, tạo cầu nối trực tiếp giữa training và inference: mô hình học mã hóa tone trong quá trình huấn luyện, và chính classifier đó được dùng làm tone probe khi nén.
 \end{enumerate}
 
 Ngoài ra, chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đánh giá nén ngữ cảnh tiếng Việt đầu tiên với 5 tác vụ, và công bố mã nguồn mở toàn bộ khung thực nghiệm.
@@ -323,6 +324,95 @@ SmolLM2-135M-Instruct & 135M & $\sim$0.3 GB & Nhanh & Cơ bản \\
 SmolLM2-360M-Instruct & 360M & $\sim$0.7 GB & Nhanh & Cơ bản \\
 Qwen2.5-0.5B-Instruct & 500M & $\sim$0.5 GB & Trung bình & Tốt \\
 Qwen2.5-1.5B-Instruct & 1.5B & $\sim$1.0 GB & Chậm hơn & Tốt \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Tín hiệu Thanh điệu từ Mô hình (\textit{Model-Based Tone Scoring})}
+
+Ngoài tín hiệu thanh điệu dựa trên từ điển (rule-based), \method{LACC} còn hỗ trợ \textbf{model-based tone scoring}: sử dụng chính hidden states của mô hình đã được huấn luyện với \textit{Phonological Consistency Loss} để tính trọng số bảo toàn. Điều này tạo ra một pipeline khép kín:
+
+\begin{equation}\label{eq:model_tone_pipeline}
+    \text{Input} \to \text{Model} \to \text{Hidden States} \to \text{Tone Classifier} \to \text{Tone Scores}
+\end{equation}
+
+\subsubsection{Phonological Consistency Loss}
+
+Trong quá trình huấn luyện, một auxiliary loss được thêm vào:
+
+\begin{equation}\label{eq:phon_loss}
+    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{LM}} + \lambda_{\text{tone}} \cdot \mathcal{L}_{\text{tone}}
+\end{equation}
+
+\begin{equation}\label{eq:tone_loss}
+    \mathcal{L}_{\text{tone}} = \frac{1}{N} \sum_{i=1}^{N} \text{CE}\big(\text{MLP}(h_i),\; y_i^{\text{tone}}\big)
+\end{equation}
+
+trong đó $h_i$ là hidden state tại vị trí $i$, $y_i^{\text{tone}} \in \{0,\dots,6\}$ là nhãn thanh điệu của token tại vị trí $i$, và MLP là một classifier 3-layer (Linear $\to$ GELU $\to$ LayerNorm $\to$ Linear). \textbf{Quan trọng}: tone labels được tính trên \textit{vị trí token đã nén} (compressed positions), không phải trên toàn bộ văn bản gốc --- đảm bảo hidden states và tone labels có cùng sequence length, tránh lỗi dimension mismatch.
+
+\subsubsection{Tone Preservation Probe}
+
+Để đánh giá chất lượng bảo toàn thanh điệu, \method{LACC} sử dụng một \textbf{Tone Preservation Probe} --- một linear classifier độc lập huấn luyện nhanh (100--200 steps) trên frozen hidden states để đo tone prediction accuracy:
+
+\begin{equation}\label{eq:tpr}
+    \text{TPR} = \frac{|\{i : \hat{y}_i^{\text{tone}} = y_i^{\text{tone}}\}|}{|\{i : y_i^{\text{tone}} \neq \text{ignore}\}|}
+\end{equation}
+
+TPR càng cao chứng tỏ hidden states càng mã hóa tốt thông tin thanh điệu sau khi nén.
+
+\subsubsection{Inference: Từ Training đến Compression}
+
+Khi inference với \texttt{use\_model\_tone=True}, \method{LACC} không còn dùng rule-based text analysis nữa mà chạy model forward pass, lấy hidden states, và dùng chính \texttt{PhonologicalConsistencyLoss.score\_importance()} để tính tone-aware score:
+
+\begin{equation}\label{eq:model_score}
+    \score{}_{\text{tone-model}}(t_i) = 1.0 + \max_k \text{softmax}(\text{MLP}(h_i))_k
+\end{equation}
+
+Token có tone prediction confidence cao $\to$ model nắm rõ thanh điệu $\to$ nên giữ lại. Đây là cầu nối trực tiếp giữa training và inference mà các phương pháp trước đây còn thiếu.
+
+\subsection{Tín hiệu Attention (\textit{SnapKV-Style Importance})}
+
+\method{LACC} tích hợp tín hiệu attention pattern từ observation window (SnapKV~\cite{li2024snapkv}) vào \texttt{CombinedCompressor}:
+
+\begin{equation}\label{eq:attention_importance}
+    \text{attn\_imp}(t) = \frac{1}{L \cdot H \cdot |W|} \sum_{l=1}^{L} \sum_{h=1}^{H} \sum_{w \in W} \text{Attn}^{l,h}_{w, t}
+\end{equation}
+
+trong đó $W$ là observation window (64 token cuối prompt), $L$ là số layer, $H$ là số head. Tín hiệu attention được blend với tone và morphology weights qua tham số $w_{\text{attn}}$:
+
+\begin{equation}\label{eq:combined_v2}
+    \score{t} = (1 - w_a)\big[w_t \cdot \tilde{\score{}}_{\text{tone}} + (1-w_t) \cdot \tilde{\score{}}_{\text{morph}}\big] + w_a \cdot \tilde{\text{attn\_imp}}(t)
+\end{equation}
+
+\subsection{Cải tiến Hình thái học}
+
+\subsubsection{Phát hiện Từ láy bằng Ngữ âm}
+
+Ngoài dictionary matching, \method{LACC} còn phát hiện cặp từ láy qua \textbf{phonetic similarity}: phân tích âm đầu (initial consonant) và vần (rhyme) của hai âm tiết liền kề:
+
+\begin{equation}\label{eq:phonetic_sim}
+    \text{sim}(a, b) = 0.4 \cdot \mathbf{1}[\text{init}(a) = \text{init}(b)] + 0.6 \cdot \mathbf{1}[\text{rhyme}(a) = \text{rhyme}(b)]
+\end{equation}
+
+Nếu $\text{sim}(a, b) \geq 0.6$, cặp $(a, b)$ được coi là từ láy và được merge.
+
+\subsubsection{Phân loại Từ Hán-Việt (SINO)}
+
+Từ Hán-Việt chiếm tỉ lệ lớn trong văn bản học thuật và pháp luật tiếng Việt. \method{LACC} thêm lớp \texttt{SINO} với hệ số bảo toàn $f_{\text{sino}} = 1.5$ --- ngang với từ ghép, cao hơn thực từ thông thường ($1.2$). Bộ từ điển Hán-Việt gồm $\sim$60 morpheme phổ biến nhất (\viet{quốc}, \viet{gia}, \viet{chính}, \viet{phủ}, \viet{học}, \viet{sinh}\ldots).
+
+\begin{table}[H]
+\centering
+\caption{Năm lớp từ mở rộng và chiến lược nén.}
+\label{tab:word_classes_v2}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Lớp} & \textbf{Đặc điểm} & \textbf{Tỉ lệ} & \textbf{Hệ số} \\
+\midrule
+Hư từ (FUNC) & Ít thông tin ngữ nghĩa & $\sim$35\% & 0.40 \\
+Thực từ (CONTENT) & Mang nghĩa chính & $\sim$50\% & 1.20 \\
+Từ láy (REDUP) & Dư thừa ngữ âm, detect bằng phonetic sim & $\sim$5\% & 0.60 \\
+Từ ghép (COMPOUND) & Đơn vị ngữ nghĩa & $\sim$8\% & 1.50 \\
+Từ Hán-Việt (SINO) & Học thuật, pháp luật & $\sim$2\% & 1.50 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -753,6 +843,58 @@ N. Trukhina and V. Vashkelis.
 N. Ni and Y. Lao.
 \newblock ``AnchorKV: Safety-Aware KV Cache Compression via Soft Penalty.''
 \newblock \emph{arXiv:2606.17872}, 2026.
+
+% ── New Vietnamese NLP & Linguistics papers ────────────────────────
+
+\bibitem{dinh2026hutieubert}
+A. T. D. Dinh, K. H. N. Vo, T. T. Ta, V. C. Doan, and T. Quan.
+\newblock ``When Morphology Hides in Plain Sight: Breaking the Isolation in Vietnamese and Beyond.''
+\newblock In \emph{Proceedings of ACL}, pages 10377--10392, 2026.
+
+\bibitem{nguyen2023phogpt}
+D. Q. Nguyen, L. T. Nguyen, C.-K. Tran, D. N. Nguyen, D. Phung, and H. Bui.
+\newblock ``PhoGPT: Generative Pre-training for Vietnamese.''
+\newblock \emph{arXiv:2311.02945}, 2023.
+
+\bibitem{nguyen2025viwordformer}
+N. H. Nguyen, D. T. Nguyen, and N. L.-T. Nguyen.
+\newblock ``Vietnamese Words Are Not Constructed from Syllables: Rethinking the Role of Word Segmentation in NLP for Vietnamese Texts.''
+\newblock In \emph{Proceedings of AAAI}, 39(22):24069--24077, 2025.
+
+\bibitem{bami2026bamibert}
+Qualcomm AI Research.
+\newblock ``BamiBERT: A New BERT-based Language Model for Vietnamese.''
+\newblock \emph{arXiv:2607.02259}, 2026.
+
+\bibitem{nrl2026diacritic}
+NRL-AI.
+\newblock ``nrl-ai/vn-diacritic-vit5-base: Vietnamese Diacritic Restoration (ViT5 fine-tune).''
+\newblock \emph{HuggingFace Model Hub}, 2026.
+
+\bibitem{nguyen2025vietnormalizer}
+H. V. Nguyen, L. Do, T. N. Nguyen, U. S. Khwakhali, T. T. Pham, and V. Do.
+\newblock ``VietNormalizer: An Open-Source Library for Vietnamese Text Normalization in TTS and NLP.''
+\newblock \emph{arXiv:2603.04145}, 2026.
+
+\bibitem{do2025reference}
+T. Do, D. P. Tran, A. Vo, and D. Kim.
+\newblock ``Reference-Based Post-OCR Processing with LLM for Precise Diacritic Text in Historical Document Recognition.''
+\newblock In \emph{Proceedings of AAAI}, 39(27):27951--27959, 2025.
+
+\bibitem{schmidt2024tokenization}
+C. W. Schmidt, V. Reddy, H. Zhang, A. Alameddine, O. Uzan, Y. Pinter, et al.
+\newblock ``Tokenization Is More Than Compression.''
+\newblock \emph{arXiv:2402.18376}, 2024.
+
+\bibitem{quac2026mutant}
+N. Quac et al.
+\newblock ``MUTANT: A Recipe for Multilingual Tokenizer Design.''
+\newblock In \emph{Proceedings of ACL}, 2026.
+
+\bibitem{huynh2026spelling}
+H. T. N. Huynh, L. Nguyen, N. H. Nguyen, H. P. T. Nguyen, and T. T. Quan.
+\newblock ``A Two-Stage Vietnamese Spelling Correction Pipeline Combining Underthesea and BARTpho.''
+\newblock \emph{VNU Journal of Science: Comp. Science \& Com. Eng.}, 2026.
 
 \end{thebibliography}
 

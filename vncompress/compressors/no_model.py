@@ -214,26 +214,36 @@ class NoModelMorphCompressor(NoModelCompressor):
             WordClass.OTHER.value: 0.50,
         }
         
-        # Group by class
+        # Group by class + select proportional to target budget
         k = keep_boundary
         mid_indices = list(range(k, n - k)) if n > 2 * k else []
-        
+        mid_budget = max(0, target_len - 2 * k)
+
         class_buckets: Dict[str, List[int]] = {}
         for i in mid_indices:
             cls = word_infos[i].word_class.value if i < len(word_infos) else 'other'
             if cls not in class_buckets:
                 class_buckets[cls] = []
             class_buckets[cls].append(i)
-        
-        # Select per class (random within class, but proportional to keep ratio)
+
+        total_weight = sum(
+            len(indices) * keep_ratios.get(cls, 0.5)
+            for cls, indices in class_buckets.items()
+        )
+
         keep_indices = set(range(min(k, n)))
         keep_indices.update(range(max(k, n - k), n))
-        
+
         for cls, indices in class_buckets.items():
             ratio = keep_ratios.get(cls, 0.5)
-            keep_n = max(0, int(len(indices) * ratio))
-            selected = random.sample(indices, min(keep_n, len(indices)))
-            keep_indices.update(selected)
+            weight = len(indices) * ratio
+            cls_budget = max(0, min(
+                len(indices),
+                int(mid_budget * weight / max(total_weight, 1))
+            ))
+            if cls_budget > 0 and len(indices) > 0:
+                selected = random.sample(indices, min(cls_budget, len(indices)))
+                keep_indices.update(selected)
         
         compressed = [input_ids[i] for i in sorted(keep_indices) if i < n]
         elapsed = (time.time() - start) * 1000

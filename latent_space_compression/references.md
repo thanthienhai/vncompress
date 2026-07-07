@@ -59,6 +59,9 @@
 | E4 | Guo et al. "Brain-LLM Alignment Tracks Training Data, Not Typology" | CoNLL 2026 | [arxiv:2605.23032](https://arxiv.org/abs/2605.23032) |
 | E5 | Johnson. "The Compression Paradox: Provider-Dependent Energy Effects of Prompt Compression" | 2026 | [arxiv:2603.23528](https://arxiv.org/abs/2603.23528) |
 | E6 | Johnson. "Compression Method Matters: Benchmark-Dependent Output Dynamics in LLM Prompt Compression" | 2026 | [arxiv:2603.23527](https://arxiv.org/abs/2603.23527) |
+| E7 | Schmidt et al. "Tokenization Is More Than Compression" | 2024 | [arxiv:2402.18376](https://arxiv.org/abs/2402.18376) |
+| E8 | Quac et al. "MUTANT: A Recipe for Multilingual Tokenizer Design" | ACL 2026 | [ACL Anthology](https://aclanthology.org/2026.acl-long.2146/) |
+| E9 | Dinh et al. "When Morphology Hides in Plain Sight: Breaking the Isolation in Vietnamese and Beyond" (HuTieuBERT) | ACL 2026 | [ACL Anthology](https://aclanthology.org/2026.acl-long.472/) |
 
 ### Selective Context / Related
 | # | Paper | Venue | arXiv / Link |
@@ -84,6 +87,14 @@
 | V8 | Nguyen. "TextGraphFuseGAT: PhoBERT + Graph Attention for Vietnamese Token Classification" | VLSP 2025 | [arxiv:2510.11537](https://arxiv.org/abs/2510.11537) |
 | V9 | Nguyen et al. "ViTextVQA: A Large-Scale VQA Dataset for Vietnamese Text in Images" | 2024 | [arxiv:2404.10652](https://arxiv.org/abs/2404.10652) |
 | V10 | Sophia Maria. "Compass-v3: Scaling Domain-Specific LLMs for Multilingual E-Commerce in Southeast Asia" (Shopee) | 2025 | [arxiv:2509.09121](https://arxiv.org/abs/2509.09121) |
+| V11 | Dinh et al. "When Morphology Hides in Plain Sight: Breaking the Isolation in Vietnamese and Beyond" (HuTieuBERT) | ACL 2026 | [ACL Anthology](https://aclanthology.org/2026.acl-long.472/) |
+| V12 | Nguyen et al. "PhoGPT: Generative Pre-training for Vietnamese" | 2023 | [arxiv:2311.02945](https://arxiv.org/abs/2311.02945) |
+| V13 | Qualcomm AI. "BamiBERT: A New BERT-based Language Model for Vietnamese" | 2026 | [arxiv:2607.02259](https://arxiv.org/abs/2607.02259) |
+| V14 | Nguyen et al. "Vietnamese Words Are Not Constructed from Syllables" (ViWordFormer) | AAAI 2025 | [AAAI](https://ojs.aaai.org/index.php/AAAI/article/view/34581) |
+| V15 | Nguyen et al. "VietNormalizer: Vietnamese Text Normalization" | 2026 | [arxiv:2603.04145](https://arxiv.org/abs/2603.04145) |
+| V16 | NRL-AI. "vn-diacritic-vit5-base: Vietnamese Diacritic Restoration" | 2026 | [HuggingFace](https://huggingface.co/nrl-ai/vn-diacritic-vit5-base) |
+| V17 | Do et al. "Reference-Based Post-OCR Processing with LLM for Diacritic Text" | AAAI 2025 | [AAAI](https://ojs.aaai.org/index.php/AAAI/article/view/35012) |
+| V18 | Huynh et al. "A Two-Stage Vietnamese Spelling Correction Pipeline" | 2026 | [VNU JCSCE](https://doi.org/10.25073/2588-1086/vnucsce.7020) |
 
 ---
 
@@ -152,5 +163,21 @@
 |---|----------|------|
 | L1 | Vietnamese syllable database (~6,500 syllables) | Integrated in `vncompress/tone_aware/vietnamese_linguistics.py` |
 | L2 | Vietnamese function word dictionary (~200 words) | Integrated in `vncompress/morphology/merge_policy.py` |
-| L3 | Vietnamese reduplicative patterns (~80 pairs) | Integrated in `vncompress/morphology/merge_policy.py` |
+| L3 | Vietnamese reduplicative patterns (~80 pairs + phonetic detection) | Integrated in `vncompress/morphology/merge_policy.py` |
 | L4 | Vietnamese tone system (6 tones) | Nguyễn, Đình-Hoà. "Vietnamese." London Oriental and African Language Library, 1997 |
+| L5 | Sino-Vietnamese morpheme set (~60 morphemes) | Integrated in `vncompress/morphology/merge_policy.py` |
+| L6 | Teencode & dialect maps | Integrated in `vncompress/tone_aware/vietnamese_linguistics.py` |
+| L7 | Critical patterns (numbers, dates, proper names, legal refs) | Integrated in `vncompress/tone_aware/vietnamese_linguistics.py` |
+
+---
+
+## H. IMPLEMENTED IMPROVEMENTS (06/07/2026)
+
+| # | Improvement | Location | Description |
+|---|-------------|----------|-------------|
+| IMP1 | Pipeline Training→Inference | `tone_scoring.py`, `tone_aware.py` | Model-based tone scoring via PhonologicalConsistencyLoss.score_importance() |
+| IMP2 | TonePreservationProbe | `tone_scoring.py` | Independent probe for evaluating tone preservation accuracy |
+| IMP3 | Phonetic Reduplication | `merge_policy.py` | Initial consonant + rhyme similarity for từ láy detection |
+| IMP4 | Sino-Vietnamese Class | `merge_policy.py` | SINO word class with preservation factor 1.5 |
+| IMP5 | SnapKV Attention Blend | `tone_aware.py` | Combine tone/morph/attention weights in CombinedCompressor |
+| IMP6 | Dimension Fix | `run_training.py` | Tone labels aligned with compressed positions, not full text |

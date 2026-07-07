@@ -279,81 +279,159 @@ class PhonologicalConsistencyLoss(nn.Module):
     """
     Auxiliary loss for preserving tonal information during compression training.
 
-    Mathematical Formula:
-      L_tone = (1/N) Σ_{i=1}^{N} CE(p_i, y_i)
+    Trains a linear classifier on top of hidden states to predict 7-class
+    Vietnamese tone labels. The same classifier can be used at inference time
+    as a tone probe for model-aware compression scoring.
 
-    where:
-      p_i  = predicted tone distribution at position i (from compressed rep)
-      y_i  = ground-truth tone class at position i
-      N    = number of positions
-      CE   = cross-entropy loss
+    L_tone = (1/N) Σ CE(linear(h_i), y_i)
 
-    Combined with LM loss:
-      L_total = L_LM + λ × L_tone
-
-    This encourages the model to retain tonal information in compressed
-    representations, which is critical for Vietnamese where tone changes
-    word meaning.
-
-    Reference: Inspired by phonetic auxiliary objectives in speech processing.
+    Combined:  L_total = L_LM + λ_tone * L_tone
     """
 
     def __init__(
         self,
+        hidden_dim: int,
         num_tones: int = 7,
         lambda_tone: float = 0.1,
-        reduction: str = 'mean',
+        ignore_index: int = -100,
     ):
         super().__init__()
         self.num_tones = num_tones
         self.lambda_tone = lambda_tone
-        self.reduction = reduction
+        self.ignore_index = ignore_index
 
-        # Tone classifier head
-        self.tone_classifier = nn.Linear(1, num_tones)  # Will be replaced at forward
+        self.tone_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim // 4),
+            nn.Linear(hidden_dim // 4, num_tones),
+        )
 
     def forward(
         self,
-        hidden_states: torch.Tensor,  # [B, S, D] compressed representation
-        tone_labels: torch.Tensor,      # [B, S] ground-truth tone IDs
-        mask: Optional[torch.Tensor] = None,  # [B, S] valid positions
+        hidden_states: torch.Tensor,
+        tone_labels: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Compute phonological consistency loss.
-
-        Args:
-            hidden_states: Hidden states from compressed model
-            tone_labels: Ground-truth tone class for each position
-            mask: Optional mask for valid positions (1=valid, 0=ignore)
-
-        Returns:
-            Scalar loss value
-        """
         B, S, D = hidden_states.shape
+        Bt, St = tone_labels.shape
 
-        # Ensure tone classifier matches hidden dim
-        if self.tone_classifier.in_features != D:
-            self.tone_classifier = nn.Linear(D, self.num_tones).to(
-                hidden_states.device
+        if S != St:
+            raise ValueError(
+                f"Sequence length mismatch: hidden_states has S={S} "
+                f"but tone_labels has S={St}. Tone labels must align "
+                f"with input (compressed) positions, not labels (full) positions."
             )
 
-        logits = self.tone_classifier(hidden_states)  # [B, S, num_tones]
+        logits = self.tone_classifier(hidden_states)
 
         if mask is not None:
             loss = F.cross_entropy(
                 logits.view(-1, self.num_tones),
                 tone_labels.view(-1),
                 reduction='none',
+                ignore_index=self.ignore_index,
             )
             loss = (loss * mask.view(-1)).sum() / (mask.sum() + 1e-8)
         else:
             loss = F.cross_entropy(
                 logits.view(-1, self.num_tones),
                 tone_labels.view(-1),
-                reduction=self.reduction,
+                reduction='mean',
+                ignore_index=self.ignore_index,
             )
 
         return self.lambda_tone * loss
+
+    def predict_tones(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict tone classes from hidden states (inference)."""
+        logits = self.tone_classifier(hidden_states)
+        return logits.argmax(dim=-1)
+
+    def score_importance(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute tone-aware importance scores from model hidden states.
+
+        Uses the classifier's confidence (max probability) as a signal:
+        higher confidence = model is certain about tone = tone info is
+        well-preserved in this hidden state = should preserve this token.
+        """
+        logits = self.tone_classifier(hidden_states)
+        probs = F.softmax(logits, dim=-1)
+        max_prob, _ = probs.max(dim=-1)
+
+        importance = 1.0 + max_prob
+        importance = torch.clamp(importance, 0.5, 3.0)
+        return importance
+
+
+class TonePreservationProbe(nn.Module):
+    """
+    Lightweight probe that evaluates tone preservation quality.
+
+    Trained independently on frozen hidden states to measure how well
+    tonal information is retained after compression. Used for evaluation
+    only, not as a training objective.
+    """
+
+    def __init__(self, hidden_dim: int, num_tones: int = 7):
+        super().__init__()
+        self.probe = nn.Linear(hidden_dim, num_tones)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.probe(hidden_states)
+
+    def train_probe(
+        self,
+        hidden_states: torch.Tensor,
+        tone_labels: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        lr: float = 1e-3,
+        steps: int = 200,
+    ):
+        """Quickly train probe on given hidden states."""
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
+        self.train()
+        for _ in range(steps):
+            optimizer.zero_grad()
+            logits = self(hidden_states)
+            if mask is not None:
+                loss = F.cross_entropy(
+                    logits.view(-1, self.probe.out_features),
+                    tone_labels.view(-1),
+                    reduction='none',
+                )
+                loss = (loss * mask.view(-1)).sum() / (mask.sum() + 1e-8)
+            else:
+                loss = F.cross_entropy(
+                    logits.view(-1, self.probe.out_features),
+                    tone_labels.view(-1),
+                )
+            loss.backward()
+            optimizer.step()
+
+    def score_preservation(
+        self,
+        hidden_states: torch.Tensor,
+        tone_labels: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> float:
+        """Compute tone preservation accuracy (0-1)."""
+        self.eval()
+        with torch.no_grad():
+            logits = self(hidden_states)
+            preds = logits.argmax(dim=-1)
+            correct = (preds == tone_labels).float()
+            if mask is not None:
+                correct = correct * mask
+                return (correct.sum() / (mask.sum() + 1e-8)).item()
+            return correct.mean().item()
 
 
 class ToneAugmentedTrainer:
@@ -363,11 +441,7 @@ class ToneAugmentedTrainer:
     Wraps the training loop with:
       1. Tone embedding injection
       2. Phonological consistency loss
-      3. Tone preservation rate tracking
-
-    Usage:
-        trainer = ToneAugmentedTrainer(model, tokenizer, config)
-        trainer.train_step(batch)
+      3. Tone preservation rate tracking with probe evaluation
     """
 
     def __init__(
@@ -380,39 +454,37 @@ class ToneAugmentedTrainer:
         self.tokenizer = tokenizer
         self.config = config
         self.tone_analyzer = get_tone_analyzer()
-        
+
+        hidden_dim = model.config.hidden_size
         self.tone_augmentation = ToneEmbeddingAugmentation(
-            d_model=model.config.hidden_size,
+            d_model=hidden_dim,
             tone_embed_dim=config.tone_embed_dim,
         )
         self.tone_loss = PhonologicalConsistencyLoss(
+            hidden_dim=hidden_dim,
             lambda_tone=config.lambda_tone,
         )
+        self.tone_probe = TonePreservationProbe(hidden_dim=hidden_dim)
 
     def compute_tone_labels(
         self,
         input_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Compute per-token tone IDs from input token IDs.
-
-        Returns tensor of same shape as input_ids with tone class 0-6.
-        """
+        """Compute per-token tone IDs matching input_ids shape."""
         B, S = input_ids.shape
-        tone_labels = torch.zeros(B, S, dtype=torch.long)
+        tone_labels = torch.full((B, S), -100, dtype=torch.long)
 
         for b in range(B):
-            token_ids = input_ids[b].tolist()
-            tokens = []
-            for tid in token_ids:
-                t = self.tokenizer.decode([tid])
-                tokens.append(t if len(t) <= 10 else t[:10])
-            
             for s in range(S):
-                token = tokens[s] if s < len(tokens) else ''
-                dominant = self.tone_analyzer.get_dominant_tone(token)
-                tone_id = TONE_NAME_TO_ID.get(dominant or 'ngang', 0)
-                tone_labels[b, s] = tone_id
+                tid = input_ids[b, s].item()
+                if tid == self.tokenizer.pad_token_id:
+                    continue
+                t = self.tokenizer.decode([tid])
+                t = t.replace('\u2581', ' ').replace('\u0130', ' ').strip()
+                dominant = self.tone_analyzer.get_dominant_tone(t[:20])
+                tone_labels[b, s] = TONE_NAME_TO_ID.get(
+                    dominant or 'ngang', 0
+                )
 
         return tone_labels
 
@@ -423,15 +495,9 @@ class ToneAugmentedTrainer:
         labels: torch.Tensor,
         optimizer: torch.optim.Optimizer,
     ) -> Dict[str, float]:
-        """
-        Single training step with tone-aware objectives.
-
-        Returns dict of loss values for logging.
-        """
         self.model.train()
         optimizer.zero_grad()
 
-        # Forward pass
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -441,17 +507,11 @@ class ToneAugmentedTrainer:
 
         lm_loss = outputs.loss
 
-        # Compute tone labels
-        tone_labels = self.compute_tone_labels(input_ids)
-        tone_labels = tone_labels.to(input_ids.device)
-
-        # Phonological consistency loss on last hidden states
-        hidden_states = outputs.hidden_states[-1]  # [B, S, D]
+        tone_labels = self.compute_tone_labels(input_ids).to(input_ids.device)
+        hidden_states = outputs.hidden_states[-1]
         tone_l = self.tone_loss(hidden_states, tone_labels, attention_mask)
 
-        # Combined loss
         total_loss = lm_loss + tone_l
-
         total_loss.backward()
         optimizer.step()
 
@@ -463,15 +523,40 @@ class ToneAugmentedTrainer:
 
     def compute_tone_preservation_rate(
         self,
-        original_ids: torch.Tensor,
-        compressed_rep: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        train_steps: int = 100,
     ) -> float:
         """
-        Measure how well tonal information is preserved after compression.
+        Measure tone preservation: train a lightweight probe on model
+        hidden states and evaluate tone prediction accuracy.
 
-        Trains a small probe on the compressed representation to predict
-        original tone labels. Higher accuracy = better tone preservation.
+        Higher accuracy = better tone information retained in hidden
+        representations after compression.
         """
-        # Placeholder: in practice, train a lightweight probe
-        # and evaluate on held-out data
-        return 0.0
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+            hidden_states = outputs.hidden_states[-1].detach().clone()
+
+        tone_labels = self.compute_tone_labels(input_ids)
+        device = hidden_states.device
+        tone_labels = tone_labels.to(device)
+
+        probe_dim = hidden_states.shape[-1]
+        if self.tone_probe.probe.in_features != probe_dim:
+            self.tone_probe = TonePreservationProbe(
+                hidden_dim=probe_dim
+            ).to(device)
+
+        self.tone_probe.train_probe(
+            hidden_states, tone_labels, attention_mask, steps=train_steps
+        )
+
+        return self.tone_probe.score_preservation(
+            hidden_states, tone_labels, attention_mask
+        )

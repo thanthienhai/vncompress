@@ -212,6 +212,7 @@ def run_benchmark(
     ratios: list = None,
     output_dir: str = './results',
     quick: bool = False,
+    data_path: str = None,
 ):
     """Run the full VCC-Bench evaluation."""
     
@@ -227,16 +228,23 @@ def run_benchmark(
         max_new_tokens=128 if quick else 256,
     )
     
-    bench = VCCBench(config)
-    
-    # Add samples
-    samples = VIETNAMESE_DEMO_SAMPLES[:2] if quick else VIETNAMESE_DEMO_SAMPLES
-    
-    # Compute context lengths
-    for sample in samples:
-        sample.context_length = len(tokenizer.encode(sample.context))
-    
-    bench.add_samples(samples)
+    # Load dataset
+    default_data = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'vcc_bench_data', 'vcc_bench_v1.json'
+    )
+    json_path = data_path or default_data
+
+    if os.path.exists(json_path):
+        print(f"\nLoading VCC-Bench dataset: {json_path}")
+        bench = VCCBench.load_from_json(json_path, config)
+    else:
+        print(f"\n[WARN] Dataset not found at {json_path}, using demo samples")
+        bench = VCCBench(config)
+        samples = VIETNAMESE_DEMO_SAMPLES[:2] if quick else VIETNAMESE_DEMO_SAMPLES
+        for sample in samples:
+            sample.context_length = len(tokenizer.encode(sample.context))
+        bench.add_samples(samples)
     
     print(f"\nVCC-Bench Configuration:")
     print(f"  Model: {model_name}")
@@ -404,6 +412,10 @@ def main():
         '--list-methods', action='store_true',
         help='List available compression methods'
     )
+    parser.add_argument(
+        '--data-path', type=str, default=None,
+        help='Path to VCC-Bench JSON dataset (default: vcc_bench_data/vcc_bench_v1.json)'
+    )
     
     args = parser.parse_args()
     
@@ -433,6 +445,7 @@ def main():
         ratios=ratios,
         output_dir=args.output_dir,
         quick=args.quick,
+        data_path=args.data_path,
     )
 
 

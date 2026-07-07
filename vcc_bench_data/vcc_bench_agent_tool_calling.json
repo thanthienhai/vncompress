@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "name": "VCC-Bench v1.0",
+    "version": "1.0.0",
+    "date": "2026-07-06",
+    "language": "vi",
+    "description": "Vietnamese Context Compression Benchmark",
+    "tasks": [
+      "agent_tool_calling",
+      "cross_lingual",
+      "long_document_qa",
+      "multi_turn_conversation",
+      "needle_in_haystack"
+    ],
+    "total_samples": 243,
+    "license": "CC-BY-SA 4.0 (Wikipedia) + Public Domain (Legal) + MIT (synthetic)",
+    "task": "agent_tool_calling",
+    "num_samples": 8
+  },
+  "samples": [
+    {
+      "sample_id": "agent_0000",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_weather_query",
+      "description": "Query weather for multiple cities and compare",
+      "context": "Bạn là trợ lý AI hỗ trợ người dùng tra cứu thông tin thời tiết. Bạn có các công cụ sau:\n1. get_weather(city: str, date: str) -> dict: Lấy thông tin thời tiết của thành phố vào ngày cụ thể. Trả về dict với các key: temperature, humidity, condition, wind_speed.\n2. compare_weather(city1: str, city2: str, date: str) -> dict: So sánh thời tiết giữa hai thành phố.\n3. recommend_activity(weather: dict) -> list[str]: Gợi ý hoạt động phù hợp dựa trên thời tiết.\n\nNgười dùng yêu cầu: \"So sánh thời tiết giữa Hà Nội và Đà Nẵng vào ngày mai, và gợi ý hoạt động phù hợp cho từng thành phố.\"\n\nHãy lập kế hoạch hành động và trả lời người dùng.",
+      "query": "Hãy lập kế hoạch hành động để so sánh thời tiết Hà Nội và Đà Nẵng ngày mai và gợi ý hoạt động.",
+      "reference_answer": "Cần gọi get_weather(Hà Nội), get_weather(Đà Nẵng), sau đó compare_weather và recommend_activity cho từng thành phố.",
+      "expected_tools": [
+        "get_weather",
+        "get_weather",
+        "compare_weather",
+        "recommend_activity"
+      ],
+      "char_length": 631
+    },
+    {
+      "sample_id": "agent_0001",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_calculator_chain",
+      "description": "Multi-step calculation with tool calls",
+      "context": "Bạn có quyền truy cập vào các công cụ tính toán sau:\n1. calculate(expression: str) -> float: Tính giá trị của biểu thức toán học.\n2. convert_currency(amount: float, from_currency: str, to_currency: str) -> float: Chuyển đổi tiền tệ.\n3. calculate_tax(amount: float, tax_rate: float) -> float: Tính thuế.\n\nNgười dùng: \"Tôi muốn mua một sản phẩm giá 299 USD từ Mỹ. Tỉ giá USD/VND hiện tại là 25,500. Phí vận chuyển là 15% giá sản phẩm. Thuế nhập khẩu là 10% trên tổng giá trị sản phẩm + vận chuyển. Tính tổng số tiền tôi phải trả bằng VND.\"\n\nHãy thực hiện các bước tính toán.",
+      "query": "Tính toán tổng số tiền phải trả bằng VND cho sản phẩm 299 USD với phí vận chuyển 15% và thuế nhập khẩu 10%.",
+      "reference_answer": "product_price_vnd = 299 * 25500 = 7,624,500 VND; shipping = 0.15 * 7,624,500 = 1,143,675 VND; subtotal = 8,768,175 VND; tax = 0.10 * 8,768,175 = 876,818 VND; total = 9,644,993 VND",
+      "expected_tools": [
+        "calculate",
+        "calculate",
+        "calculate",
+        "convert_currency"
+      ],
+      "char_length": 572
+    },
+    {
+      "sample_id": "agent_0002",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_search_and_summarize",
+      "description": "Search and summarize information",
+      "context": "Bạn là trợ lý nghiên cứu với các công cụ:\n1. web_search(query: str, num_results: int) -> list[dict]: Tìm kiếm web, trả về danh sách bài viết với title, snippet, url.\n2. fetch_article(url: str) -> str: Lấy nội dung đầy đủ của bài viết.\n3. summarize(text: str, max_length: int) -> str: Tóm tắt văn bản.\n\nNgười dùng: \"Tìm hiểu về chính sách thu hút đầu tư nước ngoài mới nhất của Việt Nam năm 2026 và tóm tắt các điểm chính.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Tìm kiếm và tóm tắt chính sách thu hút đầu tư nước ngoài mới nhất của Việt Nam năm 2026.",
+      "reference_answer": "Tìm kiếm chính sách FDI Việt Nam 2026, chọn bài viết liên quan nhất, đọc nội dung, tóm tắt các điểm chính về ưu đãi thuế, thủ tục đầu tư, lĩnh vực khuyến khích.",
+      "expected_tools": [
+        "web_search",
+        "fetch_article",
+        "summarize"
+      ],
+      "char_length": 454
+    },
+    {
+      "sample_id": "agent_0003",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_data_pipeline",
+      "description": "Multi-step data processing pipeline",
+      "context": "Bạn là trợ lý phân tích dữ liệu với các công cụ:\n1. query_database(sql: str) -> list[dict]: Truy vấn cơ sở dữ liệu và trả về kết quả.\n2. analyze_data(data: list[dict], method: str) -> dict: Phân tích thống kê dữ liệu.\n3. generate_chart(data: dict, chart_type: str) -> str: Tạo biểu đồ.\n4. send_report(email: str, content: str) -> bool: Gửi báo cáo qua email.\n\nNgười dùng: \"Truy vấn doanh số bán hàng 6 tháng đầu năm 2026 theo từng khu vực, phân tích xu hướng, tạo biểu đồ và gửi báo cáo cho manager@company.com.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Phân tích doanh số bán hàng 6 tháng 2026 theo khu vực và gửi báo cáo.",
+      "reference_answer": "Truy vấn SQL doanh số theo khu vực, analyze_data() với method='trend', generate_chart() loại 'bar', send_report() tới manager@company.com",
+      "expected_tools": [
+        "query_database",
+        "analyze_data",
+        "generate_chart",
+        "send_report"
+      ],
+      "char_length": 544
+    },
+    {
+      "sample_id": "agent_0004",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_appointment_scheduler",
+      "description": "Multi-step appointment scheduling",
+      "context": "Bạn là trợ lý lịch hẹn với các công cụ:\n1. check_calendar(person: str, date: str) -> list[str]: Kiểm tra lịch trống của một người vào ngày cụ thể.\n2. find_common_slot(persons: list[str], date: str) -> list[str]: Tìm khung giờ chung cho nhiều người.\n3. book_meeting(attendees: list[str], datetime: str, duration: int, title: str) -> str: Đặt phòng họp và gửi invitation.\n4. send_reminder(meeting_id: str, hours_before: int) -> bool: Gửi nhắc nhở trước giờ họp.\n\nNgười dùng: \"Đặt cuộc họp review sprint cho team 5 người: anh, chị, manager, tech lead và designer vào thứ Sáu tuần này, thời lượng 1 giờ, và gửi nhắc nhở trước 30 phút.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Đặt cuộc họp sprint review cho 5 người vào thứ Sáu, 1 giờ, nhắc trước 30 phút.",
+      "reference_answer": "find_common_slot cho 5 attendee, book_meeting với duration=60, send_reminder với hours_before=0.5",
+      "expected_tools": [
+        "find_common_slot",
+        "book_meeting",
+        "send_reminder"
+      ],
+      "char_length": 663
+    },
+    {
+      "sample_id": "agent_0005",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_ecommerce_order",
+      "description": "E-commerce order fulfillment flow",
+      "context": "Bạn là trợ lý xử lý đơn hàng với các công cụ:\n1. verify_stock(product_id: str, quantity: int) -> dict: Kiểm tra tồn kho.\n2. calculate_shipping(address: str, weight: float) -> dict: Tính phí vận chuyển và thời gian giao hàng.\n3. create_invoice(order: dict) -> str: Tạo hóa đơn và lấy mã thanh toán.\n4. process_payment(invoice_id: str, method: str) -> bool: Xử lý thanh toán.\n\nNgười dùng: \"Khách hàng Nguyễn Thị Mai đặt 2 chiếc điện thoại Samsung Galaxy S25 Ultra, giao đến 456 Lê Lợi, Quận 1, TP.HCM. Thanh toán bằng thẻ tín dụng.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Xử lý đơn hàng 2 Samsung S25 Ultra cho Nguyễn Thị Mai, giao Quận 1, thanh toán thẻ tín dụng.",
+      "reference_answer": "verify_stock('S25U', 2), calculate_shipping('456 Le Loi, Q1'), create_invoice với order details, process_payment với method='credit_card'",
+      "expected_tools": [
+        "verify_stock",
+        "calculate_shipping",
+        "create_invoice",
+        "process_payment"
+      ],
+      "char_length": 562
+    },
+    {
+      "sample_id": "agent_0006",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_content_creation",
+      "description": "Content creation pipeline",
+      "context": "Bạn là trợ lý sáng tạo nội dung với các công cụ:\n1. research_topic(topic: str) -> list[str]: Nghiên cứu và thu thập thông tin về chủ đề.\n2. generate_outline(keywords: list[str]) -> str: Tạo dàn ý bài viết.\n3. write_section(outline: str, section: int) -> str: Viết một phần của bài viết.\n4. optimize_seo(content: str, target_keyword: str) -> str: Tối ưu SEO cho nội dung.\n5. publish_article(content: str, platform: str) -> str: Đăng bài lên nền tảng.\n\nNgười dùng: \"Viết một bài blog 2000 từ về 'Xu hướng AI trong chăm sóc sức khỏe tại Việt Nam 2026', tối ưu SEO với từ khóa 'AI y tế Việt Nam', và đăng lên WordPress.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Viết blog về AI trong chăm sóc sức khỏe Việt Nam 2026, tối ưu SEO, đăng WordPress.",
+      "reference_answer": "research_topic('AI y tế Việt Nam'), generate_outline, write_section, optimize_seo với keyword 'AI y tế Việt Nam', publish_article lên WordPress",
+      "expected_tools": [
+        "research_topic",
+        "generate_outline",
+        "write_section",
+        "optimize_seo",
+        "publish_article"
+      ],
+      "char_length": 648
+    },
+    {
+      "sample_id": "agent_0007",
+      "task": "agent_tool_calling",
+      "agent_task_id": "agent_code_review",
+      "description": "Automated code review pipeline",
+      "context": "Bạn là trợ lý review code với các công cụ:\n1. fetch_pr(repo: str, pr_number: int) -> dict: Lấy thông tin Pull Request.\n2. analyze_diff(diff: str) -> list[dict]: Phân tích code changes.\n3. run_tests(repo: str, branch: str) -> dict: Chạy bộ test tự động.\n4. post_review(pr_number: int, comments: list[str], approve: bool) -> bool: Đăng review lên PR.\n\nNgười dùng: \"Review PR #342 trên repo vncompress/main, phân tích code changes, chạy tests, và nếu tests pass thì approve.\"\n\nHãy lập kế hoạch và thực hiện.",
+      "query": "Review PR #342 repo vncompress, chạy tests, auto-approve nếu pass.",
+      "reference_answer": "fetch_pr('vncompress', 342), analyze_diff, run_tests, post_review với approve=True nếu tests pass",
+      "expected_tools": [
+        "fetch_pr",
+        "analyze_diff",
+        "run_tests",
+        "post_review"
+      ],
+      "char_length": 504
+    }
+  ]
+}

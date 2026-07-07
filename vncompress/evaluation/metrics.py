@@ -266,6 +266,60 @@ class VCCBench:
     def add_sample(self, sample: VCCBenchSample):
         """Add a single sample."""
         self.samples[sample.task].append(sample)
+
+    @classmethod
+    def load_from_json(cls, json_path: str, config: Optional[VCCBenchConfig] = None) -> 'VCCBench':
+        """
+        Load VCC-Bench dataset from a JSON file.
+
+        The JSON file should contain:
+          - metadata: dict with name, version, date, tasks, total_samples
+          - samples: list of dicts with task, context, query, reference_answer, char_length
+
+        Args:
+            json_path: Path to the VCC-Bench JSON file.
+            config: Optional VCCBenchConfig.
+
+        Returns:
+            VCCBench instance with loaded samples.
+        """
+        bench = cls(config)
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        samples_raw = data.get('samples', [])
+        if not samples_raw:
+            print(f"[WARN] No samples found in {json_path}")
+            return bench
+
+        samples = []
+        for raw in samples_raw:
+            sample = VCCBenchSample(
+                task=raw.get('task', 'unknown'),
+                context=raw.get('context', ''),
+                query=raw.get('query', ''),
+                reference_answer=raw.get('reference_answer', ''),
+                context_length=raw.get('char_length', len(raw.get('context', ''))),
+                metadata={
+                    k: v for k, v in raw.items()
+                    if k not in ('task', 'context', 'query', 'reference_answer', 'char_length')
+                },
+            )
+            samples.append(sample)
+
+        bench.add_samples(samples)
+
+        meta = data.get('metadata', {})
+        print(f"Loaded VCC-Bench: {meta.get('name', 'unknown')} v{meta.get('version', '?')}")
+        print(f"  Date: {meta.get('date', '?')}, License: {meta.get('license', '?')}")
+        task_counts = {}
+        for s in samples:
+            task_counts[s.task] = task_counts.get(s.task, 0) + 1
+        for task, count in sorted(task_counts.items()):
+            print(f"  {task}: {count} samples")
+        print(f"  Total: {len(samples)} samples")
+
+        return bench
     
     @property
     def total_samples(self) -> int:

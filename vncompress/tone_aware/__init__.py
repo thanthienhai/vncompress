@@ -28,26 +28,29 @@ _tone_scoring_available = False
 
 def _ensure_tone_scoring():
     global ToneAwareConfig, ToneAwareScorer, ToneEmbeddingAugmentation
-    global PhonologicalConsistencyLoss, ToneAugmentedTrainer, _tone_scoring_available
+    global PhonologicalConsistencyLoss, TonePreservationProbe, ToneAugmentedTrainer, _tone_scoring_available
     if not _tone_scoring_available:
         from .tone_scoring import (
             ToneAwareConfig as _TAC,
             ToneAwareScorer as _TAS,
             ToneEmbeddingAugmentation as _TEA,
             PhonologicalConsistencyLoss as _PCL,
+            TonePreservationProbe as _TPP,
             ToneAugmentedTrainer as _TAT,
         )
         ToneAwareConfig = _TAC
         ToneAwareScorer = _TAS
         ToneEmbeddingAugmentation = _TEA
         PhonologicalConsistencyLoss = _PCL
+        TonePreservationProbe = _TPP
         ToneAugmentedTrainer = _TAT
         _tone_scoring_available = True
 
 def __getattr__(name):
     if name in (
         'ToneAwareConfig', 'ToneAwareScorer', 'ToneEmbeddingAugmentation',
-        'PhonologicalConsistencyLoss', 'ToneAugmentedTrainer',
+        'PhonologicalConsistencyLoss', 'TonePreservationProbe',
+        'ToneAugmentedTrainer',
     ):
         _ensure_tone_scoring()
         return globals()[name]
@@ -68,5 +71,6 @@ __all__ = [
     "ToneAwareScorer",
     "ToneEmbeddingAugmentation",
     "PhonologicalConsistencyLoss",
+    "TonePreservationProbe",
     "ToneAugmentedTrainer",
 ]

@@ -61,6 +61,8 @@ Reference:
 from typing import List, Dict, Tuple, Set, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+import unicodedata
+import re
 
 
 class WordClass(Enum):
@@ -69,6 +71,7 @@ class WordClass(Enum):
     CONTENT = 'content'     # Thực từ: danh từ, động từ, tính từ
     REDUP = 'reduplicative' # Từ láy: xinh xắn, đẹp đẽ...
     COMPOUND = 'compound'   # Từ ghép: máy tính, học sinh...
+    SINO = 'sino'           # Sino-Vietnamese morpheme
     OTHER = 'other'         # Unknown / punctuation / numbers
 
 
@@ -80,6 +83,7 @@ class MorphologyConfig:
     r_content: float = 0.85   # Keep 85% of content words
     r_redup: float = 0.5      # Keep 50% of reduplicative words (merge pairs)
     r_compound: float = 0.95  # Keep 95% of compound words
+    r_sino: float = 0.90      # Keep 90% of Sino-Vietnamese morphemes
     r_other: float = 0.5      # Keep 50% of unknown
 
     # Preservation multipliers for scoring
@@ -87,10 +91,12 @@ class MorphologyConfig:
     f_content: float = 1.2    # Content words: higher → preserve
     f_redup: float = 0.6      # Reduplicative: moderate
     f_compound: float = 1.5   # Compounds: strongly preserve
+    f_sino: float = 1.5       # Sino-Vietnamese: strongly preserve
     f_other: float = 1.0      # Unknown: neutral
 
     # Reduplicative detection threshold
     redup_similarity_threshold: float = 0.6
+    use_phonetic_redup: bool = True
 
     # Minimum token length for classification
     min_token_len: int = 1
@@ -195,11 +201,74 @@ class MorphologyAnalyzer:
         for first, second in REDUPLICATIVE_PATTERNS:
             self.redup_pairs[second] = first
             self.redup_pairs[first + '_' + second] = first
+
+        # Sino-Vietnamese morphemes
+        self._sino_morphemes: Set[str] = self._build_sino_set()
         
         # POS tagger (lazy loading)
         self._pos_tagger = None
         if use_pos_tagger:
             self._init_pos_tagger()
+
+    @staticmethod
+    def _build_sino_set() -> Set[str]:
+        """Build set of Sino-Vietnamese morphemes for fast lookup."""
+        sino = {
+            'quốc', 'gia', 'xã', 'hội', 'chính', 'phủ', 'học', 'sinh',
+            'giáo', 'viên', 'công', 'nghiệp', 'thương', 'mại', 'nông',
+            'lâm', 'ngư', 'khoa', 'kỹ', 'thuật', 'văn', 'hóa', 'nghệ',
+            'mỹ', 'y', 'tế', 'dược', 'luật', 'pháp', 'kinh', 'tài',
+            'điện', 'tử', 'cơ', 'khí', 'kiến', 'trúc', 'xây', 'dựng',
+            'phát', 'triển', 'bảo', 'vệ', 'quản', 'lý', 'nghiên', 'cứu',
+            'đào', 'tạo', 'sản', 'xuất', 'doanh', 'đầu', 'tư', 'thông',
+            'tin', 'truyền', 'viễn', 'giao', 'vận', 'tải', 'hàng',
+            'hải', 'thủy', 'lợi', 'thanh', 'tra', 'kiểm', 'soát',
+            'thẩm', 'định', 'tổ', 'chức', 'đoàn', 'thể', 'hợp', 'tác',
+            'liên', 'kết', 'thống', 'nhất', 'độc', 'lập', 'tự', 'do',
+            'dân', 'chủ', 'cộng', 'đồng', 'hòa', 'bình',
+        }
+        return sino
+
+    @staticmethod
+    def _tone_strip(syllable: str) -> str:
+        """Strip tone marks, keeping base vowel+consonant."""
+        decomposed = unicodedata.normalize('NFD', syllable.lower())
+        no_tone = ''.join(
+            ch for ch in decomposed
+            if ch not in ('\u0300', '\u0301', '\u0303', '\u0309', '\u0323')
+        )
+        return unicodedata.normalize('NFC', no_tone)
+
+    @staticmethod
+    def _phonetic_similarity(a: str, b: str) -> float:
+        """
+        Compute phonetic similarity between two Vietnamese syllables.
+        Measures: shared initial consonant + shared rhyme (vowel+ending).
+        Returns 0.0-1.0.
+        """
+        a = MorphologyAnalyzer._tone_strip(a)
+        b = MorphologyAnalyzer._tone_strip(b)
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+
+        initials = r'^(b|c|ch|d|đ|g|gh|gi|h|k|kh|l|m|n|ng|ngh|nh|p|ph|qu|r|s|t|th|tr|v|x)?'
+        a_init = re.match(initials, a)
+        b_init = re.match(initials, b)
+        a_rhyme = a[a_init.end():] if a_init else a
+        b_rhyme = b[b_init.end():] if b_init else b
+
+        score = 0.0
+        if a_init and b_init and a_init.group(1) == b_init.group(1):
+            score += 0.4
+        if a_rhyme == b_rhyme:
+            score += 0.6
+        elif len(a_rhyme) >= 2 and len(b_rhyme) >= 2:
+            rhyme_overlap = sum(1 for ca, cb in zip(a_rhyme, b_rhyme) if ca == cb)
+            if rhyme_overlap >= 2:
+                score += 0.3
+        return score
 
     def _init_pos_tagger(self):
         """Initialize underthesea POS tagger if available."""
@@ -217,34 +286,32 @@ class MorphologyAnalyzer:
 
         Priority:
           1. Function word dictionary match
-          2. Reduplicative pattern match
+          2. Reduplicative pattern match (dictionary)
           3. Compound detection (has underscore)
-          4. Heuristic: short + no meaning → likely other
-          5. Default: content word
+          4. Sino-Vietnamese morpheme detection
+          5. Heuristic: short + no meaning → likely other
+          6. Default: content word
         """
         token_lower = token.strip().lower()
 
-        # Check function word dictionary
         if token_lower in self.function_words:
             return WordClass.FUNC
 
-        # Check reduplicative in original form (with underscore)
         if token_lower in self.redup_pairs:
             return WordClass.REDUP
 
-        # Check compound-like tokens
         if '_' in token_lower:
             parts = token_lower.split('_')
             for part in parts:
                 if part in self.redup_pairs:
                     return WordClass.REDUP
+                if part in self._sino_morphemes:
+                    return WordClass.SINO
             return WordClass.COMPOUND
 
-        # Heuristics for unknown words
-        if len(token_lower) <= 2 and token_lower.isalpha():
-            return WordClass.OTHER
+        if token_lower in self._sino_morphemes:
+            return WordClass.SINO
 
-        # Default: content word
         return WordClass.CONTENT
 
     def classify_batch(
@@ -300,6 +367,7 @@ class MorphologyAnalyzer:
             WordClass.CONTENT: config.f_content,
             WordClass.REDUP: config.f_redup,
             WordClass.COMPOUND: config.f_compound,
+            WordClass.SINO: config.f_sino,
             WordClass.OTHER: config.f_other,
         }
         return mapping.get(info.word_class, 1.0)
@@ -315,6 +383,7 @@ class MorphologyAnalyzer:
             WordClass.CONTENT: config.r_content,
             WordClass.REDUP: config.r_redup,
             WordClass.COMPOUND: config.r_compound,
+            WordClass.SINO: config.r_sino,
             WordClass.OTHER: config.r_other,
         }
         return mapping.get(info.word_class, 0.5)
@@ -323,22 +392,34 @@ class MorphologyAnalyzer:
         self,
         tokens: List[str],
         window_size: int = 3,
-    ) -> List[Tuple[int, int]]:
+        config: Optional[MorphologyConfig] = None,
+    ) -> List[Tuple[int, int, float]]:
         """
         Find reduplicative word pairs in a token sequence.
-        
-        Returns list of (left_idx, right_idx) pairs that form từ láy.
+
+        Uses dictionary matching first, then phonetic similarity fallback.
+        Returns list of (left_idx, right_idx, confidence) tuples.
         """
         pairs = []
         n = len(tokens)
-        
+
         for i in range(n):
+            left = tokens[i].strip().lower()
             for j in range(i + 1, min(i + window_size + 1, n)):
-                pair_key = f"{tokens[i]}_{tokens[j]}"
-                if pair_key in self.redup_pairs:
-                    pairs.append((i, j))
-                    break  # Each word pairs with at most one partner
-        
+                right = tokens[j].strip().lower()
+                pair_key = f"{left}_{right}"
+
+                if pair_key in self.redup_pairs or right in self.redup_pairs:
+                    pairs.append((i, j, 1.0))
+                    break
+
+                if config and config.use_phonetic_redup:
+                    sim = self._phonetic_similarity(left, right)
+                    threshold = config.redup_similarity_threshold
+                    if sim >= threshold:
+                        pairs.append((i, j, sim))
+                        break
+
         return pairs
 
 

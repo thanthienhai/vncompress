@@ -72,6 +72,10 @@ from ..tone_aware.vietnamese_tones import (
     get_tone_analyzer,
     is_vietnamese,
 )
+from ..tone_aware.tone_scoring import (
+    PhonologicalConsistencyLoss,
+    TonePreservationProbe,
+)
 from ..morphology.merge_policy import (
     MorphologyAnalyzer,
     MorphologyConfig,
@@ -103,16 +107,15 @@ class ToneAwareCompressor(BaseCompressor):
         model: Optional[PreTrainedModel] = None,
         config: Optional[CompressionConfig] = None,
         device: str = 'cuda',
-        # Tone-aware parameters
-        alpha: float = 0.5,           # Base tone importance
-        beta: float = 0.3,           # Tone variety bonus
-        gamma: float = 0.4,          # Contrast amplification
-        tone_window: int = 2,        # Context window for contrast
-        # Base scoring
-        base_method: str = 'llmlingua',  # 'llmlingua', 'snapkv', 'selective'
-        # Options
+        alpha: float = 0.5,
+        beta: float = 0.3,
+        gamma: float = 0.4,
+        tone_window: int = 2,
+        base_method: str = 'llmlingua',
         auto_detect_language: bool = True,
-        fallback_to_base: bool = True,  # If not Vietnamese, use base method
+        fallback_to_base: bool = True,
+        use_model_tone: bool = False,
+        tone_probe_path: Optional[str] = None,
     ):
         super().__init__(tokenizer, model, config)
         self.device = device
@@ -123,14 +126,41 @@ class ToneAwareCompressor(BaseCompressor):
         self.base_method = base_method
         self.auto_detect_language = auto_detect_language
         self.fallback_to_base = fallback_to_base
-        
-        # Initialize tone analyzer with our parameters
+        self.use_model_tone = use_model_tone
+
         self.tone_analyzer = get_tone_analyzer(
             alpha=alpha, beta=beta, gamma=gamma
         )
-        
-        # Determine if tone-aware mode should be active
+
+        self._tone_probe: Optional[PhonologicalConsistencyLoss] = None
+        if model is not None and use_model_tone:
+            self._init_tone_probe(model)
+        if tone_probe_path and model is not None:
+            self._load_tone_probe(tone_probe_path)
+
         self._tone_active = True
+
+    def _init_tone_probe(self, model: PreTrainedModel):
+        hidden_dim = model.config.hidden_size
+        self._tone_probe = PhonologicalConsistencyLoss(
+            hidden_dim=hidden_dim, lambda_tone=0.0
+        )
+        self._tone_probe.eval()
+
+    def _load_tone_probe(self, path: str):
+        state = torch.load(path, map_location='cpu')
+        hidden_dim = state['tone_classifier.0.weight'].shape[1]
+        self._tone_probe = PhonologicalConsistencyLoss(
+            hidden_dim=hidden_dim, lambda_tone=0.0
+        )
+        self._tone_probe.load_state_dict(state)
+        self._tone_probe.eval()
+        self._tone_probe.to(self.device)
+        self.use_model_tone = True
+
+    def get_name(self) -> str:
+        suffix = "-model" if self.use_model_tone else ""
+        return f"ToneAware-{self.base_method}{suffix}"
     
     def get_name(self) -> str:
         return f"ToneAware-{self.base_method}"
@@ -207,6 +237,38 @@ class ToneAwareCompressor(BaseCompressor):
             token_str = token_str.replace('\u2581', ' ').replace('Ġ', ' ').strip()
             tokens.append(token_str)
         return tokens
+
+    def _compute_model_tone_weights(
+        self,
+        input_ids: List[int],
+    ) -> torch.Tensor:
+        """
+        Compute tone importance weights from model hidden states.
+
+        Uses the trained PhonologicalConsistencyLoss classifier as a probe:
+        higher tone prediction confidence → better tone encoding →
+        higher preservation weight.
+
+        This creates the direct training→inference bridge that was missing:
+        the model learns tone during training, and the same classifier
+        guides compression decisions at inference time.
+        """
+        n = len(input_ids)
+        input_t = torch.tensor([input_ids]).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(
+                input_t, output_hidden_states=True
+            )
+            hidden_states = outputs.hidden_states[-1]  # [1, S, D]
+
+        assert self._tone_probe is not None
+        self._tone_probe.to(self.device)
+        tone_weights = self._tone_probe.score_importance(
+            hidden_states
+        )  # [1, S]
+
+        return tone_weights.squeeze(0).cpu()
     
     def compress(
         self,
@@ -245,26 +307,23 @@ class ToneAwareCompressor(BaseCompressor):
                 return base.compress(input_ids)
         
         target_len = max(int(n / self.config.target_ratio), self.config.min_compressed_length)
-        
-        # Step 1: Compute base scores
+
         base_scores = self._compute_base_scores(input_ids)
-        
-        # Step 2: Decode tokens for tone analysis
-        tokens = self._decode_tokens(input_ids)
-        
-        # Step 3: Compute tone-aware scores
-        tone_infos = self.tone_analyzer.analyze_tokens(
-            tokens, window_size=self.tone_window
-        )
-        
-        # Build combined score
+
+        if self.use_model_tone and self.model is not None and self._tone_probe is not None:
+            tone_weights = self._compute_model_tone_weights(input_ids)
+        else:
+            tokens = self._decode_tokens(input_ids)
+            tone_infos = self.tone_analyzer.analyze_tokens(
+                tokens, window_size=self.tone_window
+            )
+            tone_weights = torch.tensor(
+                [max(0.5, min(3.0, info.preservation_weight)) for info in tone_infos]
+            )
+
         combined_scores = base_scores.clone()
-        for i, info in enumerate(tone_infos):
-            # Tone weight × contrast factor
-            tone_multiplier = info.preservation_weight
-            # Clamp to reasonable range
-            tone_multiplier = max(0.5, min(3.0, tone_multiplier))
-            combined_scores[i] *= tone_multiplier
+        if len(tone_weights) == len(combined_scores):
+            combined_scores *= tone_weights
         
         # Step 4: Select tokens
         k = self.config.keep_boundary_tokens
@@ -304,10 +363,11 @@ class ToneAwareCompressor(BaseCompressor):
                 'language': self._detect_language(input_ids) if self.auto_detect_language else 'unknown',
                 'tone_active': self._tone_active,
                 'tone_preservation_rate': tone_preservation_rate,
-                'avg_tone_weight': sum(info.preservation_weight for info in tone_infos) / max(len(tone_infos), 1),
+                'avg_tone_weight': tone_weights.mean().item() if len(tone_weights) > 0 else 1.0,
                 'alpha': self.alpha,
                 'beta': self.beta,
                 'gamma': self.gamma,
+                'use_model_tone': self.use_model_tone,
             },
         )
 
@@ -423,7 +483,10 @@ class MorphologyAwareCompressor(BaseCompressor):
         redup_pairs = []
         if self.merge_redup_pairs:
             redup_tokens = [w.token for w in word_infos]
-            redup_pairs = self.morph_analyzer.find_reduplicative_pairs(redup_tokens)
+            raw_pairs = self.morph_analyzer.find_reduplicative_pairs(
+                redup_tokens, config=self.morph_config
+            )
+            redup_pairs = [(l, r) for l, r, _ in raw_pairs]
         
         # Step 3: Compute base scores (LLMLingua-style)
         base_scores = torch.ones(n)
@@ -577,12 +640,17 @@ class CombinedCompressor(BaseCompressor):
         f_compound: float = 1.5,
         # Options
         auto_detect: bool = True,
-        tone_weight: float = 0.5,      # Blend: tone vs morphology importance
+        tone_weight: float = 0.5,
+        use_attention: bool = False,
+        attention_weight: float = 0.3,
     ):
         super().__init__(tokenizer, model, config)
         self.device = device
-        
-        # Create sub-compressors
+        self.tone_weight = tone_weight
+        self.attention_weight = attention_weight
+        self.use_attention = use_attention
+        self.auto_detect = auto_detect
+
         self.tone_comp = ToneAwareCompressor(
             tokenizer, model, config, device,
             alpha=alpha, beta=beta, gamma=gamma,
@@ -594,13 +662,54 @@ class CombinedCompressor(BaseCompressor):
             f_func=f_func, f_content=f_content,
             f_redup=f_redup, f_compound=f_compound,
         )
-        
-        self.tone_weight = tone_weight
-        self.auto_detect = auto_detect
     
     def get_name(self) -> str:
         return "Combined-ToneMorph"
-    
+
+    def _compute_attention_importance(
+        self,
+        input_ids: List[int],
+        observation_window: int = 64,
+    ) -> torch.Tensor:
+        """
+        Compute token importance from attention patterns (SnapKV-style).
+
+        Uses the last few tokens as an observation window to identify
+        which prompt tokens consistently receive high attention across
+        heads and layers. High-attention tokens indicate key information.
+
+        Reference: SnapKV (NeurIPS 2024)
+        """
+        n = len(input_ids)
+        input_t = torch.tensor([input_ids]).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(
+                input_t,
+                output_attentions=True,
+            )
+
+        attentions = outputs.attentions
+        if not attentions:
+            return torch.ones(n)
+
+        obs_len = min(observation_window, n)
+        stacked = torch.stack(attentions, dim=0)  # [L, B, H, S, S]
+
+        obs_attention = stacked[:, :, :, -obs_len:, :]
+
+        head_importance = obs_attention.mean(dim=3)
+        importance = head_importance.mean(dim=(0, 1, 2)).squeeze(0).cpu()
+
+        if importance.numel() > 0 and importance.max() > importance.min():
+            importance = (importance - importance.min()) / (
+                importance.max() - importance.min() + 1e-8
+            )
+        importance = 1.0 + importance
+        importance = torch.clamp(importance, 0.5, 3.0)
+
+        return importance
+
     def compress(
         self,
         input_ids: List[int],
@@ -650,6 +759,15 @@ class CombinedCompressor(BaseCompressor):
         # Blend scores
         wt = self.tone_weight
         combined_weights = wt * tone_weights + (1 - wt) * morph_weights
+
+        if self.use_attention and self.model is not None:
+            attn_importance = self._compute_attention_importance(input_ids)
+            if len(attn_importance) == len(combined_weights):
+                aw = self.attention_weight
+                combined_weights = (
+                    (1 - aw) * combined_weights + aw * attn_importance
+                )
+
         combined_scores = base_scores * combined_weights
         
         # Select tokens
