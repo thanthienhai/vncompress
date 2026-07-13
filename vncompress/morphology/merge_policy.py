@@ -192,10 +192,10 @@ class MorphologyAnalyzer:
       3. Optional: underthesea for POS tagging (if available)
     """
 
-    def __init__(self, use_pos_tagger: bool = False):
+    def __init__(self, use_pos_tagger: bool = False, use_word_segmentation: bool = True):
         self.use_pos_tagger = use_pos_tagger
         self.function_words = VIETNAMESE_FUNCTION_WORDS
-        
+
         # Build reduplicative lookup: second word → first word
         self.redup_pairs: Dict[str, str] = {}
         for first, second in REDUPLICATIVE_PATTERNS:
@@ -204,11 +204,29 @@ class MorphologyAnalyzer:
 
         # Sino-Vietnamese morphemes
         self._sino_morphemes: Set[str] = self._build_sino_set()
-        
+
         # POS tagger (lazy loading)
         self._pos_tagger = None
         if use_pos_tagger:
             self._init_pos_tagger()
+
+        # Word segmenter: regroups decoded BPE tokens (e.g. 'máy', 'tính')
+        # into known multi-syllable compounds ('máy_tính') so COMPOUND
+        # classification works on real tokenizer output, not just tokens
+        # that already contain a literal '_'.
+        self.use_word_segmentation = use_word_segmentation
+        self._segmenter = None
+        if use_word_segmentation:
+            self._init_segmenter()
+
+    def _init_segmenter(self):
+        """Lazily construct the VietnameseWordSegmenter used for compound detection."""
+        try:
+            from ..tone_aware.vietnamese_linguistics import VietnameseWordSegmenter
+            self._segmenter = VietnameseWordSegmenter(use_external=True)
+        except Exception:
+            self._segmenter = None
+            self.use_word_segmentation = False
 
     @staticmethod
     def _build_sino_set() -> Set[str]:
@@ -314,6 +332,29 @@ class MorphologyAnalyzer:
 
         return WordClass.CONTENT
 
+    def _find_compound_spans(self, tokens: List[str]) -> Set[int]:
+        """
+        Regroup decoded tokens with the word segmenter and return the set of
+        token indices that fall inside a known multi-token compound.
+
+        This is what lets COMPOUND actually fire on real tokenizer output:
+        `classify_word` alone only catches single tokens that already contain
+        a literal '_' (an artifact of the hand-built word lists), which real
+        BPE-decoded text essentially never produces.
+        """
+        if not self._segmenter:
+            return set()
+        try:
+            groups = self._segmenter.group_subword_tokens_with_spans(tokens)
+        except Exception:
+            return set()
+
+        compound_indices: Set[int] = set()
+        for word, indices in groups:
+            if len(indices) > 1 and self._segmenter.is_known_compound(word):
+                compound_indices.update(indices)
+        return compound_indices
+
     def classify_batch(
         self,
         tokens: List[str],
@@ -330,7 +371,7 @@ class MorphologyAnalyzer:
             List of WordInfo for each token
         """
         results = []
-        
+
         # If POS tagger available, use it for better classification
         pos_tags = {}
         if self.use_pos_tagger and self._pos_tagger and sentence:
@@ -341,8 +382,13 @@ class MorphologyAnalyzer:
             except Exception:
                 pass  # Fall back to dictionary-based
 
+        compound_indices = self._find_compound_spans(tokens) if self.use_word_segmentation else set()
+
         for i, token in enumerate(tokens):
-            word_class = self.classify_word(token)
+            if i in compound_indices:
+                word_class = WordClass.COMPOUND
+            else:
+                word_class = self.classify_word(token)
             info = WordInfo(
                 token=token,
                 token_id=i,
@@ -353,7 +399,7 @@ class MorphologyAnalyzer:
                 is_compound_part=(word_class == WordClass.COMPOUND),
             )
             results.append(info)
-        
+
         return results
 
     def get_preservation_multiplier(

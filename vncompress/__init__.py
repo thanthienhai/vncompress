@@ -9,6 +9,8 @@ Key modules:
   - morphology  : POS-based word classification and merge policies (no torch needed)
   - compressors : Compression methods (requires torch + transformers)
   - evaluation  : VCC-Bench benchmark and evaluation metrics (requires torch)
+  - calibration : Weight/parameter search for the scoring blend (no torch needed
+                  to run the search loop itself; compressor factories may require it)
 
 Quick start (no GPU needed):
   >>> from vncompress.tone_aware import VietnameseToneAnalyzer, is_vietnamese

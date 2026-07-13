@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 
 from ..tone_aware.vietnamese_tones import VietnameseToneAnalyzer, get_tone_analyzer
 from ..morphology.merge_policy import MorphologyAnalyzer, get_morphology_analyzer, WordClass
+from .quality_gate import SemanticQualityGate
+from .query_aware import compute_query_relevance_weights
 
 
 @dataclass
@@ -115,67 +117,94 @@ class TinyModelScorer:
         self,
         input_ids: List[int],
         window_size: int = 512,
+        stride: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Compute perplexity-based token importance using the tiny model.
-        
+
         Formula (same as LLMLingua):
           importance(t_i) = -log P(t_i | context)
-        
+
         Higher perplexity → token is less expected → more important → keep.
-        
-        Uses the TINY model for fast scoring. Processing time: ~10-50ms for 512 tokens.
-        
+
+        Uses overlapping sliding windows so tokens after the first window are
+        still scored with real left context instead of having their context
+        reset to empty at every window boundary. Each window of `window_size`
+        tokens only contributes scores for its trailing (non-overlapping)
+        tokens; the leading `window_size - stride` tokens serve purely as
+        context, following the standard fixed-length-model perplexity scheme
+        (see HF's "Perplexity of fixed-length models" guide).
+
         Args:
             input_ids: Token IDs to score
-            window_size: Process in chunks of this size (saves VRAM)
-        
+            window_size: Max tokens per forward pass (VRAM budget)
+            stride: Advance step between windows. Defaults to window_size // 2,
+                    i.e. half of each window is unique left context for the
+                    next window's scored tokens.
+
         Returns:
             Tensor of shape [n] with importance scores (higher = more important)
         """
         n = len(input_ids)
         device = next(self.model.parameters()).device
-        
+
+        if stride is None:
+            stride = max(1, window_size // 2)
+        stride = max(1, min(stride, window_size - 1)) if window_size > 1 else 1
+
         scores = torch.zeros(n)
-        
-        # Process in windows to save VRAM
-        for start in range(0, max(n - 1, 1), window_size):
-            end = min(start + window_size + 1, n)
-            chunk = input_ids[start:end]
-            
+
+        begin = 0
+        prev_end = 0
+        while begin < max(n - 1, 1):
+            end = min(begin + window_size, n)
+            chunk = input_ids[begin:end]
+
             if len(chunk) < 2:
-                continue
-            
+                break
+
             input_tensor = torch.tensor([chunk], device=device)
             outputs = self.model(input_tensor)
             logits = outputs.logits  # [1, len(chunk), vocab_size]
-            
+
             # Shift for next-token prediction
             shift_logits = logits[:, :-1, :]  # predict token at position i+1 from i
             shift_labels = input_tensor[:, 1:]  # actual token at position i+1
-            
+
             log_probs = F.log_softmax(shift_logits, dim=-1)
             token_log_probs = log_probs.gather(
                 -1, shift_labels.unsqueeze(-1)
             ).squeeze(-1)  # [1, len(chunk)-1]
-            
-            # Importance = negative log probability
-            # Token that model finds surprising → high importance
-            importance = -token_log_probs[0]  # [len(chunk)-1]
-            
-            # First position has no importance estimate, use mean
-            scores[start] = importance[0] if len(importance) > 0 else 0
-            for i, imp in enumerate(importance):
-                idx = start + i + 1
-                if idx < n:
-                    scores[idx] = imp
-        
+
+            # importance[k] scores the prediction of absolute position begin+k+1
+            importance = -token_log_probs[0]
+
+            # First window: nothing has been scored yet, so also approximate
+            # position 0 (which has no predecessor) with the importance of
+            # predicting position 1. Later windows only overwrite positions
+            # past what the previous window already covered — those overlap
+            # positions were already scored using strictly more left context.
+            target_start_abs = 1 if begin == 0 else prev_end
+            if begin == 0 and len(importance) > 0:
+                scores[0] = importance[0]
+
+            for k in range(len(importance)):
+                pos = begin + k + 1
+                if pos < target_start_abs or pos >= n:
+                    continue
+                scores[pos] = importance[k]
+
+            prev_end = end
+            if end >= n:
+                break
+            begin += stride
+
         # Normalize to [0, 1]
         if scores.max() > scores.min():
             scores = (scores - scores.min()) / (scores.max() - scores.min())
         else:
             scores = torch.ones_like(scores) * 0.5
-        
+
         return scores
     
     def compute_tone_scores(
@@ -222,12 +251,19 @@ class TinyModelScorer:
         self,
         input_ids: List[int],
         tokens: List[str],
+        query: Optional[str] = None,
+        query_boost: float = 1.5,
     ) -> torch.Tensor:
         """
         Combine all three scoring signals with configured blend weights.
-        
+
         S(t) = w_p × S_perplexity(t) + w_t × S_tone(t) + w_m × S_morph(t)
-        
+
+        query/query_boost: optional downstream question or tool schema
+        (LACC C2). Tokens overlapping with it are multiplied by query_boost
+        before the final normalization, so they rank higher without a hard
+        keep-ratio override.
+
         Returns normalized tensor of shape [n] (higher = keep).
         """
         n = len(input_ids)
@@ -250,7 +286,13 @@ class TinyModelScorer:
             w.tone * tone_scores[:min_len] +
             w.morphology * morph_scores[:min_len]
         )
-        
+
+        if query:
+            query_weights = torch.tensor(
+                compute_query_relevance_weights(tokens[:min_len], query, boost=query_boost)
+            )
+            combined = combined * query_weights
+
         # Normalize
         if combined.max() > combined.min():
             combined = (combined - combined.min()) / (combined.max() - combined.min())
@@ -265,16 +307,22 @@ class TinyModelScorer:
         target_ratio: float = 4.0,
         keep_boundary: int = 2,
         tokens: Optional[List[str]] = None,
+        query: Optional[str] = None,
+        query_boost: float = 1.5,
     ) -> Tuple[List[int], torch.Tensor, dict]:
         """
         Full pipeline: score tokens → select top-k → return compressed + scores.
-        
+
         Args:
             input_ids: Original token IDs
             target_ratio: Target compression ratio
             keep_boundary: Always keep first/last N tokens
             tokens: Pre-decoded tokens (optional, avoids re-decoding)
-        
+            query: optional downstream question / tool schema (LACC C2) —
+                tokens overlapping with it are boosted so they survive
+                compression regardless of the fixed target_ratio.
+            query_boost: multiplier applied to query-overlapping tokens.
+
         Returns:
             (compressed_ids, all_scores, stats_dict)
         """
@@ -291,8 +339,8 @@ class TinyModelScorer:
                 tokens.append(t)
         
         # Compute combined scores
-        scores = self.compute_combined_scores(input_ids, tokens)
-        
+        scores = self.compute_combined_scores(input_ids, tokens, query=query, query_boost=query_boost)
+
         # Always keep boundaries
         k = keep_boundary
         mid_start, mid_end = k, max(k, n - k)
@@ -320,8 +368,9 @@ class TinyModelScorer:
             'weights': self.weights.to_dict(),
             'mean_score': scores.mean().item(),
             'std_score': scores.std().item(),
+            'query_applied': bool(query),
         }
-        
+
         return compressed, scores, stats
     
     def to(self, device: str):
@@ -500,6 +549,7 @@ class EnhancedCompressor:
         tokenizer,
         scorer: Optional[TinyModelScorer] = None,
         weights: Optional[ScoreWeights] = None,
+        quality_gate: Optional[SemanticQualityGate] = None,
     ):
         """
         Args:
@@ -508,18 +558,23 @@ class EnhancedCompressor:
             weights: Blend weights. If None, auto-adapts based on scorer availability:
                      - scorer available:  0.4 ppl, 0.3 tone, 0.3 morph
                      - scorer unavailable: 0.0 ppl, 0.5 tone, 0.5 morph
+            quality_gate: Optional SemanticQualityGate (LACC improvement C1). If set,
+                its `similarity_fn` is typically built via `make_similarity_fn_from_model`
+                using the scorer's own tiny model, so restoring dropped tokens on a
+                similarity drop costs no extra VRAM.
         """
         self.tokenizer = tokenizer
         self.scorer = scorer
-        
+
         if weights is None:
             if scorer is not None:
                 weights = ScoreWeights(perplexity=0.4, tone=0.3, morphology=0.3)
             else:
                 weights = ScoreWeights(perplexity=0.0, tone=0.5, morphology=0.5)
-        
+
         self.weights = weights
-        
+        self.quality_gate = quality_gate
+
         # Always available (CPU, no deps)
         self.tone_analyzer = get_tone_analyzer()
         self.morph_analyzer = get_morphology_analyzer()
@@ -600,16 +655,24 @@ class EnhancedCompressor:
             mid_budget = min(mid_budget, len(mid_scores))
             _, top_indices = torch.topk(mid_scores, mid_budget)
             top_indices = sorted(top_indices.tolist())
-            compressed = (
-                input_ids[:k] +
-                [input_ids[mid_start + i] for i in top_indices] +
-                input_ids[mid_end:]
+            retained_indices = (
+                list(range(k)) +
+                [mid_start + i for i in top_indices] +
+                list(range(mid_end, n))
             )
         else:
-            compressed = list(input_ids)
-        
+            retained_indices = list(range(n))
+
+        gate_info: dict = {}
+        if self.quality_gate is not None:
+            compressed, gate_info = self.quality_gate.apply(
+                input_ids, retained_indices, combined.tolist()
+            )
+        else:
+            compressed = [input_ids[i] for i in retained_indices]
+
         elapsed = (time.time() - start) * 1000
-        
+
         stats = {
             'has_scorer': self.scorer is not None,
             'weights': self.weights.to_dict(),
@@ -618,7 +681,9 @@ class EnhancedCompressor:
             'mean_morph_score': morph_scores.mean().item(),
             'mean_ppl_score': ppl_scores.mean().item(),
         }
-        
+        if gate_info:
+            stats['quality_gate'] = gate_info
+
         return compressed, stats
     
     def has_external_scorer(self) -> bool:

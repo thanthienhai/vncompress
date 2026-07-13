@@ -57,7 +57,7 @@ class ToneTrainingDataset(Dataset):
         tone_labels = []
         for tid in ids:
             ts = self.tokenizer.decode([tid])
-            ts = ts.replace('\u2581', ' ').replace('\u0130', ' ').strip()
+            ts = ts.replace('\u2581', ' ').replace('\u0120', ' ').strip()
             tn = self.tone_analyzer.get_dominant_tone(ts[:20])
             tone_labels.append(self.TONE_NAME_TO_ID.get(tn or 'ngang', 0))
         labels = ids.copy()

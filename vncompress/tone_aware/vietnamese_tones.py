@@ -23,7 +23,7 @@ Reference:
 
 import re
 import unicodedata
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Callable, Sequence
 from dataclasses import dataclass
 
 
@@ -152,16 +152,27 @@ class VietnameseToneAnalyzer:
       s_tone(t) = w_tone(t) × f_contrast(t, context)
     """
 
-    def __init__(self, alpha: float = 0.5, beta: float = 0.3, gamma: float = 0.4):
+    def __init__(
+        self,
+        alpha: float = 0.5,
+        beta: float = 0.3,
+        gamma: float = 0.4,
+        tone_contrast: Optional[Dict[Tuple[str, str], float]] = None,
+    ):
         """
         Args:
             alpha: Base importance of tone information (0-1)
             beta: Bonus for tone variety within a token (0-1)
             gamma: Amplification for tonal contrast with neighbors (0-1)
+            tone_contrast: Optional tone x tone contrast matrix to use instead
+                of the hand-picked default TONE_CONTRAST. Pass the output of
+                `estimate_tone_contrast_matrix()` to use an embedding-derived,
+                data-driven matrix instead.
         """
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
+        self.tone_contrast = tone_contrast if tone_contrast is not None else TONE_CONTRAST
         self._build_lookup()
 
     def _build_lookup(self):
@@ -279,10 +290,10 @@ class VietnameseToneAnalyzer:
         
         for neighbor in neighbor_tokens:
             neighbor_tone = self.get_dominant_tone(neighbor) or 'ngang'
-            contrast = TONE_CONTRAST.get((my_tone, neighbor_tone), 0.0)
+            contrast = self.tone_contrast.get((my_tone, neighbor_tone), 0.0)
             # Symmetric lookup
             if contrast == 0.0 and my_tone != neighbor_tone:
-                contrast = TONE_CONTRAST.get((neighbor_tone, my_tone), 0.5)
+                contrast = self.tone_contrast.get((neighbor_tone, my_tone), 0.5)
             contrasts.append(contrast)
         
         mean_contrast = sum(contrasts) / len(contrasts)
@@ -425,6 +436,111 @@ def extract_tone_marks(text: str) -> List[str]:
         tone = MANUAL_TONE_MAP.get(c, 'ngang')
         marks.append(tone)
     return marks
+
+
+# ============================================================================
+# Data-Driven Tone Contrast Estimation (LACC improvement B4)
+# ============================================================================
+#
+# TONE_CONTRAST above encodes phonetic-feature guesses about how "different"
+# two tones sound (e.g. ngang vs ngã = 0.9). This is a reasonable prior but
+# it's hand-picked, not measured. The function below instead estimates
+# contrast empirically: take minimal-pair syllable families (same consonant +
+# vowel, differing only by tone — "ma"/"má"/"mà"/"mả"/"mã"/"mạ"), embed each
+# variant with a trained model, and use the embedding distance between tone
+# variants as the contrast signal. Tones a model actually represents as very
+# different get a high contrast score; tones it treats as similar get a low
+# one — grounded in what the model learned rather than a linguist's guess.
+
+# Common Vietnamese consonant + vowel-tone-group minimal-pair families.
+# Each dict maps tone_name -> syllable. Not every entry is necessarily a
+# common dictionary word (Vietnamese doesn't fill every tone slot for every
+# syllable), but all six variants are valid to embed and compare.
+DEFAULT_SYLLABLE_FAMILIES: List[Dict[str, str]] = [
+    {'ngang': 'ma', 'huyền': 'mà', 'sắc': 'má', 'hỏi': 'mả', 'ngã': 'mã', 'nặng': 'mạ'},
+    {'ngang': 'la', 'huyền': 'là', 'sắc': 'lá', 'hỏi': 'lả', 'ngã': 'lã', 'nặng': 'lạ'},
+    {'ngang': 'ba', 'huyền': 'bà', 'sắc': 'bá', 'hỏi': 'bả', 'ngã': 'bã', 'nặng': 'bạ'},
+    {'ngang': 'ca', 'huyền': 'cà', 'sắc': 'cá', 'hỏi': 'cả', 'ngã': 'cã', 'nặng': 'cạ'},
+    {'ngang': 'da', 'huyền': 'dà', 'sắc': 'dá', 'hỏi': 'dả', 'ngã': 'dã', 'nặng': 'dạ'},
+    {'ngang': 'ha', 'huyền': 'hà', 'sắc': 'há', 'hỏi': 'hả', 'ngã': 'hã', 'nặng': 'hạ'},
+    {'ngang': 'ta', 'huyền': 'tà', 'sắc': 'tá', 'hỏi': 'tả', 'ngã': 'tã', 'nặng': 'tạ'},
+    {'ngang': 'sa', 'huyền': 'sà', 'sắc': 'sá', 'hỏi': 'sả', 'ngã': 'sã', 'nặng': 'sạ'},
+    {'ngang': 'ra', 'huyền': 'rà', 'sắc': 'rá', 'hỏi': 'rả', 'ngã': 'rã', 'nặng': 'rạ'},
+    {'ngang': 'xa', 'huyền': 'xà', 'sắc': 'xá', 'hỏi': 'xả', 'ngã': 'xã', 'nặng': 'xạ'},
+]
+
+
+def _euclidean(u: Sequence[float], v: Sequence[float]) -> float:
+    return sum((a - b) ** 2 for a, b in zip(u, v)) ** 0.5
+
+
+def estimate_tone_contrast_matrix(
+    get_embedding: Callable[[str], Sequence[float]],
+    syllable_families: Optional[List[Dict[str, str]]] = None,
+    distance_fn: Callable[[Sequence[float], Sequence[float]], float] = _euclidean,
+) -> Dict[Tuple[str, str], float]:
+    """
+    Estimate a TONE_CONTRAST matrix from embedding distances instead of
+    hand-picked phonetic-feature guesses.
+
+    Args:
+        get_embedding: token string -> fixed-size embedding vector. This is
+            kept generic (no torch/model dependency here) so any embedding
+            source works, e.g.:
+
+                tone_analyzer_model = ...  # HF model
+                def get_embedding(token):
+                    ids = tokenizer.encode(token, add_special_tokens=False)
+                    vecs = model.get_input_embeddings()(torch.tensor(ids))
+                    return vecs.mean(dim=0).tolist()
+
+        syllable_families: list of {tone_name: syllable} dicts (minimal
+            pairs). Defaults to DEFAULT_SYLLABLE_FAMILIES.
+        distance_fn: vector distance function, defaults to Euclidean.
+
+    Returns:
+        Dict[(tone_a, tone_b), float] with the same key shape as the module
+        TONE_CONTRAST (only pairs with tone_a <= tone_b by TONE_NAME_TO_ID
+        order are populated, diagonal = 0.0), min-max normalized to [0, 1]
+        so it plugs into the same w_tone/f_contrast formulas unchanged.
+    """
+    families = syllable_families or DEFAULT_SYLLABLE_FAMILIES
+    tone_names = list(TONE_ID_TO_NAME.values())
+
+    pair_distances: Dict[Tuple[str, str], List[float]] = {}
+    for family in families:
+        embeddings = {}
+        for tone in tone_names:
+            syllable = family.get(tone)
+            if not syllable:
+                continue
+            try:
+                embeddings[tone] = get_embedding(syllable)
+            except Exception:
+                continue
+
+        present_tones = list(embeddings.keys())
+        for i, tone_a in enumerate(present_tones):
+            for tone_b in present_tones[i + 1:]:
+                dist = distance_fn(embeddings[tone_a], embeddings[tone_b])
+                key = tuple(sorted((tone_a, tone_b), key=tone_names.index))
+                pair_distances.setdefault(key, []).append(dist)
+
+    if not pair_distances:
+        # No families produced usable embeddings — fall back to the
+        # hand-picked matrix rather than returning an empty one.
+        return dict(TONE_CONTRAST)
+
+    mean_distances = {k: sum(v) / len(v) for k, v in pair_distances.items()}
+    lo = min(mean_distances.values())
+    hi = max(mean_distances.values())
+    spread = hi - lo
+
+    result: Dict[Tuple[str, str], float] = {(t, t): 0.0 for t in tone_names}
+    for key, dist in mean_distances.items():
+        result[key] = (dist - lo) / spread if spread > 1e-8 else 0.5
+
+    return result
 
 
 # Singleton instance for reuse

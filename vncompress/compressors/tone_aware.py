@@ -56,7 +56,11 @@ Why Morphology-Aware matters for Vietnamese:
 ---
 
 COMBINED SCORE:
-  S_combined(t) = S_base(t) × w_tone(t) × f_contrast(t,N) × f_class(c(t))
+  S_combined(t) = S_base(t) × [w_t × w_tone(t)·f_contrast(t,N) + (1 - w_t) × f_class(c(t))]
+
+  i.e. a weighted linear blend of the tone-aware and morphology-aware
+  multipliers (weight w_t = tone_weight), not a product of all four
+  factors — see CombinedCompressor.compress() for the exact computation.
 
 This provides comprehensive language-aware compression for Vietnamese.
 """
@@ -83,6 +87,8 @@ from ..morphology.merge_policy import (
     WordClass,
     WordInfo,
 )
+from .quality_gate import SemanticQualityGate
+from .query_aware import compute_query_relevance_weights
 
 
 class ToneAwareCompressor(BaseCompressor):
@@ -110,12 +116,14 @@ class ToneAwareCompressor(BaseCompressor):
         alpha: float = 0.5,
         beta: float = 0.3,
         gamma: float = 0.4,
+        tone_contrast: Optional[Dict[Tuple[str, str], float]] = None,
         tone_window: int = 2,
         base_method: str = 'llmlingua',
         auto_detect_language: bool = True,
         fallback_to_base: bool = True,
         use_model_tone: bool = False,
         tone_probe_path: Optional[str] = None,
+        quality_gate: Optional[SemanticQualityGate] = None,
     ):
         super().__init__(tokenizer, model, config)
         self.device = device
@@ -127,9 +135,12 @@ class ToneAwareCompressor(BaseCompressor):
         self.auto_detect_language = auto_detect_language
         self.fallback_to_base = fallback_to_base
         self.use_model_tone = use_model_tone
+        self.quality_gate = quality_gate
 
+        # tone_contrast: optional data-driven matrix from
+        # estimate_tone_contrast_matrix(), overriding the hand-picked default.
         self.tone_analyzer = get_tone_analyzer(
-            alpha=alpha, beta=beta, gamma=gamma
+            alpha=alpha, beta=beta, gamma=gamma, tone_contrast=tone_contrast
         )
 
         self._tone_probe: Optional[PhonologicalConsistencyLoss] = None
@@ -161,10 +172,7 @@ class ToneAwareCompressor(BaseCompressor):
     def get_name(self) -> str:
         suffix = "-model" if self.use_model_tone else ""
         return f"ToneAware-{self.base_method}{suffix}"
-    
-    def get_name(self) -> str:
-        return f"ToneAware-{self.base_method}"
-    
+
     def _compute_base_scores(
         self,
         input_ids: List[int],
@@ -310,13 +318,18 @@ class ToneAwareCompressor(BaseCompressor):
 
         base_scores = self._compute_base_scores(input_ids)
 
+        # Tone analysis is always computed from the decoded characters (cheap,
+        # no model call) so it is available for the tone-preservation metric
+        # below regardless of which scoring path (model probe vs. heuristic)
+        # supplies the actual selection weights.
+        tokens = self._decode_tokens(input_ids)
+        tone_infos = self.tone_analyzer.analyze_tokens(
+            tokens, window_size=self.tone_window
+        )
+
         if self.use_model_tone and self.model is not None and self._tone_probe is not None:
             tone_weights = self._compute_model_tone_weights(input_ids)
         else:
-            tokens = self._decode_tokens(input_ids)
-            tone_infos = self.tone_analyzer.analyze_tokens(
-                tokens, window_size=self.tone_window
-            )
             tone_weights = torch.tensor(
                 [max(0.5, min(3.0, info.preservation_weight)) for info in tone_infos]
             )
@@ -324,51 +337,61 @@ class ToneAwareCompressor(BaseCompressor):
         combined_scores = base_scores.clone()
         if len(tone_weights) == len(combined_scores):
             combined_scores *= tone_weights
-        
+
         # Step 4: Select tokens
         k = self.config.keep_boundary_tokens
         mid_scores = combined_scores[k:n - k] if n > 2 * k else combined_scores
         mid_budget = max(0, target_len - 2 * k)
-        
+
         if mid_budget > 0 and mid_budget < len(mid_scores):
             _, top_indices = torch.topk(mid_scores, mid_budget)
             top_indices = sorted(top_indices.tolist())
-            compressed = (
-                input_ids[:k] +
-                [input_ids[k + i] for i in top_indices] +
-                input_ids[n - k:]
-            )
+            retained_indices = list(range(k)) + [k + i for i in top_indices] + list(range(n - k, n))
         else:
-            compressed = list(input_ids)
-        
+            retained_indices = list(range(n))
+
+        gate_info: Dict = {}
+        if self.quality_gate is not None:
+            compressed, gate_info = self.quality_gate.apply(
+                input_ids, retained_indices, combined_scores.tolist()
+            )
+            retained_set = set(gate_info['retained_indices'])
+        else:
+            compressed = [input_ids[i] for i in retained_indices]
+            retained_set = set(retained_indices)
+
         elapsed = (time.time() - start) * 1000
-        
-        # Compute tone preservation metrics
-        original_tones = sum(1 for info in tone_infos if info.tones_present)
-        # Count preserved tones (approximate: check compressed tokens)
-        preserved_tones = 0
-        compressed_tokens = self._decode_tokens(compressed)
-        for ct in compressed_tokens:
-            for t in self.tone_analyzer.get_tone_sequence(ct):
-                if t > 0:  # non-ngang
-                    preserved_tones += 1
-        
-        tone_preservation_rate = preserved_tones / max(original_tones, 1)
-        
+
+        # Tone Preservation Rate (bounded [0, 1]):
+        # of the original tokens that carried a non-ngang tone, what fraction
+        # were retained by index in the compressed output. This is an exact
+        # per-token check (we know precisely which original indices survive),
+        # unlike re-scanning decoded compressed text for tone characters.
+        tone_bearing_indices = [i for i, info in enumerate(tone_infos) if info.tones_present]
+        if tone_bearing_indices:
+            preserved_tones = sum(1 for i in tone_bearing_indices if i in retained_set)
+            tone_preservation_rate = preserved_tones / len(tone_bearing_indices)
+        else:
+            tone_preservation_rate = 1.0
+
+        metadata = {
+            'language': self._detect_language(input_ids) if self.auto_detect_language else 'unknown',
+            'tone_active': self._tone_active,
+            'tone_preservation_rate': tone_preservation_rate,
+            'avg_tone_weight': tone_weights.mean().item() if len(tone_weights) > 0 else 1.0,
+            'alpha': self.alpha,
+            'beta': self.beta,
+            'gamma': self.gamma,
+            'use_model_tone': self.use_model_tone,
+        }
+        if gate_info:
+            metadata['quality_gate'] = gate_info
+
         return self._build_result(
             compressed_ids=compressed,
             original_length=n,
             processing_time_ms=elapsed,
-            metadata={
-                'language': self._detect_language(input_ids) if self.auto_detect_language else 'unknown',
-                'tone_active': self._tone_active,
-                'tone_preservation_rate': tone_preservation_rate,
-                'avg_tone_weight': tone_weights.mean().item() if len(tone_weights) > 0 else 1.0,
-                'alpha': self.alpha,
-                'beta': self.beta,
-                'gamma': self.gamma,
-                'use_model_tone': self.use_model_tone,
-            },
+            metadata=metadata,
         )
 
 
@@ -613,9 +636,12 @@ class CombinedCompressor(BaseCompressor):
     Combined Tone-Aware + Morphology-Aware Compressor (Novel Contribution #3).
     
     Applies both tone and morphology signals together:
-    
-      S(t) = S_base(t) × w_tone(t) × f_contrast(t,N) × f_class(c(t))
-    
+
+      S(t) = S_base(t) × [w_t × w_tone(t)·f_contrast(t,N) + (1 - w_t) × f_class(c(t))]
+
+    i.e. a weighted linear blend of the two multipliers (see `tone_weight`),
+    not their product — this matches the implementation below.
+
     This is the most comprehensive language-aware compressor for Vietnamese,
     combining tonal information preservation with morphological structure awareness.
     
@@ -632,6 +658,7 @@ class CombinedCompressor(BaseCompressor):
         alpha: float = 0.5,
         beta: float = 0.3,
         gamma: float = 0.4,
+        tone_contrast: Optional[Dict[Tuple[str, str], float]] = None,
         tone_window: int = 2,
         # Morphology params
         f_func: float = 0.4,
@@ -643,6 +670,7 @@ class CombinedCompressor(BaseCompressor):
         tone_weight: float = 0.5,
         use_attention: bool = False,
         attention_weight: float = 0.3,
+        quality_gate: Optional[SemanticQualityGate] = None,
     ):
         super().__init__(tokenizer, model, config)
         self.device = device
@@ -650,10 +678,12 @@ class CombinedCompressor(BaseCompressor):
         self.attention_weight = attention_weight
         self.use_attention = use_attention
         self.auto_detect = auto_detect
+        self.quality_gate = quality_gate
 
         self.tone_comp = ToneAwareCompressor(
             tokenizer, model, config, device,
             alpha=alpha, beta=beta, gamma=gamma,
+            tone_contrast=tone_contrast,
             tone_window=tone_window,
             base_method='llmlingua',
         )
@@ -713,16 +743,25 @@ class CombinedCompressor(BaseCompressor):
     def compress(
         self,
         input_ids: List[int],
+        query: Optional[str] = None,
+        query_boost: float = 1.5,
         **kwargs,
     ) -> CompressionResult:
         """
         Combined compression using both tone and morphology signals.
-        
+
         Steps:
           1. Run tone-aware compression to get tone-weighted scores
-          2. Run morphology-aware compression to get morphology-weighted scores  
+          2. Run morphology-aware compression to get morphology-weighted scores
           3. Blend both score sets: S = w_t × S_tone + (1-w_t) × S_morph
-          4. Select top-k tokens
+          4. Boost tokens overlapping `query`, if provided (LACC C2)
+          5. Select top-k tokens
+
+        Args:
+            query: optional downstream question / tool schema. Tokens whose
+                decoded text overlaps with it are boosted by `query_boost`
+                before selection, so task-relevant tokens survive compression
+                instead of competing purely on tone/morphology/perplexity.
         """
         start = time.time()
         n = len(input_ids)
@@ -769,34 +808,61 @@ class CombinedCompressor(BaseCompressor):
                 )
 
         combined_scores = base_scores * combined_weights
-        
+
+        if query:
+            query_weights = torch.tensor(
+                compute_query_relevance_weights(tokens, query, boost=query_boost)
+            )
+            if len(query_weights) == len(combined_scores):
+                combined_scores = combined_scores * query_weights
+
         # Select tokens
         k = self.config.keep_boundary_tokens
         mid_scores = combined_scores[k:n - k] if n > 2 * k else combined_scores
         mid_budget = max(0, target_len - 2 * k)
-        
+
         if mid_budget > 0 and mid_budget < len(mid_scores):
             _, top_indices = torch.topk(mid_scores, mid_budget)
             top_indices = sorted(top_indices.tolist())
-            compressed = (
-                input_ids[:k] +
-                [input_ids[k + i] for i in top_indices] +
-                input_ids[n - k:]
-            )
+            retained_indices = list(range(k)) + [k + i for i in top_indices] + list(range(n - k, n))
         else:
-            compressed = list(input_ids)
-        
+            retained_indices = list(range(n))
+
+        gate_info: Dict = {}
+        if self.quality_gate is not None:
+            compressed, gate_info = self.quality_gate.apply(
+                input_ids, retained_indices, combined_scores.tolist()
+            )
+            retained_set = set(gate_info['retained_indices'])
+        else:
+            compressed = [input_ids[i] for i in retained_indices]
+            retained_set = set(retained_indices)
+
         elapsed = (time.time() - start) * 1000
-        
+
+        # Same exact, index-based Tone Preservation Rate as ToneAwareCompressor.
+        tone_bearing_indices = [i for i, info in enumerate(tone_infos) if info.tones_present]
+        if tone_bearing_indices:
+            preserved_tones = sum(1 for i in tone_bearing_indices if i in retained_set)
+            tone_preservation_rate = preserved_tones / len(tone_bearing_indices)
+        else:
+            tone_preservation_rate = 1.0
+
+        metadata = {
+            'tone_weight': wt,
+            'morph_weight': 1 - wt,
+            'mean_tone_multiplier': tone_weights.mean().item(),
+            'mean_morph_multiplier': morph_weights.mean().item(),
+            'tone_preservation_rate': tone_preservation_rate,
+            'method': 'combined_tone_morph',
+            'query_applied': bool(query),
+        }
+        if gate_info:
+            metadata['quality_gate'] = gate_info
+
         return self._build_result(
             compressed_ids=compressed,
             original_length=n,
             processing_time_ms=elapsed,
-            metadata={
-                'tone_weight': wt,
-                'morph_weight': 1 - wt,
-                'mean_tone_multiplier': tone_weights.mean().item(),
-                'mean_morph_multiplier': morph_weights.mean().item(),
-                'method': 'combined_tone_morph',
-            },
+            metadata=metadata,
         )

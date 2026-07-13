@@ -297,6 +297,57 @@ class VietnameseWordSegmenter:
         
         return result
     
+    def is_known_compound(self, word: str) -> bool:
+        """Whether `word` (underscore-joined form) is a known multi-syllable entry."""
+        return '_' in word and word in self._word_list
+
+    def group_subword_tokens_with_spans(
+        self,
+        tokens: List[str],
+    ) -> List[Tuple[str, List[int]]]:
+        """
+        Same greedy word grouping as group_subword_tokens(), but also returns
+        which original token indices contributed to each group.
+
+        Needed because BPE decoding can yield empty/whitespace-only tokens
+        that must be skipped without shifting the index alignment used by
+        callers that map words back onto the original token sequence
+        (e.g. compound-word classification in MorphologyAnalyzer).
+        """
+        def clean_token(t: str) -> str:
+            t = t.strip()
+            for prefix in ['▁', 'Ġ', '##', '_']:
+                if t.startswith(prefix):
+                    t = t[len(prefix):]
+            return t.strip().lower()
+
+        indexed_clean = [(i, clean_token(t)) for i, t in enumerate(tokens)]
+        indexed_clean = [(i, c) for i, c in indexed_clean if c]
+
+        if not indexed_clean:
+            return []
+
+        result: List[Tuple[str, List[int]]] = []
+        pos = 0
+        n = len(indexed_clean)
+
+        while pos < n:
+            best_len = 1
+            best_word = indexed_clean[pos][1]
+
+            for length in range(min(5, n - pos), 0, -1):
+                candidate = '_'.join(c for _, c in indexed_clean[pos:pos + length])
+                if candidate in self._word_list:
+                    best_len = length
+                    best_word = candidate
+                    break
+
+            span_indices = [idx for idx, _ in indexed_clean[pos:pos + best_len]]
+            result.append((best_word, span_indices))
+            pos += best_len
+
+        return result
+
     def group_subword_tokens(self, tokens: List[str]) -> List[str]:
         """
         Group BPE subword tokens into complete Vietnamese words.

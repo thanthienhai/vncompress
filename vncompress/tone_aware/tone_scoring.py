@@ -480,7 +480,7 @@ class ToneAugmentedTrainer:
                 if tid == self.tokenizer.pad_token_id:
                     continue
                 t = self.tokenizer.decode([tid])
-                t = t.replace('\u2581', ' ').replace('\u0130', ' ').strip()
+                t = t.replace('\u2581', ' ').replace('\u0120', ' ').strip()
                 dominant = self.tone_analyzer.get_dominant_tone(t[:20])
                 tone_labels[b, s] = TONE_NAME_TO_ID.get(
                     dominant or 'ngang', 0
