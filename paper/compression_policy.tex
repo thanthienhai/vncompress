@@ -1,0 +1,300 @@
+% ============================================================================
+% Learned Compression Policy for LACC
+% Chính sách Nén Học được: Từ Trọng số Cố định đến Chọn lọc Token Tối ưu hóa
+% Trực tiếp theo VCC-Bench
+% ============================================================================
+\documentclass[12pt,a4paper]{article}
+
+% ── Encoding & Fonts ──────────────────────────────────────────────────
+\usepackage[utf8]{vntex}
+\usepackage{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{indentfirst}
+
+% ── Layout ────────────────────────────────────────────────────────────
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ── Packages ──────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{color}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{float}
+
+% ── Theorem environments ──────────────────────────────────────────────
+\newtheorem{definition}{Định nghĩa}[section]
+\newtheorem{proposition}{Đề xuất}[section]
+
+% ── Custom commands (đồng bộ với lacc_paper.tex) ───────────────────────
+\newcommand{\tone}[1]{\textit{#1}}          % tone name
+\newcommand{\score}[1]{\mathcal{S}(#1)}      % scoring function
+\newcommand{\weight}[1]{\mathbf{w}_{#1}}     % weight vector
+\newcommand{\token}[1]{\texttt{#1}}          % token
+\newcommand{\method}[1]{\textsc{#1}}         % method name
+\newcommand{\viet}[1]{\textit{#1}}           % Vietnamese word
+\newcommand{\pol}[1]{\pi_{\theta}(#1)}       % learned policy
+
+% ── Title ─────────────────────────────────────────────────────────────
+\title{\textbf{Chính sách Nén Học được cho \method{LACC}: \\
+        Từ Trọng số Tuyến tính Cố định đến Chọn lọc Token \\
+        Tối ưu hóa Trực tiếp theo \method{VCC-Bench}} \\[4pt]
+        \large \textit{Đề xuất nghiên cứu và kế hoạch thực nghiệm}}
+
+\author{
+  Thanthien\thanks{Người thực hiện nghiên cứu.} \\
+  \texttt{thanthien@example.com}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+Tài liệu này là một \textbf{đề xuất nghiên cứu} (\textit{research proposal}), không phải báo cáo kết quả: chưa có số liệu thực nghiệm nào được thu thập cho hướng đi được trình bày dưới đây. \method{LACC} hiện tại (xem~\cite{lacc2026}) tính điểm quan trọng của mỗi token bằng một tổ hợp tuyến tính \textbf{cố định, được thiết kế thủ công} của ba tín hiệu ngôn ngữ (thanh điệu, hình thái từ, perplexity), với các trọng số $w_{\text{ppl}}, w_{\text{tone}}, w_{\text{morph}}$ được hiệu chỉnh bằng grid-search/coordinate-ascent trên \method{VCC-Bench}. Cách tiếp cận này minh bạch và không cần huấn luyện, nhưng bị giới hạn bởi \textbf{tính biểu đạt của một công thức tuyến tính ba tham số} --- việc hiệu chỉnh trọng số chỉ tìm được điểm tốt nhất \emph{trong họ hàm tuyến tính đó}, chứ không thể học một quy luật kết hợp phi tuyến, phụ thuộc ngữ cảnh giữa ba tín hiệu. Chúng tôi đề xuất thay thế tổ hợp tuyến tính này bằng một \textbf{chính sách nén học được} (\textit{learned compression policy}) $\pol{t}$ --- một mạng nơ-ron nhỏ nhận đặc trưng ba tín hiệu làm đầu vào và được huấn luyện end-to-end để tối ưu hóa trực tiếp \textit{harmonized score} của \method{VCC-Bench}, thông qua chọn lọc Top-K khả vi (Gumbel-softmax / straight-through estimator) hoặc học tăng cường (policy gradient). Đề xuất này xây dựng trực tiếp trên hạ tầng \textit{Phonological Consistency Loss} và \textit{Tone Preservation Probe} đã có sẵn trong \method{LACC}, vốn đã bắc cầu giữa huấn luyện và suy diễn cho tín hiệu thanh điệu. Chúng tôi cũng trình bày một hướng đi bổ sung, rủi ro thấp hơn: nén ở \textbf{mức từ} thay vì mức subword, tận dụng bộ tách từ tiếng Việt đã có. Tài liệu này nêu rõ động lực, thiết kế, kế hoạch thực nghiệm, và --- quan trọng không kém --- các đánh đổi và rủi ro cụ thể của hướng đi này, để làm cơ sở quyết định có đầu tư triển khai hay không.
+\end{abstract}
+
+
+% ============================================================================
+\section{Động lực: Giới hạn của công thức tuyến tính hiện tại}
+% ============================================================================
+
+\method{LACC}~\cite{lacc2026} tính điểm quan trọng cho token $t$ bằng:
+
+\begin{equation}\label{eq:combined_current}
+    \score{t} = w_{\text{ppl}} \cdot \tilde{\score{}_{\text{ppl}}}(t) \;+\; w_{\text{tone}} \cdot \tilde{\score{}_{\text{tone}}}(t) \;+\; w_{\text{morph}} \cdot \tilde{\score{}_{\text{morph}}}(t)
+\end{equation}
+
+với $w_{\text{ppl}} + w_{\text{tone}} + w_{\text{morph}} = 1$. Công việc hiệu chỉnh trọng số (\textit{weight calibration}) --- grid-search và coordinate-ascent trực tiếp trên \textit{harmonized score} $= 2QE/(Q+E)$ của \method{VCC-Bench} --- đã cải thiện đáng kể so với trọng số mặc định đoán bằng tay, nhưng vẫn bị ràng buộc bởi ba giới hạn cấu trúc:
+
+\begin{enumerate}[label=\textbf{L\arabic*}:,leftmargin=*]
+    \item \textbf{Tuyến tính, không có tương tác.} Ba tín hiệu được cộng độc lập; công thức không thể biểu đạt các quy tắc như ``giảm trọng số perplexity khi token đã có điểm thanh điệu rất cao'' hay ``từ ghép hiếm gặp đối với mô hình scoring nhỏ nên được ưu tiên hơn từ ghép phổ biến'' --- những tương tác phi tuyến giữa tín hiệu.
+    \item \textbf{Trọng số toàn cục, không phụ thuộc ngữ cảnh.} $w_{\text{tone}}, w_{\text{morph}}, w_{\text{ppl}}$ là hằng số cho toàn bộ văn bản, bất kể tác vụ (QA pháp lý so với hội thoại), tỉ lệ nén mục tiêu, hay mật độ thanh điệu cục bộ của đoạn văn.
+    \item \textbf{Không gian tìm kiếm bị giới hạn bởi thiết kế thủ công.} Việc hiệu chỉnh chỉ tối ưu 2--3 tham số vô hướng; ba hàm điểm thành phần $\tilde{\score{}}_{\text{ppl}}, \tilde{\score{}}_{\text{tone}}, \tilde{\score{}}_{\text{morph}}$ và bản thân các hằng số $\alpha, \beta, \gamma$ bên trong chúng vẫn cố định thủ công, không nằm trong không gian tối ưu.
+\end{enumerate}
+
+\textbf{Câu hỏi nghiên cứu.} Nếu ba tín hiệu (thanh điệu, hình thái, perplexity) là các \textit{feature} đầu vào thay vì các số hạng cộng cố định, và việc chọn token được huấn luyện để tối ưu \emph{trực tiếp} chỉ số đánh giá cuối cùng của \method{VCC-Bench} --- thay vì tối ưu một công thức trung gian --- thì cải thiện đạt được là bao nhiêu, và với chi phí gì?
+
+
+% ============================================================================
+\section{Bối cảnh: hạ tầng sẵn có để xây dựng}
+% ============================================================================
+
+Đề xuất này không bắt đầu từ số không. \method{LACC} đã có hai mảnh ghép quan trọng có thể tái sử dụng trực tiếp:
+
+\begin{itemize}
+    \item \textbf{Phonological Consistency Loss.} Trong quá trình huấn luyện mô hình, một auxiliary loss $\mathcal{L}_{\text{tone}} = \frac{1}{N}\sum_i \text{CE}(\text{MLP}(h_i), y_i^{\text{tone}})$ đã được cộng vào $\mathcal{L}_{\text{LM}}$ để huấn luyện mô hình mã hóa thông tin thanh điệu trong hidden state, và một \textit{Tone Preservation Probe} độc lập đo lại độ chính xác đó sau khi nén (TPR, xem~\cite{lacc2026}). Đây chính xác là dạng ``đầu dò khả vi đo mức độ bảo toàn một tín hiệu ngôn ngữ'' mà một chính sách học được cần để có tín hiệu gradient dày đặc, thay vì chỉ có reward thưa từ kết quả sinh văn bản cuối cùng.
+    \item \textbf{Semantic Quality Gate.} Module \texttt{quality\_gate.py} đã cài đặt \texttt{embed\_ids\_mean\_pooled} và \texttt{cosine\_similarity} --- một cách rẻ để đo độ trôi ngữ nghĩa giữa ngữ cảnh gốc và ngữ cảnh đã nén bằng cách mean-pool hidden state của một mô hình có sẵn (kể cả mô hình scoring 135M), không cần mô hình embedding riêng.
+    \item \textbf{Bộ hiệu chỉnh trọng số (B1).} \texttt{calibration/weight\_search.py} đã chứng minh rằng tối ưu trực tiếp trên \textit{harmonized score} của \method{VCC-Bench} (thay vì một proxy) là khả thi và mang lại cải thiện đo được so với trọng số đoán tay --- đây là bằng chứng thực nghiệm gián tiếp (dù trên không gian tham số nhỏ hơn nhiều) rằng có ``chỗ trống'' để một bộ tối ưu hóa mạnh hơn khai thác thêm.
+\end{itemize}
+
+Đề xuất dưới đây có thể được nhìn nhận như một bước mở rộng tự nhiên của cả ba: thay vì tối ưu 2--3 trọng số vô hướng (B1), tối ưu một mạng nhỏ; thay vì chỉ dùng $\mathcal{L}_{\text{tone}}$ làm auxiliary loss khi huấn luyện mô hình sinh, dùng nó (và một phiên bản tương tự cho hình thái) làm một phần hàm mục tiêu huấn luyện chính sách nén; thay vì chỉ dùng quality gate làm bước hậu xử lý sau khi chọn Top-K cố định, dùng chính tín hiệu tương đồng ngữ nghĩa đó làm một phần loss huấn luyện.
+
+
+% ============================================================================
+\section{Đề xuất: Chính sách Nén Học được}
+% ============================================================================
+
+\subsection{Biểu diễn đặc trưng token}
+
+Với mỗi token $t$ ở vị trí $i$ trong ngữ cảnh $T$ độ dài $n$, ta định nghĩa vector đặc trưng:
+
+\begin{equation}\label{eq:features}
+    \mathbf{x}(t) = \Big[\, \tilde{\score{}}_{\text{ppl}}(t),\; \tilde{\score{}}_{\text{tone}}(t),\; \tilde{\score{}}_{\text{morph}}(t),\; \tilde{\score{}}_{\text{query}}(t),\; i/n \,\Big] \in \mathbb{R}^5
+\end{equation}
+
+trong đó ba thành phần đầu là các điểm đã chuẩn hóa hiện có (Eq.~\ref{eq:combined_current} của~\cite{lacc2026}), $\tilde{\score{}}_{\text{query}}(t)$ là tín hiệu độ liên quan truy vấn đã có (\texttt{query\_aware.py}, cải tiến C2), và $i/n$ là vị trí tương đối --- một đặc trưng rẻ nhưng thường có ích (ví dụ token đầu/cuối văn bản pháp lý thường quan trọng hơn). Về nguyên tắc có thể thêm đặc trưng khác (độ dài token, có nằm trong từ ghép SINO hay không\ldots) mà không đổi kiến trúc.
+
+\subsection{Kiến trúc chính sách}
+
+Chính sách $\pol{\cdot}$ là một MLP nhỏ áp dụng độc lập cho từng token (không phải một transformer trên toàn chuỗi --- xem thảo luận chi phí ở mục~\ref{sec:tradeoffs}):
+
+\begin{equation}\label{eq:policy_score}
+    \score{}_{\theta}(t) = \text{MLP}_\theta\big(\mathbf{x}(t)\big), \qquad \text{MLP}_\theta: \mathbb{R}^5 \xrightarrow{\text{Linear+GELU}} \mathbb{R}^{16} \xrightarrow{\text{Linear}} \mathbb{R}
+\end{equation}
+
+Công thức~\eqref{eq:policy_score} thay thế trực tiếp tổng tuyến tính~\eqref{eq:combined_current}: đầu ra vẫn là một điểm số vô hướng dùng để Top-K, nhưng hàm ánh xạ từ ba (bốn) tín hiệu sang điểm số giờ đây phi tuyến và được học, giải quyết giới hạn \textbf{L1} và một phần \textbf{L3}. Vì $\mathbf{x}(t)$ đã gói gọn thông tin ngữ cảnh cục bộ mà mỗi tín hiệu thành phần tính toán (ví dụ $\tilde{\score{}}_{\text{tone}}$ đã tích hợp hệ số tương phản với token lân cận, Eq.~\ref{eq:contrast} của~\cite{lacc2026}), MLP theo-token vẫn có thể học các quy tắc phụ thuộc-ngữ-cảnh ở mức giới hạn mà không cần kiến trúc tuần tự nặng hơn.
+
+\subsection{Chọn lọc Top-K khả vi}
+
+Chọn lọc Top-K cứng (giữ đúng $B = n/R$ token điểm cao nhất) không khả vi theo $\theta$. Chúng tôi đề xuất hai cơ chế thay thế, cả hai đều đã có tiền lệ trong tài liệu tối ưu hóa tổ hợp khả vi:
+
+\begin{itemize}
+    \item \textbf{Straight-through Top-K.} Lượt truyền xuôi dùng mặt nạ cứng $m_i = \mathbf{1}[i \in \text{TopK}(\score{}_\theta, B)]$ để tạo ngữ cảnh nén thật sự dùng cho việc sinh văn bản; lượt truyền ngược thay gradient của hàm chỉ thị (bằng 0 hầu như khắp nơi) bằng gradient của một softmax nhiệt độ $\tau$: $\tilde{m}_i = \text{softmax}(\score{}_\theta(t_i)/\tau)_i$. Đây là kỹ thuật rẻ nhất, không cần lấy mẫu, phù hợp làm điểm khởi đầu.
+    \item \textbf{Gumbel-softmax Top-K.} Trong huấn luyện, cộng nhiễu Gumbel vào $\score{}_\theta$ trước khi chọn Top-K, cho phép chính sách được huấn luyện với một số ngẫu nhiên hóa có kiểm soát (giúp khám phá) và có công thức gradient chuẩn tắc hơn~\cite{jang2017gumbel}. Chi phí: cần nhiều lượt lấy mẫu hơn straight-through để phương sai gradient chấp nhận được.
+\end{itemize}
+
+Cả hai cơ chế này chỉ ảnh hưởng đến \emph{huấn luyện}; khi suy diễn, chính sách vẫn dùng Top-K cứng thông thường như \method{LACC} hiện tại --- không có chi phí suy diễn bổ sung nào từ việc dùng cơ chế khả vi khi huấn luyện.
+
+\subsection{Hàm mục tiêu huấn luyện}
+
+Đây là phần quan trọng nhất và cũng rủi ro nhất của đề xuất: \textit{harmonized score} của \method{VCC-Bench} phụ thuộc vào việc \emph{sinh văn bản} từ ngữ cảnh đã nén rồi so với đáp án tham chiếu (ROUGE-L/BLEU/EM) --- một quá trình không khả vi theo $\theta$ (qua bước decode rời rạc của mô hình sinh 7B). Chúng tôi đề xuất hai biến thể, có thể triển khai tuần tự (biến thể (a) làm bước khởi tạo rẻ, biến thể (b) làm bước tinh chỉnh đắt hơn nhưng tối ưu đúng chỉ số cuối):
+
+\subsubsection{(a) Mất mát thay thế khả vi (surrogate loss) --- không cần rollout sinh văn bản}
+
+\begin{equation}\label{eq:surrogate_loss}
+    \mathcal{L}_{\text{policy}}(\theta) =
+    \underbrace{\Big(1 - \cos\big(\bar h(T),\, \bar h(T'_\theta)\big)\Big)}_{\text{trôi ngữ nghĩa, tái dùng \texttt{quality\_gate.py}}}
+    \;+\; \lambda_{\text{tone}} \, \mathcal{L}_{\text{tone}}\big(T'_\theta\big)
+    \;+\; \lambda_{\text{budget}} \Big(\tfrac{|T'_\theta|}{|T|} - \tfrac{1}{R}\Big)^{2}
+\end{equation}
+
+trong đó $T'_\theta$ là ngữ cảnh nén theo mặt nạ mềm của chính sách, $\bar h(\cdot)$ là embedding mean-pooled từ \texttt{embed\_ids\_mean\_pooled} (dùng lại nguyên trạng cho cả $T$ và $T'_\theta$), $\mathcal{L}_{\text{tone}}$ là chính \textit{Phonological Consistency Loss} hiện có áp dụng lên các vị trí còn lại sau nén (đã đúng theo cách nó được định nghĩa --- tính trên vị trí đã nén, xem~\cite{lacc2026}), và số hạng cuối là ràng buộc ngân sách mềm để chính sách hội tụ về đúng tỉ lệ nén $R$ mong muốn thay vì tự do chọn số token tùy ý. \textbf{Ưu điểm}: rẻ, không cần chạy mô hình sinh 7B ở mỗi bước huấn luyện, có thể lặp nhanh trên GPU nhỏ. \textbf{Nhược điểm}: tối ưu một \emph{proxy} (tương đồng embedding + bảo toàn tone) chứ không trực tiếp tối ưu ROUGE-L/EM/harmonized score --- có thể không tương quan hoàn hảo với chất lượng sinh văn bản thật.
+
+\subsubsection{(b) Học tăng cường trên harmonized score --- tối ưu đúng chỉ số cuối}
+
+Xem tập token giữ lại $S_\theta$ là một hành động lấy mẫu từ chính sách. Với mỗi mẫu huấn luyện, chạy toàn bộ pipeline (nén $\to$ sinh văn bản với mô hình chính $\to$ so với đáp án) để thu được phần thưởng chính là chỉ số đánh giá thật:
+
+\begin{equation}\label{eq:reward}
+    R(S_\theta) = \text{harmonized\_score}\big(Q(S_\theta), E(S_\theta)\big) = \frac{2\,Q(S_\theta)\,E(S_\theta)}{Q(S_\theta) + E(S_\theta)}
+\end{equation}
+
+và cập nhật $\theta$ bằng policy gradient có baseline (tương tự self-critical sequence training~\cite{rennie2017scst}, dùng chính dự đoán Top-K cứng làm baseline cho mẫu Gumbel-softmax):
+
+\begin{equation}\label{eq:policy_gradient}
+    \nabla_\theta J(\theta) \approx \big(R(S_\theta) - b\big) \, \nabla_\theta \log \pi_\theta(S_\theta), \qquad
+    \log \pi_\theta(S_\theta) = \sum_{t \in S_\theta} \log \sigma\big(\score{}_\theta(t)\big) + \sum_{t \notin S_\theta} \log\big(1 - \sigma(\score{}_\theta(t))\big)
+\end{equation}
+
+\textbf{Ưu điểm}: tối ưu \emph{chính xác} chỉ số mà toàn bộ dự án dùng để đánh giá thành công. \textbf{Nhược điểm}: mỗi bước cập nhật cần một (hoặc vài, để giảm phương sai) lượt sinh văn bản đầy đủ với mô hình 7B --- đắt hơn biến thể (a) một hai bậc độ lớn, và policy gradient nổi tiếng có phương sai cao, dễ cần nhiều bước hơn để hội tụ ổn định.
+
+\textbf{Kế hoạch đề xuất}: khởi tạo $\theta$ bằng biến thể (a) (rẻ, ổn định), sau đó tinh chỉnh một số bước giới hạn bằng biến thể (b) trên chính $R$ để thu hẹp khoảng cách giữa proxy và chỉ số thật --- một chiến lược hai giai đoạn phổ biến trong RLHF/RL-for-NLG, giúp tránh phần lớn chi phí rollout mà vẫn tối ưu đúng mục tiêu ở giai đoạn cuối.
+
+\subsection{Liên hệ với hạ tầng hiện có}
+
+Bảng~\ref{tab:reuse} tóm tắt những gì được tái sử dụng nguyên trạng so với những gì là thành phần mới.
+
+\begin{table}[H]
+\centering
+\caption{Thành phần tái sử dụng so với thành phần mới trong đề xuất.}
+\label{tab:reuse}
+\begin{tabular}{lll}
+\toprule
+\textbf{Thành phần} & \textbf{Trạng thái} & \textbf{Nguồn} \\
+\midrule
+$\tilde{\score{}}_{\text{ppl}}, \tilde{\score{}}_{\text{tone}}, \tilde{\score{}}_{\text{morph}}$ & Tái sử dụng nguyên trạng & \texttt{tone\_aware.py}, \texttt{external\_scorer.py} \\
+$\tilde{\score{}}_{\text{query}}$ & Tái sử dụng nguyên trạng & \texttt{query\_aware.py} (C2) \\
+$\mathcal{L}_{\text{tone}}$ & Tái sử dụng nguyên trạng & \texttt{PhonologicalConsistencyLoss} \\
+$\cos(\bar h(T), \bar h(T'_\theta))$ & Tái sử dụng nguyên trạng & \texttt{quality\_gate.py} \\
+\textit{harmonized\_score} & Tái sử dụng nguyên trạng & \method{VCC-Bench} \\
+$\text{MLP}_\theta$ (Eq.~\ref{eq:policy_score}) & \textbf{Mới} & --- \\
+Top-K khả vi (straight-through / Gumbel) & \textbf{Mới} & --- \\
+Vòng lặp huấn luyện (a)/(b) & \textbf{Mới} & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+\section{Đề xuất bổ sung, rủi ro thấp hơn: Nén ở mức từ}
+% ============================================================================
+
+Song song với chính sách học được, một hướng đi rủi ro thấp hơn --- không cần huấn luyện, không cần GPU cho huấn luyện --- là chuyển đơn vị chọn lọc từ \textbf{subword token} sang \textbf{từ tiếng Việt}. Bộ tách từ \texttt{VietnameseWordSegmenter} (đã có, cùng phương thức mới \texttt{group\_subword\_tokens\_with\_spans()}) cho phép nhóm các subword token BPE thành các nhịp (\textit{span}) tương ứng với từ đơn/từ ghép/từ láy thật sự.
+
+Lợi ích cho cả công thức tuyến tính hiện tại lẫn chính sách học được ở Mục~3:
+
+\begin{itemize}
+    \item \textbf{Loại nhiễu ranh giới BPE.} Tín hiệu thanh điệu và hình thái vốn được định nghĩa ở mức \emph{từ} (trọng số bảo toàn thanh điệu và phân loại FUNC/CONTENT/REDUP/COMPOUND của~\cite{lacc2026}), nhưng bị tính trên các mảnh subword do tokenizer cắt ra --- ánh xạ từ $\to$ subword không phải lúc nào cũng 1--1. Nén ở mức từ loại bỏ hoàn toàn bước ánh xạ này.
+    \item \textbf{Không gian hành động nhỏ hơn cho chính sách học được.} Một từ tiếng Việt trung bình ứng với $\sim$1.5--2 subword token; nếu chính sách (Mục~3) hoạt động trên đơn vị từ thay vì subword, không gian lựa chọn Top-K giảm gần một nửa, giúp giảm phương sai của cả straight-through và policy-gradient training.
+    \item \textbf{Không cần huấn luyện để có ích.} Ngay cả khi không áp dụng chính sách học được, việc thay đơn vị chọn lọc bằng span-từ trong công thức tuyến tính hiện tại (Eq.~\ref{eq:combined_current}) là một thay đổi độc lập, có thể đánh giá riêng bằng \texttt{run\_ablation.py} hiện có mà không cần huấn luyện gì thêm.
+\end{itemize}
+
+Hai hướng này không loại trừ nhau: kế hoạch thực nghiệm ở Mục~5 đề xuất đánh giá nén-mức-từ như một biến thể tiền xử lý độc lập trước, và nếu có lợi, dùng luôn làm đơn vị hành động cho chính sách học được ở giai đoạn sau.
+
+
+% ============================================================================
+\section{Kế hoạch thực nghiệm}
+% ============================================================================
+
+\subsection{Yêu cầu hạ tầng bổ sung}
+
+\method{VCC-Bench} hiện tại (5 tác vụ, xem~\cite{lacc2026}) được dùng để \emph{đánh giá}; đề xuất này cần thêm một \textbf{tập huấn luyện/kiểm định} tách biệt (train/dev split) để huấn luyện $\theta$ mà không rò rỉ vào tập test đang dùng để báo cáo kết quả cuối --- hạ tầng chưa tồn tại và cần được xây dựng trước tiên.
+
+\subsection{Các giai đoạn đề xuất}
+
+\begin{enumerate}[label=\textbf{Giai đoạn \arabic*}:,leftmargin=*]
+    \item \textbf{Chia tách dữ liệu.} Chia \method{VCC-Bench} (hoặc một tập mở rộng) thành train/dev/test theo tác vụ, tránh rò rỉ.
+    \item \textbf{Huấn luyện biến thể (a) (surrogate loss).} Huấn luyện $\theta$ bằng Eq.~\ref{eq:surrogate_loss} trên tập train, chọn checkpoint bằng \textit{harmonized score} đo trên dev (không phải trên chính loss huấn luyện, để tránh tối ưu quá mức vào proxy).
+    \item \textbf{Tinh chỉnh biến thể (b) (RL trên harmonized score).} Khởi tạo từ checkpoint tốt nhất của Giai đoạn 2, tinh chỉnh một số bước giới hạn bằng Eq.~\ref{eq:policy_gradient} trên tập train, theo dõi harmonized score trên dev sau mỗi vài bước để phát hiện sớm hiện tượng \textit{reward hacking} (Mục~\ref{sec:tradeoffs}).
+    \item \textbf{Đánh giá so sánh trên test.} So sánh chính sách học được với: (i) \method{LACC} sau hiệu chỉnh trọng số B1 (Eq.~\ref{eq:combined_current}), (ii) các nhánh ablation đơn tín hiệu hiện có (\texttt{ppl\_only}, \texttt{tone\_only}, \texttt{morph\_only} từ \texttt{run\_ablation.py}), và (iii) biến thể nén-mức-từ độc lập (Mục~4) --- tại các tỉ lệ nén 2$\times$/4$\times$/8$\times$ như phần còn lại của dự án.
+\end{enumerate}
+
+\subsection{Tiêu chí thành công}
+
+Đề xuất chỉ được xem là mang lại giá trị nếu chính sách học được vượt \method{LACC} đã hiệu chỉnh (B1) về \textit{harmonized score} trên tập test \textbf{với biên độ lớn hơn phương sai đo được giữa các lần chạy} (do batch size nhỏ và tính ngẫu nhiên của sinh văn bản, cần báo cáo trung bình/độ lệch chuẩn qua nhiều seed, không chỉ một con số). Nếu cải thiện nằm trong biên độ nhiễu, chi phí huấn luyện bổ sung không được biện minh so với việc tiếp tục hiệu chỉnh công thức tuyến tính (B1) hoặc mở rộng bộ tín hiệu thủ công.
+
+
+% ============================================================================
+\section{Đánh đổi và Rủi ro}
+\label{sec:tradeoffs}
+% ============================================================================
+
+\begin{enumerate}[label=\textbf{R\arabic*}:,leftmargin=*]
+    \item \textbf{Chi phí huấn luyện, không phải chi phí suy diễn.} Điểm quan trọng cần nói rõ: $\text{MLP}_\theta$ ở Eq.~\ref{eq:policy_score} chỉ có vài trăm tham số, nhận 5 đặc trưng vô hướng mỗi token --- chi phí \emph{suy diễn} của chính sách học được gần như bằng không, tương đương công thức tuyến tính hiện tại, kể cả trên CPU. Chi phí thực sự nằm ở \emph{huấn luyện}: biến thể (a) cần GPU vừa phải và một tập train/dev mới; biến thể (b) cần chạy mô hình sinh 7B nhiều lần trong vòng lặp huấn luyện --- tốn kém hơn đáng kể so với cách tiếp cận hiệu chỉnh không cần huấn luyện (training-free) hiện tại của \method{LACC}.
+    \item \textbf{Mất tính minh bạch/diễn giải được.} Trọng số $w_{\text{ppl}}, w_{\text{tone}}, w_{\text{morph}}$ hiện tại có thể đọc trực tiếp để hiểu ``mô hình đang ưu tiên tín hiệu nào'' (Bảng cấu hình thực nghiệm của~\cite{lacc2026}). Một MLP ẩn danh khó diễn giải hơn nhiều, dù đầu vào của nó vẫn là ba tín hiệu có ý nghĩa ngôn ngữ học rõ ràng --- một phần tính diễn giải có thể được giữ lại bằng cách kiểm tra độ nhạy cục bộ (partial dependence) của $\score{}_\theta$ theo từng đặc trưng đầu vào.
+    \item \textbf{Reward hacking.} Biến thể (b) tối ưu trực tiếp \textit{harmonized score} đo trên chính công cụ đánh giá tự động (ROUGE-L/BLEU/EM) --- chính sách có thể học cách ``lách'' chỉ số này (ví dụ giữ lại các token trùng lặp với câu tham chiếu một cách máy móc) mà không thực sự cải thiện chất lượng ngữ nghĩa. Cần đánh giá định tính (đọc mẫu output) song song với số liệu tổng hợp.
+    \item \textbf{Yêu cầu dữ liệu huấn luyện mới.} \method{VCC-Bench} hiện tại được thiết kế để \emph{đánh giá}, chưa có train/dev split cho mục đích huấn luyện chính sách --- xây dựng và kiểm định chất lượng của tập chia tách mới này là một chi phí tự thân, độc lập với việc huấn luyện chính sách.
+    \item \textbf{Rủi ro không cải thiện.} Không có gì đảm bảo rằng không gian hàm phi tuyến của một MLP 5 đầu vào thực sự lớn hơn nhiều so với không gian đã được B1 khám phá qua hiệu chỉnh trọng số tuyến tính --- nếu ba tín hiệu vốn đã gần độc lập tuyến tính về mặt thông tin chúng mang lại cho việc chọn token, MLP có thể hội tụ về một giải pháp gần tuyến tính, và toàn bộ chi phí huấn luyện chỉ mang lại cải thiện biên. Đây là lý do Mục~5.3 đặt tiêu chí thành công rõ ràng trước khi đầu tư thêm.
+\end{enumerate}
+
+Tóm lại: đây là một đánh đổi \textbf{độ phức tạp huấn luyện đổi lấy khả năng biểu đạt}, không phải đánh đổi chi phí suy diễn. Với một dự án đang ở giai đoạn training-free, đây là bước nhảy hạ tầng đáng kể và nên được thực hiện sau khi đã có số liệu B1 (hiệu chỉnh trọng số tuyến tính) làm đường cơ sở so sánh chắc chắn.
+
+
+% ============================================================================
+\section{Kết luận}
+% ============================================================================
+
+Tài liệu này cụ thể hóa hướng phát triển thứ (3) đã được nêu trong phần kết luận của~\cite{lacc2026} (``huấn luyện end-to-end với phonological consistency loss''): thay vì dừng ở việc dùng $\mathcal{L}_{\text{tone}}$ như một auxiliary loss khi huấn luyện mô hình sinh, đề xuất mở rộng vai trò của nó --- cùng với tín hiệu tương đồng ngữ nghĩa đã có trong \textit{quality gate} --- thành một phần hàm mục tiêu huấn luyện cho chính bước \emph{chọn token nào để giữ lại}, thay thế công thức tuyến tính cố định bằng một chính sách học được, tối ưu trực tiếp theo \textit{harmonized score} của \method{VCC-Bench}. Đề xuất đi kèm một hướng bổ sung rủi ro thấp hơn (nén mức từ) có thể triển khai và đánh giá độc lập trước, không cần hạ tầng huấn luyện mới.
+
+Không có số liệu thực nghiệm nào trong tài liệu này. Bước tiếp theo hợp lý, nếu hướng đi được chấp thuận, là Giai đoạn~1 của Mục~5.2 (xây dựng train/dev split) --- một tiền đề bắt buộc cho mọi thử nghiệm huấn luyện tiếp theo, và có thể được thực hiện độc lập với quyết định có theo đuổi biến thể (a), (b), hay cả hai.
+
+
+% ============================================================================
+% References
+% ============================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{lacc2026}
+Thanthien.
+\newblock ``LACC: Language-Aware Context Compression --- Nén Ngữ Cảnh Có Nhận Thức Ngôn Ngữ cho Mô Hình Ngôn Ngữ Lớn Tiếng Việt.''
+\newblock \emph{Bản thảo nội bộ}, \texttt{paper/lacc\_paper.tex}, 2026.
+
+\bibitem{jiang2023llmlingua}
+H. Jiang, Q. Wu, C.-Y. Lin, Y. Yang, and L. Qiu.
+\newblock ``LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models.''
+\newblock In \emph{Proceedings of EMNLP}, 2023.
+
+\bibitem{jang2017gumbel}
+E. Jang, S. Gu, and B. Poole.
+\newblock ``Categorical Reparameterization with Gumbel-Softmax.''
+\newblock In \emph{ICLR}, 2017.
+
+\bibitem{williams1992reinforce}
+R. J. Williams.
+\newblock ``Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning.''
+\newblock \emph{Machine Learning}, 8(3--4):229--256, 1992.
+
+\bibitem{rennie2017scst}
+S. J. Rennie, E. Marcheret, Y. Mroueh, J. Ross, and V. Goel.
+\newblock ``Self-Critical Sequence Training for Image Captioning.''
+\newblock In \emph{CVPR}, 2017.
+
+\bibitem{vinyals2015pointer}
+O. Vinyals, M. Fortunato, and N. Jaitly.
+\newblock ``Pointer Networks.''
+\newblock In \emph{NeurIPS}, 2015.
+
+\end{thebibliography}
+
+\end{document}
