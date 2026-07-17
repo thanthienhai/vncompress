@@ -562,7 +562,37 @@ GPU & NVIDIA T4 16~GB / P100 16~GB \\
 \section{Kết quả thực nghiệm}
 % ============================================================================
 
-\textit{[Phần này sẽ được điền sau khi hoàn thành thực nghiệm. Các bảng dưới đây là mẫu cấu trúc.]}
+\subsection{Thử nghiệm khả thi trên GPU phổ thông}
+\label{sec:slm_pilot}
+
+Chúng tôi thực hiện một thử nghiệm pilot nhằm kiểm chứng tính khả thi của thành phần mô hình scoring học được trên phần cứng hạn chế. Khác với cấu hình sinh văn bản 7B trong Bảng~\ref{tab:experiment_setup}, thử nghiệm này dùng \texttt{chronopt-research/vietnamese-gpt2-base}, một causal language model tiếng Việt gồm 125.6M tham số. Mô hình được tinh chỉnh bằng LoRA; chỉ 1,179,648 tham số (0.9391\% tổng số tham số) được cập nhật. Loss huấn luyện là tổng của causal-LM loss và \textit{Phonological Consistency Loss}. Tone probe được tối ưu cùng với LoRA adapter.
+
+Thử nghiệm chạy trên NVIDIA GeForce GTX 1060 6~GB với batch size 1, độ dài chuỗi 128 token, LoRA rank 8, gradient accumulation 8 và mixed precision FP16 autocast. Trong bài kiểm tra nhanh, mô hình hoàn thành 30 bước cập nhật; VRAM cực đại do PyTorch ghi nhận là 0.66~GB. Con số này xác nhận cấu hình đủ nhẹ cho GPU 6~GB, nhưng không phải phép đo VRAM toàn hệ thống và có thể thay đổi theo phiên bản CUDA/PyTorch, độ dài chuỗi và batch size.
+
+Bảng~\ref{tab:slm_pilot} báo cáo đánh giá trên 40 văn bản hold-out, được tách với seed cố định 42 từ tập văn bản dùng trong thử nghiệm. Perplexity validation là 51.57 (NLL 3.9430). Tone accuracy trên toàn bộ token là 39.85\%; khi chỉ tính các token được gán thanh khác \tone{ngang}, accuracy là 16.59\% trên 3,141 token. Đây chỉ là kết quả pilot sau 30 bước, chưa phải kết quả hội tụ và chưa có đối chứng base model trên cùng tập validation. Vì vậy, chúng tôi chưa sử dụng kết quả này để khẳng định cải thiện perplexity, chất lượng nén hay TPR; nó chủ yếu chứng minh pipeline LoRA + tone probe có thể huấn luyện, lưu và đánh giá được trên GPU phổ thông.
+
+\begin{table}[H]
+\centering
+\caption{Kết quả pilot của mô hình scoring tiếng Việt nhỏ sau 30 bước cập nhật. Mũi tên $\downarrow$/$\uparrow$ biểu thị chiều tối ưu.}
+\label{tab:slm_pilot}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hạng mục} & \textbf{Giá trị} \\
+\midrule
+Backbone & \texttt{chronopt-research/vietnamese-gpt2-base} \\
+Tổng / tham số LoRA trainable & 125,619,456 / 1,179,648 (0.9391\%) \\
+Phần cứng & NVIDIA GeForce GTX 1060 6~GB \\
+Cấu hình & batch 1; sequence 128; LoRA $r=8$; accumulation 8 \\
+Số bước cập nhật & 30 \\
+VRAM PyTorch cực đại & 0.66~GB \\
+Số văn bản validation & 40 \\
+Validation NLL $\downarrow$ & 3.9430 \\
+Perplexity $\downarrow$ & 51.57 \\
+Tone accuracy, toàn bộ token $\uparrow$ & 39.85\% \\
+Tone accuracy, token có thanh $\uparrow$ & 16.59\% (3,141 token) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Hiệu quả nén}
 

@@ -196,6 +196,49 @@ Vòng lặp huấn luyện (a)/(b) & \textbf{Mới} & --- \\
 
 
 % ============================================================================
+\section{Ba nâng cấp ưu tiên: phân bổ ngân sách bất đối xứng và phục hồi theo tổn thất}
+\label{sec:turboquant-inspired}
+% ============================================================================
+
+TurboQuant~\cite{zandieh2025turboquant} nén KV cache bằng cách phân bổ độ chính xác biểu diễn một cách có cấu trúc, thay vì giả định mọi thành phần đều cần cùng mức tài nguyên. Dù TurboQuant vận hành trên vector số thực của tầng suy diễn, còn \method{LACC} chọn token ở tầng prompt, nguyên lý “phân bổ ngân sách theo tổn thất dự kiến” có thể chuyển hóa thành ba nâng cấp độc lập, training-free và có thể đánh giá trước khi đầu tư vào chính sách học được.
+
+\subsection{Bộ phân bổ ngân sách thích nghi theo tổn thất biên}
+
+Tham số \texttt{target\_ratio} cố định đảm bảo một số token giữ lại $B=\lfloor n/R\rfloor$, nhưng không biểu đạt được việc một tài liệu pháp lý giàu thực thể, số liệu và điều kiện có thể cần ngân sách lớn hơn một đoạn hội thoại lặp lại. Chúng tôi đề xuất thay ràng buộc “giữ đúng $B$” bằng một bài toán rate--distortion có ngân sách mềm:
+
+\begin{equation}\label{eq:adaptive_budget}
+    \min_{S \subseteq \{1,\ldots,n\}} \; \mathcal{D}(T, T_S) + \lambda \cdot \max\!\left(0, \frac{|S|}{n} - \frac{1}{R}\right),
+\end{equation}
+
+trong đó $\mathcal{D}$ là tổn thất tổng hợp có thể quan sát được (trôi ngữ nghĩa, mất thực thể--giá trị, mất phủ định và mất độ phủ truy vấn). Hệ số $\lambda$ quy định mức ưu tiên cho tiết kiệm token. Triển khai ban đầu không cần giải tối ưu tổ hợp đầy đủ: chọn Top-K như hiện tại, sau đó chỉ mở rộng $K$ khi độ đo $\mathcal{D}$ còn vượt ngưỡng. Điều này tái sử dụng trực tiếp \texttt{SemanticQualityGate}, nhưng biến nó từ cơ chế an toàn hậu xử lý thành bộ điều khiển ngân sách có báo cáo rõ ràng về \textit{effective compression ratio}.
+
+\subsection{Protected spans: giữ tuyệt đối các token định tuyến nghĩa}
+
+Tương tự việc một số thành phần KV cần độ chính xác cao hơn, một số span văn bản không được tham gia cạnh tranh Top-K bình thường. Trước khi chấm điểm, hệ thống xác định tập span bảo vệ $P$ và luôn giữ mọi token thuộc $P$; phần ngân sách còn lại mới được phân bổ cho token khác:
+
+\begin{equation}\label{eq:protected_budget}
+    S = P \;\cup\; \operatorname{TopK}\!\left(\{1,\ldots,n\}\setminus P,\; B-|P|\right).
+\end{equation}
+
+Tập $P$ cần được xác định bằng luật minh bạch và có thể ablation, gồm: (i) system instruction, truy vấn người dùng, tool schema, code và JSON; (ii) heading, bảng, bullet và cặp \textit{thuộc tính $\to$ giá trị}; (iii) thực thể, ngày tháng, số, tiền, phần trăm và đơn vị; (iv) phủ định, điều kiện và từ chỉ phạm vi như \viet{không}, \viet{chưa}, \viet{trừ}, \viet{chỉ}; và (v) từ ghép hoặc token có tín hiệu thanh điệu cao mà việc bỏ dấu/làm đứt span có khả năng đổi nghĩa. Nếu $|P|>B$, compressor phải báo rằng mục tiêu tỉ lệ nén không khả thi an toàn, thay vì âm thầm cắt span bảo vệ.
+
+\subsection{Phục hồi theo tổn thất và theo span}
+
+\texttt{SemanticQualityGate} hiện phục hồi token bị bỏ theo điểm quan trọng ban đầu. Chúng tôi đề xuất phục hồi theo \textit{lợi ích biên} của từng span $g$ thay vì từng subword rời rạc:
+
+\begin{equation}\label{eq:loss_aware_restore}
+    g^* = \arg\max_{g \in \mathcal{G}\setminus S}
+    \frac{\mathcal{D}(T,T_S)-\mathcal{D}(T,T_{S\cup g})}{|g|},
+\end{equation}
+
+và lặp lại cho đến khi $\mathcal{D}$ xuống dưới ngưỡng hoặc chạm ngân sách phục hồi. Các ứng viên $\mathcal{G}$ là span-từ, cụm thực thể, cặp thuộc tính--giá trị, câu chứa phủ định, hoặc đoạn trùng với truy vấn. Hàm tổn thất ban đầu có thể là tổ hợp rẻ của cosine semantic drift đang có, query coverage, entity/number coverage và kiểm tra cấu trúc JSON/tool-call; không cần một mô hình mới. Phục hồi theo span vừa tránh văn bản bị đứt cú pháp bởi Top-K subword, vừa có thể giải thích lý do mỗi token được trả lại.
+
+\subsection{Giới hạn phạm vi với TurboQuant}
+
+Ba nâng cấp trên áp dụng cho \textbf{nén prompt} trong \method{LACC}. TurboQuant vẫn là một tầng \textbf{nén KV cache} độc lập, chỉ có ý nghĩa khi tự vận hành backend suy diễn có hỗ trợ (ví dụ vLLM hoặc llama.cpp); nó không làm giảm token gửi tới API bên thứ ba. Kiến trúc dài hạn nên ghép nối hai tầng: \method{LACC} giảm token và latency prefill trước, backend nén KV cache của phần context còn lại sau. Do quantization KV cần kernel và runtime chuyên biệt, nó không nên được cài trực tiếp trong lớp chọn token hay \texttt{BaseCompressor}.
+
+
+% ============================================================================
 \section{Đề xuất bổ sung, rủi ro thấp hơn: Nén ở mức từ}
 % ============================================================================
 
@@ -209,7 +252,7 @@ Lợi ích cho cả công thức tuyến tính hiện tại lẫn chính sách h
     \item \textbf{Không cần huấn luyện để có ích.} Ngay cả khi không áp dụng chính sách học được, việc thay đơn vị chọn lọc bằng span-từ trong công thức tuyến tính hiện tại (Eq.~\ref{eq:combined_current}) là một thay đổi độc lập, có thể đánh giá riêng bằng \texttt{run\_ablation.py} hiện có mà không cần huấn luyện gì thêm.
 \end{itemize}
 
-Hai hướng này không loại trừ nhau: kế hoạch thực nghiệm ở Mục~5 đề xuất đánh giá nén-mức-từ như một biến thể tiền xử lý độc lập trước, và nếu có lợi, dùng luôn làm đơn vị hành động cho chính sách học được ở giai đoạn sau.
+Hai hướng này không loại trừ nhau: kế hoạch thực nghiệm ở Mục~6 đề xuất đánh giá nén-mức-từ như một biến thể tiền xử lý độc lập trước, và nếu có lợi, dùng luôn làm đơn vị hành động cho chính sách học được ở giai đoạn sau.
 
 
 % ============================================================================
@@ -224,9 +267,10 @@ Hai hướng này không loại trừ nhau: kế hoạch thực nghiệm ở M�
 
 \begin{enumerate}[label=\textbf{Giai đoạn \arabic*}:,leftmargin=*]
     \item \textbf{Chia tách dữ liệu.} Chia \method{VCC-Bench} (hoặc một tập mở rộng) thành train/dev/test theo tác vụ, tránh rò rỉ.
-    \item \textbf{Huấn luyện biến thể (a) (surrogate loss).} Huấn luyện $\theta$ bằng Eq.~\ref{eq:surrogate_loss} trên tập train, chọn checkpoint bằng \textit{harmonized score} đo trên dev (không phải trên chính loss huấn luyện, để tránh tối ưu quá mức vào proxy).
-    \item \textbf{Tinh chỉnh biến thể (b) (RL trên harmonized score).} Khởi tạo từ checkpoint tốt nhất của Giai đoạn 2, tinh chỉnh một số bước giới hạn bằng Eq.~\ref{eq:policy_gradient} trên tập train, theo dõi harmonized score trên dev sau mỗi vài bước để phát hiện sớm hiện tượng \textit{reward hacking} (Mục~\ref{sec:tradeoffs}).
-    \item \textbf{Đánh giá so sánh trên test.} So sánh chính sách học được với: (i) \method{LACC} sau hiệu chỉnh trọng số B1 (Eq.~\ref{eq:combined_current}), (ii) các nhánh ablation đơn tín hiệu hiện có (\texttt{ppl\_only}, \texttt{tone\_only}, \texttt{morph\_only} từ \texttt{run\_ablation.py}), và (iii) biến thể nén-mức-từ độc lập (Mục~4) --- tại các tỉ lệ nén 2$\times$/4$\times$/8$\times$ như phần còn lại của dự án.
+    \item \textbf{Đánh giá ba nâng cấp training-free.} Đánh giá lần lượt adaptive budget (Eq.~\ref{eq:adaptive_budget}), protected spans (Eq.~\ref{eq:protected_budget}) và loss-aware restoration (Eq.~\ref{eq:loss_aware_restore}), cùng mọi tổ hợp của chúng. Báo cáo không chỉ tỉ lệ nén danh nghĩa mà cả tỉ lệ thực tế, số lần vượt ngân sách, entity/number coverage, phủ định sống sót, JSON/tool-call validity và chất lượng theo từng tác vụ.
+    \item \textbf{Huấn luyện biến thể (a) (surrogate loss).} Huấn luyện $\theta$ bằng Eq.~\ref{eq:surrogate_loss} trên tập train, chọn checkpoint bằng \textit{harmonized score} đo trên dev (không phải trên chính loss huấn luyện, để tránh tối ưu quá mức vào proxy). Protected spans phải được áp dụng như ràng buộc cứng trong cả huấn luyện lẫn suy diễn.
+    \item \textbf{Tinh chỉnh biến thể (b) (RL trên harmonized score).} Khởi tạo từ checkpoint tốt nhất của Giai đoạn 3, tinh chỉnh một số bước giới hạn bằng Eq.~\ref{eq:policy_gradient} trên tập train, theo dõi harmonized score trên dev sau mỗi vài bước để phát hiện sớm hiện tượng \textit{reward hacking} (Mục~\ref{sec:tradeoffs}).
+    \item \textbf{Đánh giá so sánh trên test.} So sánh chính sách học được với: (i) \method{LACC} sau hiệu chỉnh trọng số B1 (Eq.~\ref{eq:combined_current}), (ii) các nhánh ablation đơn tín hiệu hiện có (\texttt{ppl\_only}, \texttt{tone\_only}, \texttt{morph\_only} từ \texttt{run\_ablation.py}), (iii) biến thể nén-mức-từ độc lập (Mục~5), và (iv) ba nâng cấp training-free ở Mục~\ref{sec:turboquant-inspired} --- tại các tỉ lệ nén 2$\times$/4$\times$/8$\times$ như phần còn lại của dự án.
 \end{enumerate}
 
 \subsection{Tiêu chí thành công}
@@ -244,7 +288,8 @@ Hai hướng này không loại trừ nhau: kế hoạch thực nghiệm ở M�
     \item \textbf{Mất tính minh bạch/diễn giải được.} Trọng số $w_{\text{ppl}}, w_{\text{tone}}, w_{\text{morph}}$ hiện tại có thể đọc trực tiếp để hiểu ``mô hình đang ưu tiên tín hiệu nào'' (Bảng cấu hình thực nghiệm của~\cite{lacc2026}). Một MLP ẩn danh khó diễn giải hơn nhiều, dù đầu vào của nó vẫn là ba tín hiệu có ý nghĩa ngôn ngữ học rõ ràng --- một phần tính diễn giải có thể được giữ lại bằng cách kiểm tra độ nhạy cục bộ (partial dependence) của $\score{}_\theta$ theo từng đặc trưng đầu vào.
     \item \textbf{Reward hacking.} Biến thể (b) tối ưu trực tiếp \textit{harmonized score} đo trên chính công cụ đánh giá tự động (ROUGE-L/BLEU/EM) --- chính sách có thể học cách ``lách'' chỉ số này (ví dụ giữ lại các token trùng lặp với câu tham chiếu một cách máy móc) mà không thực sự cải thiện chất lượng ngữ nghĩa. Cần đánh giá định tính (đọc mẫu output) song song với số liệu tổng hợp.
     \item \textbf{Yêu cầu dữ liệu huấn luyện mới.} \method{VCC-Bench} hiện tại được thiết kế để \emph{đánh giá}, chưa có train/dev split cho mục đích huấn luyện chính sách --- xây dựng và kiểm định chất lượng của tập chia tách mới này là một chi phí tự thân, độc lập với việc huấn luyện chính sách.
-    \item \textbf{Rủi ro không cải thiện.} Không có gì đảm bảo rằng không gian hàm phi tuyến của một MLP 5 đầu vào thực sự lớn hơn nhiều so với không gian đã được B1 khám phá qua hiệu chỉnh trọng số tuyến tính --- nếu ba tín hiệu vốn đã gần độc lập tuyến tính về mặt thông tin chúng mang lại cho việc chọn token, MLP có thể hội tụ về một giải pháp gần tuyến tính, và toàn bộ chi phí huấn luyện chỉ mang lại cải thiện biên. Đây là lý do Mục~5.3 đặt tiêu chí thành công rõ ràng trước khi đầu tư thêm.
+    \item \textbf{Rủi ro không cải thiện.} Không có gì đảm bảo rằng không gian hàm phi tuyến của một MLP 5 đầu vào thực sự lớn hơn nhiều so với không gian đã được B1 khám phá qua hiệu chỉnh trọng số tuyến tính --- nếu ba tín hiệu vốn đã gần độc lập tuyến tính về mặt thông tin chúng mang lại cho việc chọn token, MLP có thể hội tụ về một giải pháp gần tuyến tính, và toàn bộ chi phí huấn luyện chỉ mang lại cải thiện biên. Đây là lý do Mục~6.3 đặt tiêu chí thành công rõ ràng trước khi đầu tư thêm.
+    \item \textbf{Vượt ngân sách do ràng buộc an toàn.} Adaptive budget và protected spans có thể không đạt tỉ lệ nén danh nghĩa trên văn bản dày đặc thực thể hoặc tool schema. Đây là hành vi thiết kế mong muốn nếu có báo cáo minh bạch, nhưng cần được đánh đổi với latency/cost thực tế và không được trình bày như một cải thiện nén miễn phí.
 \end{enumerate}
 
 Tóm lại: đây là một đánh đổi \textbf{độ phức tạp huấn luyện đổi lấy khả năng biểu đạt}, không phải đánh đổi chi phí suy diễn. Với một dự án đang ở giai đoạn training-free, đây là bước nhảy hạ tầng đáng kể và nên được thực hiện sau khi đã có số liệu B1 (hiệu chỉnh trọng số tuyến tính) làm đường cơ sở so sánh chắc chắn.
@@ -256,7 +301,7 @@ Tóm lại: đây là một đánh đổi \textbf{độ phức tạp huấn luy�
 
 Tài liệu này cụ thể hóa hướng phát triển thứ (3) đã được nêu trong phần kết luận của~\cite{lacc2026} (``huấn luyện end-to-end với phonological consistency loss''): thay vì dừng ở việc dùng $\mathcal{L}_{\text{tone}}$ như một auxiliary loss khi huấn luyện mô hình sinh, đề xuất mở rộng vai trò của nó --- cùng với tín hiệu tương đồng ngữ nghĩa đã có trong \textit{quality gate} --- thành một phần hàm mục tiêu huấn luyện cho chính bước \emph{chọn token nào để giữ lại}, thay thế công thức tuyến tính cố định bằng một chính sách học được, tối ưu trực tiếp theo \textit{harmonized score} của \method{VCC-Bench}. Đề xuất đi kèm một hướng bổ sung rủi ro thấp hơn (nén mức từ) có thể triển khai và đánh giá độc lập trước, không cần hạ tầng huấn luyện mới.
 
-Không có số liệu thực nghiệm nào trong tài liệu này. Bước tiếp theo hợp lý, nếu hướng đi được chấp thuận, là Giai đoạn~1 của Mục~5.2 (xây dựng train/dev split) --- một tiền đề bắt buộc cho mọi thử nghiệm huấn luyện tiếp theo, và có thể được thực hiện độc lập với quyết định có theo đuổi biến thể (a), (b), hay cả hai.
+Không có số liệu thực nghiệm nào trong tài liệu này. Bước tiếp theo hợp lý, nếu hướng đi được chấp thuận, là Giai đoạn~1 của Mục~6.2 (xây dựng train/dev split), tiếp theo là ablation training-free của ba nâng cấp ở Giai đoạn~2 --- các bước có thể thực hiện trước khi quyết định đầu tư vào biến thể (a), (b), hay cả hai.
 
 
 % ============================================================================
@@ -269,6 +314,11 @@ Không có số liệu thực nghiệm nào trong tài liệu này. Bước ti�
 Thanthien.
 \newblock ``LACC: Language-Aware Context Compression --- Nén Ngữ Cảnh Có Nhận Thức Ngôn Ngữ cho Mô Hình Ngôn Ngữ Lớn Tiếng Việt.''
 \newblock \emph{Bản thảo nội bộ}, \texttt{paper/lacc\_paper.tex}, 2026.
+
+\bibitem{zandieh2025turboquant}
+A. Zandieh, M. Daliri, M. Hadian, and V. Mirrokni.
+\newblock ``TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.''
+\newblock \emph{arXiv preprint arXiv:2504.19874}, 2025.
 
 \bibitem{jiang2023llmlingua}
 H. Jiang, Q. Wu, C.-Y. Lin, Y. Yang, and L. Qiu.
