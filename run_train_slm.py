@@ -2,16 +2,19 @@
 """Memory-conscious tone-aware LoRA training for small Vietnamese Causal LMs.
 
 Default: chronopt-research/vietnamese-gpt2-base (137M parameters).
-Designed for a GTX 1060 6 GB: batch=1, sequence length=128, FP16 AMP and
-activation checkpointing.  This is a *new* trainer; run_training.py is left
-unchanged for Qwen-family models.
+Tuned for an NVIDIA T4 16 GB: batch=8, sequence length=256, FP16 AMP and
+activation checkpointing.  For a 6 GB card use --batch-size 1 --max-length 128
+--grad-accum 8.  This is a *new* trainer; run_training.py is left unchanged
+for Qwen-family models.
 
 Examples:
   python run_train_slm.py --quick
-  python run_train_slm.py --epochs 3 --max-length 256
+  python run_train_slm.py --epochs 3
+  python run_train_slm.py --batch-size 1 --max-length 128 --grad-accum 8  # 6 GB
   python run_train_slm.py --model VLAI-AIVN/vigpt2-aio --quick
 """
 import argparse
+import json
 import os
 import sys
 from typing import Optional
@@ -91,12 +94,12 @@ def main():
     ap.add_argument("--output-dir", default="./trained_slm")
     ap.add_argument("--train-data-path")
     ap.add_argument("--epochs", type=int, default=3)
-    ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--max-length", type=int, default=128)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--max-length", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--lora-r", type=int, default=8)
     ap.add_argument("--lambda-tone", type=float, default=0.1)
-    ap.add_argument("--grad-accum", type=int, default=8)
+    ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--no-gradient-checkpointing", action="store_true")
     ap.add_argument("--quick", action="store_true", help="30 optimizer steps, 1 epoch, 128 tokens")
@@ -119,7 +122,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     # Keep master/trainable weights in FP32 for stable GradScaler updates.
     # AMP below still performs CUDA matrix operations in FP16; this 137M model
-    # remains comfortably within 6 GB even with FP32 weights.
+    # remains comfortably within a T4's 16 GB even with FP32 weights.
     model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.use_cache = False
@@ -136,7 +139,7 @@ def main():
         raise RuntimeError("Need at least two usable texts in the training dataset.")
     train_n = max(1, int(len(dataset) * .9))
     train_n = min(train_n, len(dataset) - 1)
-    train_ds, _ = random_split(dataset, [train_n, len(dataset) - train_n], generator=torch.Generator().manual_seed(42))
+    train_ds, val_ds = random_split(dataset, [train_n, len(dataset) - train_n], generator=torch.Generator().manual_seed(42))
     loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                         collate_fn=Collator(tokenizer.pad_token_id), pin_memory=True)
     # Keep trainable probe weights in FP32. GradScaler cannot unscale FP16
@@ -156,11 +159,16 @@ def main():
     for epoch in range(args.epochs):
         for batch_i, batch in enumerate(loader):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+            # Divide by the true number of micro-batches in this accumulation
+            # window (not always grad_accum) so the final partial group — and
+            # small corpora where len(loader) < grad_accum — are weighted right.
+            window_start = (batch_i // args.grad_accum) * args.grad_accum
+            window_size = min(window_start + args.grad_accum, len(loader)) - window_start
             with torch.amp.autocast("cuda", dtype=torch.float16):
                 out = model(**{k: batch[k] for k in ("input_ids", "attention_mask", "labels")}, output_hidden_states=True)
                 tl = tone_loss(out.hidden_states[-1], batch["tone_labels"], batch["attention_mask"])
                 loss = out.loss + tl
-                scaled_loss = loss / args.grad_accum
+                scaled_loss = loss / window_size
             scaler.scale(scaled_loss).backward()
             # Also flush a partial accumulation at the end of a small dataset.
             if (batch_i + 1) % args.grad_accum == 0 or batch_i + 1 == len(loader):
@@ -175,11 +183,19 @@ def main():
         if args.max_steps > 0 and step >= args.max_steps:
             break
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(os.path.join(args.output_dir, "final"))
-    tokenizer.save_pretrained(os.path.join(args.output_dir, "final"))
+    final_dir = os.path.join(args.output_dir, "final")
+    os.makedirs(final_dir, exist_ok=True)
+    model.save_pretrained(final_dir)
+    tokenizer.save_pretrained(final_dir)
     torch.save(tone_loss.state_dict(), os.path.join(args.output_dir, "tone_probe.pt"))
-    print(f"Saved LoRA adapter and tokenizer: {args.output_dir}/final")
+    # Persist the exact held-out split so evaluate_slm.py scores the same
+    # validation set regardless of --train-data-path/--max-length at eval time.
+    val_samples = [dataset[i] for i in val_ds.indices]
+    with open(os.path.join(final_dir, "val_split.json"), "w", encoding="utf-8") as f:
+        json.dump({"max_length": args.max_length, "base_model": args.model,
+                   "samples": val_samples}, f)
+    print(f"Saved LoRA adapter and tokenizer: {final_dir}")
+    print(f"Saved held-out validation split ({len(val_samples)} texts): {final_dir}/val_split.json")
     print(f"Saved trained tone probe: {args.output_dir}/tone_probe.pt | optimizer steps={step}")
 
 

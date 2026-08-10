@@ -5,6 +5,7 @@ Example:
   python evaluate_slm.py --adapter-dir trained_slm/final --tone-probe trained_slm/tone_probe.pt
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -43,11 +44,22 @@ def main():
     probe.load_state_dict(torch.load(args.tone_probe, map_location=device, weights_only=True))
     probe.eval()
 
-    ds = VietnameseToneDataset(load_texts(args.train_data_path), tokenizer, args.max_length)
-    if len(ds) < 2:
-        raise RuntimeError("Need at least two valid texts.")
-    train_n = min(max(1, int(len(ds) * .9)), len(ds) - 1)
-    _, validation = random_split(ds, [train_n, len(ds) - train_n], generator=torch.Generator().manual_seed(42))
+    # Prefer the exact held-out split saved at training time; this makes the
+    # evaluation independent of --train-data-path/--max-length mismatches.
+    val_path = os.path.join(args.adapter_dir, "val_split.json")
+    if os.path.exists(val_path):
+        with open(val_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        validation = [tuple(s) for s in saved["samples"]]
+        print(f"Loaded held-out split saved at training time: {len(validation)} texts")
+    else:
+        print("[WARN] val_split.json not found; rebuilding the split from --train-data-path. "
+              "Pass the SAME --train-data-path and --max-length used during training.")
+        ds = VietnameseToneDataset(load_texts(args.train_data_path), tokenizer, args.max_length)
+        if len(ds) < 2:
+            raise RuntimeError("Need at least two valid texts.")
+        train_n = min(max(1, int(len(ds) * .9)), len(ds) - 1)
+        _, validation = random_split(ds, [train_n, len(ds) - train_n], generator=torch.Generator().manual_seed(42))
     loader = DataLoader(validation, batch_size=args.batch_size, collate_fn=Collator(tokenizer.pad_token_id))
 
     total_nll, valid_tokens, all_correct, all_count = 0.0, 0, 0, 0
@@ -76,6 +88,11 @@ def main():
     print(f"Perplexity: {math.exp(min(nll, 20)):.2f}")
     print(f"Tone accuracy (all tokens): {all_correct / max(all_count, 1):.2%}")
     print(f"Tone accuracy (marked tones only): {marked_correct / max(marked_count, 1):.2%} ({marked_count} tokens)")
+    # The 'all tokens' figure is inflated by the ngang (unmarked) majority.
+    # Report the always-predict-ngang baseline so it can be read honestly.
+    ngang_tokens = all_count - marked_count
+    print(f"Majority-class baseline (always predict ngang): {ngang_tokens / max(all_count, 1):.2%}")
+    print("-> Judge tone learning by 'marked tones only' vs this baseline, not by 'all tokens'.")
 
 
 if __name__ == "__main__":
