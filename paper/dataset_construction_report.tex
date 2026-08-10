@@ -1,0 +1,210 @@
+% ============================================================================
+% VCC-Bench: Dataset Construction & Specification Report
+% Báo Cáo Thiết Kế và Xây Dựng Bộ Dữ Liệu Đánh Giá Nén Ngữ Cảnh Tiếng Việt
+% ============================================================================
+\documentclass[12pt,a4paper]{article}
+
+% ── Encoding & Fonts ──────────────────────────────────────────────────
+\usepackage[utf8]{vntex}
+\usepackage{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{indentfirst}
+
+% ── Layout ────────────────────────────────────────────────────────────
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ── Packages ──────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{float}
+\usepackage{listings}
+
+% ── Code Listings Config ──────────────────────────────────────────────
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!10},
+  keywordstyle=\color{blue},
+  stringstyle=\color{teal},
+  commentstyle=\color{gray}
+}
+
+% ── Custom commands ───────────────────────────────────────────────────
+\newcommand{\method}[1]{\textsc{#1}}
+\newcommand{\viet}[1]{\textit{#1}}
+
+% ── Title ─────────────────────────────────────────────────────────────
+\title{\textbf{Báo Cáo Thiết Kế và Xây Dựng Bộ Dữ Liệu Đánh Giá \\
+Nén Ngữ Cảnh Tiếng Việt (\method{VCC-Bench})}}
+
+\author{
+  Thanthien\thanks{Nhóm nghiên cứu VNCompress.} \\
+  \texttt{thanthien@example.com}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+Việc đánh giá các phương pháp nén ngữ cảnh (\textit{context compression}) cho Mô hình Ngôn ngữ Lớn (LLM) đòi hỏi các bộ dữ liệu có cấu trúc ngữ cảnh dài, đa dạng tác vụ và tích hợp các đặc thù ngôn ngữ. Báo cáo này trình bày quy trình thiết kế, thu thập, chuẩn hóa và đóng gói bộ dữ liệu \method{VCC-Bench} (\textit{Vietnamese Context Compression Benchmark}) --- bộ dữ liệu benchmark chuyên dụng đầu tiên cho bài toán nén ngữ cảnh tiếng Việt. \method{VCC-Bench} bao gồm 5 tác vụ cốt lõi: (1) \textbf{Long-Document QA} (Hỏi đáp ngữ cảnh pháp luật và báo chí dài từ 2K--32K token), (2) \textbf{Multi-turn Conversation} (Tóm tắt và duy trì hội thoại 10--50 lượt), (3) \textbf{Vietnamese Needle-in-a-Haystack} (Truy xuất sự kiện chèn ẩn trong ngữ cảnh lớn), (4) \textbf{Tone-Sensitive QA} (Đánh giá mức độ nhạy cảm thanh điệu và hiện tượng rớt dấu thanh), và (5) \textbf{Agent Function-Calling} (Bảo toàn cấu trúc gọi hàm và tham số trong ứng dụng Agent). Báo cáo chi tiết hóa quy trình kiểm định chất lượng hai vòng (LLM-assisted + Human verification), cấu trúc định dạng JSON chuẩn hóa, cùng hệ thống chỉ số đánh giá đa chiều tích hợp chỉ số bảo toàn thanh điệu (\textit{Tone Preservation Rate}).
+\end{abstract}
+
+% ============================================================================
+\section{Giới thiệu & Động lực}
+% ============================================================================
+
+Trong bối cảnh Mô hình Ngôn ngữ Lớn (LLM) ngày càng xử lý các văn bản có độ dài lớn (từ vài nghìn đến hàng trăm nghìn token), nén ngữ cảnh (\textit{context compression}) trở thành một kỹ thuật then chốt giúp giảm chi phí tính toán $O(n^2)$ của cơ chế Self-Attention và tiết kiệm bộ nhớ KV cache. Tuy nhiên, hầu hết các bộ benchmark nén ngữ cảnh hiện nay như LongBench~\cite{bai2023longbench}, L-Eval~\cite{chen2023leval}, hay ZeroSCROLLS~\cite{shaham2023zeroscrolls} đều tập trung vào tiếng Anh hoặc tiếng Trung.
+
+Tiếng Việt là một ngôn ngữ đơn lập, có hệ thống 6 thanh điệu tương phản và tỷ lệ hư từ chiếm 30--40\% vốn từ. Việc áp dụng trực tiếp các bộ dữ liệu QA tiếng Anh được dịch tự động thường gặp phải các hạn chế nghiêm trọng:
+\begin{itemize}
+    \item \textbf{Mất đặc thù thanh điệu:} Không đo lường được hiện tượng biến đổi ngữ nghĩa khi nén làm mất dấu thanh (ví dụ: \viet{má} $\to$ \viet{ma}, \viet{mả} $\to$ \viet{ma}).
+    \item \textbf{Không phản ánh hiện tượng phình to token (Token Inflation):} Do đặc điểm BPE tokenizer không tối ưu cho tiếng Việt, độ dài ngữ cảnh tiếng Việt thường dài hơn tiếng Anh 1.5--2.0$\times$ cho cùng một nội dung.
+    \item \textbf{Thiếu các tác vụ thực tế trong hệ sinh thái ứng dụng tiếng Việt:} Như truy xuất văn bản pháp luật dài, tóm tắt lịch sử hội thoại khách hàng, và gọi hàm API bằng tiếng Việt.
+\end{itemize}
+
+Để giải quyết khoảng trống này, chúng tôi xây dựng \method{VCC-Bench} --- bộ dữ liệu tiêu chuẩn hóa được thiết kế đo lường toàn diện hiệu năng của các thuật toán nén ngữ cảnh tiếng Việt như \method{LACC}, LLMLingua~\cite{jiang2023llmlingua}, SnapKV~\cite{li2024snapkv}.
+
+% ============================================================================
+\section{Phân loại Tác vụ & Thiết kế Dữ liệu}
+% ============================================================================
+
+\method{VCC-Bench} được thiết kế gồm 5 tác vụ cốt lõi, bao phủ từ đọc hiểu ngữ cảnh siêu dài đến kiểm tra khả năng phục hồi ngữ âm tiếng Việt:
+
+\begin{table}[H]
+\centering
+\caption{Tổng quan 5 tác vụ trong bộ dữ liệu \method{VCC-Bench}.}
+\label{tab:vcc_tasks}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccm{6cm}}
+\toprule
+\textbf{Mã TV} & \textbf{Tên Tác Vụ} & \textbf{Độ Dải Token} & \textbf{Số Mẫu} & \textbf{Mục Tiêu Đánh Giá} \\
+\midrule
+\textbf{T1} & Long-Document QA & 2,048 -- 32,768 & 500 & Kiểm tra khả năng giữ lại thông tin pháp lý/báo chí chi tiết sau khi nén. \\
+\textbf{T2} & Multi-turn Conversation & 1,024 -- 8,192 & 300 & Đánh giá khả năng duy trì mạch hội thoại và thông tin ngữ cảnh đa lượt. \\
+\textbf{T3} & VN Needle-in-a-Haystack & 4,096 -- 32,768 & 400 & Đo độ nhạy truy xuất sự kiện chèn ẩn ở các độ sâu ngữ cảnh khác nhau. \\
+\textbf{T4} & Tone-Sensitive QA & 512 -- 4,096 & 250 & Đánh giá mức độ tổn thất ngữ nghĩa khi nén các từ đồng âm khác thanh điệu. \\
+\textbf{T5} & Agent Function-Calling & 1,024 -- 4,096 & 200 & Kiểm tra sự bảo toàn cú pháp JSON schema và tham số gọi hàm của Agent. \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{T1: Long-Document QA (Hỏi đáp trên văn bản dài)}
+Nguồn dữ liệu trích xuất từ các Bộ luật, Nghị định Việt Nam (cơ sở dữ liệu pháp luật công khai) và các bài báo phân tích chuyên sâu. Mỗi mẫu gồm một đoạn văn bản dài ($2K - 32K$ token) kèm theo cặp $(Q, A)$ yêu cầu tổng hợp thông tin rải rác trong tài liệu.
+
+\subsection{T2: Multi-turn Conversation (Hội thoại nhiều lượt)}
+Trích xuất và làm sạch từ tập dữ liệu hội thoại thực tế (\viet{ShareGPT-Vi}, \viet{Multi-turn Alpaca Vi}). Ngữ cảnh gồm $10 - 50$ lượt trao đổi giữa User và Virtual Assistant. Câu hỏi yêu cầu truy xuất thông tin ở các lượt đầu hoặc tóm tắt toàn bộ lịch sử trao đổi.
+
+\subsection{T3: Vietnamese Needle-in-a-Haystack (VN-NIAH)}
+Sử dụng các bài viết Wikipedia Tiếng Việt chất lượng cao làm ngữ cảnh nền (\textit{Haystack}). Một câu sự kiện cụ thể (\textit{Needle}) mang thông tin ngẫu nhiên (ví dụ: \textit{``Mã xác nhận bảo mật của phiên làm việc là VNCOMPRESS-2026-X7''}) được chèn vào các vị trí độ sâu $10\%, 30\%, 50\%, 70\%, 90\%$ của ngữ cảnh.
+
+\subsection{T4: Tone-Sensitive QA (Nhạy cảm thanh điệu)}
+Được thiết kế đặc thù cho ngôn ngữ có thanh điệu. Ngữ cảnh chứa các chuỗi từ có sự tương phản thanh điệu cao hoặc các cặp từ dễ nhầm lẫn khi nén rớt dấu (như \viet{cá/cả/cạ}, \viet{bàn/bán/bản/bạn}). Câu hỏi yêu cầu phân biệt chính xác thực thể dựa trên thanh điệu.
+
+\subsection{T5: Agent Function-Calling (Gọi hàm trong ứng dụng Agent)}
+Trích xuất từ \viet{Vietnamese Function Calling Test}. Ngữ cảnh chứa định nghĩa của $10 - 30$ hàm API (định dạng JSON schema) kèm lịch sử gọi hàm. Yêu cầu LLM sinh ra đúng cấu trúc gọi hàm và giá trị tham số chính xác sau khi danh sách định nghĩa hàm bị nén $4\times$ hoặc $8\times$.
+
+% ============================================================================
+\section{Quy Trình Thu Thập, Chuẩn Hóa và Kiểm Định}
+% ============================================================================
+
+Quy trình xây dựng \method{VCC-Bench} tuân theo 4 bước nghiêm ngặt (Hình~\ref{fig:pipeline}):
+
+\begin{figure}[H]
+\centering
+\fbox{%
+\begin{minipage}{0.85\textwidth}
+\centering
+\vspace{4pt}
+\textbf{Quy trình 4 bước xây dựng VCC-Bench} \\[6pt]
+\begin{tabular}{c}
+\textbf{Bước 1: Thu thập & Trích xuất Văn bản Gốc} \\
+(Pháp luật, Wikipedia Vi, Báo chí, Dialogue, Tool Schemas) \\[4pt]
+$\downarrow$ \\[4pt]
+\textbf{Bước 2: Phân đoạn & Tính độ dài Token} \\
+(Phân đoạn 2K--32K token bằng Qwen2.5 / Llama-3 Tokenizer) \\[4pt]
+$\downarrow$ \\[4pt]
+\textbf{Bước 3: Sinh Cặp (Question, Answer) & Chèn Needle} \\
+(Mô hình GPT-4o / Claude 3.5 Sonnet hỗ trợ sinh câu hỏi) \\[4pt]
+$\downarrow$ \\[4pt]
+\textbf{Bước 4: Kiểm định Chất lượng Hai Vòng} \\
+(Lọc tự động bằng Rule + Thẩm định thủ công của chuyên gia ngôn ngữ)
+\end{tabular}
+\vspace{4pt}
+\end{minipage}
+}
+\caption{Sơ đồ quy trình thu thập và tinh chế bộ dữ liệu \method{VCC-Bench}.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Tiêu chuẩn kiểm định hai vòng (Two-Stage Quality Control)}
+1. **Vòng 1 (Automatic Filtering):** Loại bỏ các câu hỏi quá ngắn ($<5$ từ), các văn bản bị lỗi font chữ/mã hóa UTF-8, hoặc câu hỏi có thể trả lời mà không cần nhìn vào ngữ cảnh (tránh hiện tượng \textit{parametric memory leakage}).
+2. **Vòng 2 (Human Verification):** Đội ngũ chuyên gia kiểm tra thủ công 100\% tập dữ liệuhold-out để đảm bảo tính đúng đắn về mặt pháp lý, chính xác về ngữ âm tiếng Việt và không có tính mơ hồ trong đáp án tham chiếu.
+
+% ============================================================================
+\section{Định Dạng Dữ Liệu & Thước Đo Đánh Giá}
+% ============================================================================
+
+\subsection{Cấu trúc định dạng JSON Schema}
+Toàn bộ dữ liệu được đóng gói theo cấu trúc JSON tiêu chuẩn hóa như minh họa bên dưới:
+
+\begin{lstlisting}[language=json, caption={Cấu trúc mẫu dữ liệu trong VCC-Bench.}]
+{
+  "id": "vcc_task1_legal_042",
+  "task": "long_document_qa",
+  "context": "Văn bản Luật Lao động số...",
+  "question": "Thời gian nghỉ thai sản của lao động nữ được quy định như thế nào?",
+  "answers": ["Lao động nữ được nghỉ hưởng chế độ thai sản trước và sau khi sinh con là 06 tháng."],
+  "context_length_tokens": 4096,
+  "metadata": {
+    "domain": "law",
+    "tone_density": 0.68,
+    "function_word_ratio": 0.34
+  }
+}
+\end{lstlisting}
+
+\subsection{Hệ thống Thước đo Đánh giá (Evaluation Metrics)}
+Để đánh giá toàn diện một thuật toán nén, \method{VCC-Bench} tích hợp cả chỉ số chất lượng sinh và chỉ số ngôn ngữ học:
+
+1. **Chất lượng sinh văn bản ($Q$):** ROUGE-L F1, BLEU-4, Exact Match (EM), và BERTScore.
+2. **Hiệu quả nén ($E$):** Compression Ratio ($CR = n_{orig} / n_{comp}$) và Token Savings ($TS\%$).
+3. **Chỉ số bảo toàn thanh điệu (TPR - Tone Preservation Rate):**
+   \begin{equation}
+       \text{TPR} = \frac{|\{t \in T_{\text{compressed}} : \text{tone}(t) = \text{tone}_{\text{orig}}(t) \land \text{tone}(t) \neq \text{\tone{ngang}}\}|}{|\{t \in T_{\text{orig}} : \text{tone}(t) \neq \text{\tone{ngang}}\}| \times (1/R)}
+   \end{equation}
+4. **Harmonized Score ($H$):** Trung bình hài hòa giữa chất lượng sinh $Q$ và hiệu quả nén $E$:
+   \begin{equation}
+       H = \frac{2 \cdot Q \cdot E}{Q + E}
+   \end{equation}
+
+% ============================================================================
+\section{Kết Luận & Hướng Phát Triển}
+% ============================================================================
+
+Bộ dữ liệu \method{VCC-Bench} không chỉ đóng vai trò là thước đo cho phương pháp \method{LACC} mà còn đặt nền móng chuẩn hóa cho các nghiên cứu nén ngữ cảnh và xử lý ngữ cảnh dài cho tiếng Việt. Trong tương lai, chúng tôi sẽ mở rộng bộ dữ liệu lên quy mô $100K+$ token và bổ sung thêm các tác vụ liên quan đến mã nguồn (Code Summarization) và truy xuất đa phương thức (Multimodal Long Context).
+
+% ============================================================================
+\begin{thebibliography}{99}
+\bibitem{bai2023longbench} Y. Bai et al., ``LongBench: A Bilingual Benchmark for Long Context Understanding,'' \textit{arXiv preprint arXiv:2308.14508}, 2023.
+\bibitem{chen2023leval} C. Chen et al., ``L-Eval: Instituting Standardized Evaluation for Long Context Language Models,'' \textit{arXiv preprint arXiv:2307.11088}, 2023.
+\bibitem{shaham2023zeroscrolls} U. Shaham et al., ``ZeroSCROLLS: A Zero-Shot Benchmark for Long Text Understanding,'' \textit{EMNLP}, 2023.
+\bibitem{jiang2023llmlingua} H. Jiang et al., ``LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models,'' \textit{EMNLP}, 2023.
+\bibitem{li2024snapkv} Y. Li et al., ``SnapKV: LLM Knows What You are Looking for Before Generation,'' \textit{arXiv preprint arXiv:2404.14469}, 2024.
+\end{thebibliography}
+
+\end{document}
