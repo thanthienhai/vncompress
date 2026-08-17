@@ -7,7 +7,7 @@ from vncompress.compressors.no_model import (
     NoModelToneCompressor, NoModelMorphCompressor,
     NoModelCombinedCompressor, NoModelBaselineCompressor,
 )
-from vncompress.tone_aware.vietnamese_tones import VietnameseToneAnalyzer, TONE_NAME_TO_ID, get_tone_analyzer
+from vncompress.tone_aware.vietnamese_tones import TONE_NAME_TO_ID, get_tone_analyzer
 from transformers import AutoTokenizer
 
 tone_analyzer = get_tone_analyzer()
@@ -117,7 +117,7 @@ for task_name, samples in bench.samples.items():
                     crs.append(cr)
                     tprs.append(tpr)
                     times_ms.append(dt)
-                except Exception as e:
+                except Exception:
                     pass
 
             if crs:
@@ -190,5 +190,5 @@ out = {
 }
 with open("./results_no_model/summary.json", "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False, indent=2)
-print(f"\n\nResults saved: ./results_no_model/summary.json")
+print("\n\nResults saved: ./results_no_model/summary.json")
 print("Done!")

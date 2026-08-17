@@ -29,10 +29,13 @@ jobs:
         run: pip install pytest ruff
 
       - name: Lint (ruff)
-        run: ruff check vncompress tests
+        run: ruff check vncompress tests scripts
 
       - name: Run test suite
         run: pytest tests/ -v
 
       - name: CPU smoke test (compress end-to-end, no GPU)
         run: python scripts/smoke_test.py
+
+      - name: Verify dataset checksums (vcc_bench_data/CHECKSUMS.json)
+        run: python scripts/checksum_datasets.py

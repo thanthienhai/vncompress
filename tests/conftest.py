@@ -6,7 +6,10 @@ no GPU, no VRAM. Compressors only ever call `.encode`/`.decode` on the
 tokenizer they're given, so a deterministic word-level stand-in is a
 faithful substitute for these unit tests.
 """
+import pathlib
 import re
+import shutil
+import tempfile
 
 import pytest
 
@@ -62,6 +65,20 @@ class MockTokenizer:
         if isinstance(ids, int):
             ids = [ids]
         return " ".join(self._id_to_word.get(i, "") for i in ids)
+
+
+@pytest.fixture
+def tmp_path():
+    """Override pytest's built-in tmp_path: its default base temp dir
+    (a numbered pytest-of-<user> tree under %TEMP%) is not writable in
+    this sandboxed environment (PermissionError scanning old runs).
+    Uses a fresh tempfile.mkdtemp() directory instead, which sidesteps
+    pytest's own bookkeeping directory entirely."""
+    d = tempfile.mkdtemp(prefix="vncompress-test-")
+    try:
+        yield pathlib.Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture

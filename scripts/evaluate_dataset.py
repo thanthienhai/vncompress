@@ -28,13 +28,13 @@ def main():
     print(f'License: {lic}')
     print(f'Total samples: {len(samples)}')
 
-    print(f'\n--- Task Distribution ---')
+    print('\n--- Task Distribution ---')
     task_counts = Counter(s['task'] for s in samples)
     for task, count in sorted(task_counts.items()):
         bar = '#' * (count // 5)
         print(f'  {task:<30s} {count:>4d}  {bar}')
 
-    print(f'\n--- Context Length Distribution (chars) ---')
+    print('\n--- Context Length Distribution (chars) ---')
     for task in sorted(task_counts.keys()):
         lengths = [s.get('char_length', len(s.get('context', ''))) for s in samples if s['task'] == task]
         if lengths:
@@ -44,19 +44,19 @@ def main():
             print(f'    Count={n}, Min={lengths[0]}, P25={lengths[n//4]}, Med={lengths[n//2]}, P75={lengths[3*n//4]}, Max={lengths[-1]}')
             print(f'    Avg={sum(lengths)//n}')
 
-    print(f'\n--- Domain Diversity (Long-Doc QA) ---')
+    print('\n--- Domain Diversity (Long-Doc QA) ---')
     domains = Counter(s.get('domain', '?') for s in samples if s['task'] == 'long_document_qa')
     print(f'  Unique domains: {len(domains)}')
     for d, c in domains.most_common(10):
         print(f'    {d}: {c}')
 
-    print(f'\n--- Conversation Scenarios ---')
+    print('\n--- Conversation Scenarios ---')
     scenarios = Counter(s.get('scenario', '?') for s in samples if s['task'] == 'multi_turn_conversation')
     print(f'  Unique scenarios: {len(scenarios)}')
     for s, c in scenarios.most_common():
         print(f'    {s}: {c}')
 
-    print(f'\n--- Quality Assessment ---')
+    print('\n--- Quality Assessment ---')
     query_lens = [len(s['query']) for s in samples]
     ref_lens = [len(s.get('reference_answer', '')) for s in samples]
     ctx_lens = [len(s.get('context', '')) for s in samples]
@@ -71,7 +71,7 @@ def main():
     print(f'  Empty queries: {empty_queries}')
     print(f'  Empty references: {empty_refs}')
 
-    print(f'\n--- Vietnamese Content Verification ---')
+    print('\n--- Vietnamese Content Verification ---')
     from vncompress.tone_aware.vietnamese_tones import is_vietnamese
     vi_count = 0
     for s in samples:
@@ -80,7 +80,7 @@ def main():
             vi_count += 1
     print(f'  Samples with Vietnamese text: {vi_count}/{len(samples)} ({100*vi_count//len(samples)}%)')
 
-    print(f'\n--- VERDICT ---')
+    print('\n--- VERDICT ---')
     issues = []
     if empty_contexts > 0:
         issues.append(f'{empty_contexts} empty contexts')
@@ -100,7 +100,7 @@ def main():
     else:
         print('PASSED -- Dataset ready for benchmarking.')
 
-    print(f'\n--- File Sizes ---')
+    print('\n--- File Sizes ---')
     for f in sorted(os.listdir(DATA_DIR)):
         if f.endswith('.json'):
             size = os.path.getsize(os.path.join(DATA_DIR, f))

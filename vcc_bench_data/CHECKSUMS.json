@@ -1,0 +1,30 @@
+{
+  "vcc_bench_agent_tool_calling.json": {
+    "sha256": "794140e8357e8005398b9966bd592b7acb0ee190061ec9568e5ba59f18af67b1",
+    "size_bytes": 11512
+  },
+  "vcc_bench_cross_lingual.json": {
+    "sha256": "73c837ad47ec0000390623d3a8ebe891a09adb8cff23610eadc69cc7187386fb",
+    "size_bytes": 55933
+  },
+  "vcc_bench_long_document_qa.json": {
+    "sha256": "1e8a7f006d012e8a77cef1e6d5a9a3965d7a8688d0933be73a0c82ea133e16a6",
+    "size_bytes": 791784
+  },
+  "vcc_bench_multi_turn_conversation.json": {
+    "sha256": "c965296f91dcb9f6c3c221a5c89cdb1465f699c3848d8bba81c4bad958c2dec1",
+    "size_bytes": 136817
+  },
+  "vcc_bench_needle_in_haystack.json": {
+    "sha256": "c462beac32eebfc4fbb61413fc2233bb94b23abd1a9241d2ac9b85a9892d0778",
+    "size_bytes": 762776
+  },
+  "vcc_bench_v1.json": {
+    "sha256": "1ce094d15b1667ed7594822e682cd9bc13dab63c6152948222631dc21943f081",
+    "size_bytes": 1757975
+  },
+  "wikipedia_vi_raw.json": {
+    "sha256": "460238a39cb6f25693c4863631b448c4c024889e59cfe1e213c15edb4b5df7b9",
+    "size_bytes": 1719393
+  }
+}

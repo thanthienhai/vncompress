@@ -121,11 +121,14 @@ python run_benchmark.py --list-methods
 # Demo nhanh (một vài ví dụ, in kết quả chi tiết theo từng phương pháp)
 python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --demo
 
-# Benchmark đầy đủ trên VCC-Bench
-python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+# Benchmark đầy đủ trên VCC-Bench (dùng file config thay vì liệt kê từng cờ)
+python run_benchmark.py --config configs/example_experiment.json
 
 # Ablation study (tách riêng từng tín hiệu: perplexity, tone, morphology)
 python run_ablation.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+
+# Tổng hợp kết quả thành bảng method × ratio × task (baseline/proposed/ablation phân biệt rõ)
+python scripts/summarize_results.py results/qwen2.5-7b-vcc-bench-v1
 
 # Huấn luyện tone-aware (model Qwen-family, LoRA)
 python run_training.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
@@ -139,6 +142,8 @@ python evaluate_slm.py --adapter-dir trained_slm/final --tone-probe trained_slm/
 ```
 
 `run_benchmark.py`, `run_ablation.py` và `run_training.py` hỗ trợ `--device cpu` (chậm hơn nhiều nhưng chạy được để thử nghiệm nhanh). `run_train_slm.py` và `evaluate_slm.py` yêu cầu GPU NVIDIA (CUDA) bắt buộc — không hỗ trợ CPU.
+
+`run_benchmark.py` và `run_ablation.py` đọc chung một [`ExperimentConfig`](vncompress/config.py) (`--config path/to.json`, xem [`configs/example_experiment.json`](configs/example_experiment.json)) — cố định seed, ghi lại `config.json` + `environment.json` (git commit, version các package chính) vào `--output-dir` trước khi chạy, để mọi kết quả đều truy nguyên được. Cờ CLI (`--model`, `--device`, `--ratios`, ...) ghi đè giá trị trong file config. Chi tiết đầy đủ về protocol đánh giá (dataset version, split, ratio/seed cố định, schema kết quả) ở [`docs/benchmark.md`](docs/benchmark.md).
 
 ## Kiểm thử & CI
 
@@ -154,31 +159,42 @@ ruff check vncompress tests
 
 # CPU smoke test: import package + chạy nén end-to-end với tokenizer thật
 python scripts/smoke_test.py
+
+# Xác thực checksum dataset (vcc_bench_data/CHECKSUMS.json)
+python scripts/checksum_datasets.py
 ```
 
-GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) chạy đúng ba bước trên (lint → test → smoke test) tự động trên mỗi push và pull request vào `main`, dùng torch CPU-only — không yêu cầu GPU hay model lớn.
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) chạy lint → test → smoke test → xác thực checksum dataset tự động trên mỗi push và pull request vào `main`, dùng torch CPU-only — không yêu cầu GPU hay model lớn.
 
 ## Cấu trúc thư mục
 
 ```
 vncompress/
-├── .github/workflows/ci.yml  # CI: lint, test suite, CPU smoke test
+├── .github/workflows/ci.yml  # CI: lint, test suite, CPU smoke test, checksum dataset
+├── docs/
+│   └── benchmark.md          # Protocol đánh giá VCC-Bench (dataset version, split, seed, schema kết quả)
+├── configs/
+│   └── example_experiment.json  # Ví dụ ExperimentConfig cho run_benchmark.py --config
 ├── run_benchmark.py          # VCC-Bench evaluation
 ├── run_ablation.py           # Ablation study (tách từng tín hiệu LACC)
 ├── run_training.py           # Training pipeline (LoRA, tone-aware, model Qwen-family)
 ├── run_train_slm.py          # Training pipeline cho SLM tiếng Việt nhỏ
 ├── evaluate_slm.py           # Đánh giá SLM: perplexity + tone-probe accuracy
 ├── tests/                    # pytest test suite (CPU-only, MockTokenizer)
-├── scripts/                  # Tiện ích: build VCC-Bench, fetch data, eval, smoke test
+├── scripts/                  # build VCC-Bench, fetch data, eval, smoke test, checksum, summarize_results
+├── vcc_bench_data/
+│   ├── PROVENANCE.md         # Nguồn, license, ngày snapshot, preprocessing của từng dataset
+│   └── CHECKSUMS.json        # SHA-256 cho từng file dataset
 ├── paper/
 │   └── lacc_paper.tex        # Full LaTeX paper
 ├── vncompress/
+│   ├── config.py             # ExperimentConfig thống nhất: seed, model, ratios, snapshot config+environment
 │   ├── compressors/          # Base, tone_aware, llmlingua, snapkv, external_scorer, no_model
-│   ├── tone_aware/           # Tones, scoring, linguistics
+│   ├── tone_aware/           # Tones, scoring, linguistics, Tone Preservation Rate
 │   ├── morphology/           # merge_policy, word classes
-│   ├── evaluation/           # VCC-Bench metrics
+│   ├── evaluation/           # VCC-Bench metrics, method_taxonomy (baseline/proposed/ablation)
 │   ├── calibration/          # Weight/parameter search cho scoring blend
-│   └── docs/                 # Tài liệu toán học (math_framework.md)
+│   └── docs/                 # Tài liệu toán học (math_framework.md, tone_preservation_rate.md)
 ├── pyproject.toml            # Cấu hình ruff (lint)
 └── pytest.ini                # Cấu hình pytest
 ```

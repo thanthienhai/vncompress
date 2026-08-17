@@ -8,9 +8,7 @@ import os
 import sys
 import time
 import random
-import hashlib
-import urllib.request
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

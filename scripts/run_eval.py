@@ -7,10 +7,10 @@ import os, sys, time, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
-from vncompress.evaluation import VCCBench, VCCBenchConfig, VCCBenchSample
+from vncompress.evaluation import VCCBench, VCCBenchConfig
 from vncompress.evaluation.metrics import compute_rouge_l, compute_bleu
 from vncompress.compressors import create_compressor
-from vncompress.tone_aware import is_vietnamese, get_tone_analyzer
+from vncompress.tone_aware import get_tone_analyzer
 
 MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
@@ -73,7 +73,7 @@ total_eval = sum(len(v) for v in all_task_samples.values())
 print(f"  Evaluating {total_eval} samples across {len(all_task_samples)} tasks")
 
 # ═══ 4. Run Evaluation ═══
-print(f"\n[4/5] Running evaluation...")
+print("\n[4/5] Running evaluation...")
 print(f"  Methods: {config.methods}")
 print(f"  Ratios: {config.compression_ratios}")
 
@@ -231,5 +231,5 @@ with open("./results_qwen15/vcc_bench_results.json", "w", encoding="utf-8") as f
 
 mem_peak = torch.cuda.max_memory_allocated() / 1024**3
 print(f"\nPeak GPU memory: {mem_peak:.1f} GB")
-print(f"Results: ./results_qwen15/vcc_bench_results.json")
+print("Results: ./results_qwen15/vcc_bench_results.json")
 print("Done!")

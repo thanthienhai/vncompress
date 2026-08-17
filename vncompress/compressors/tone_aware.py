@@ -74,6 +74,7 @@ from .base import BaseCompressor, CompressionResult, CompressionConfig
 from ..tone_aware.vietnamese_tones import (
     get_tone_analyzer,
     is_vietnamese,
+    compute_tone_preservation_rate,
 )
 from ..tone_aware.tone_scoring import (
     PhonologicalConsistencyLoss,
@@ -358,17 +359,10 @@ class ToneAwareCompressor(BaseCompressor):
 
         elapsed = (time.time() - start) * 1000
 
-        # Tone Preservation Rate (bounded [0, 1]):
-        # of the original tokens that carried a non-ngang tone, what fraction
-        # were retained by index in the compressed output. This is an exact
-        # per-token check (we know precisely which original indices survive),
-        # unlike re-scanning decoded compressed text for tone characters.
-        tone_bearing_indices = [i for i, info in enumerate(tone_infos) if info.tones_present]
-        if tone_bearing_indices:
-            preserved_tones = sum(1 for i in tone_bearing_indices if i in retained_set)
-            tone_preservation_rate = preserved_tones / len(tone_bearing_indices)
-        else:
-            tone_preservation_rate = 1.0
+        # Tone Preservation Rate -- see compute_tone_preservation_rate()
+        # (vncompress/tone_aware/vietnamese_tones.py) for the formal
+        # definition and docs/tone_preservation_rate.md for edge cases.
+        tone_preservation_rate = compute_tone_preservation_rate(tone_infos, retained_set)
 
         metadata = {
             'language': self._detect_language(input_ids) if self.auto_detect_language else 'unknown',
@@ -839,13 +833,9 @@ class CombinedCompressor(BaseCompressor):
 
         elapsed = (time.time() - start) * 1000
 
-        # Same exact, index-based Tone Preservation Rate as ToneAwareCompressor.
-        tone_bearing_indices = [i for i, info in enumerate(tone_infos) if info.tones_present]
-        if tone_bearing_indices:
-            preserved_tones = sum(1 for i in tone_bearing_indices if i in retained_set)
-            tone_preservation_rate = preserved_tones / len(tone_bearing_indices)
-        else:
-            tone_preservation_rate = 1.0
+        # Same exact, index-based Tone Preservation Rate as ToneAwareCompressor
+        # -- see compute_tone_preservation_rate() for the formal definition.
+        tone_preservation_rate = compute_tone_preservation_rate(tone_infos, retained_set)
 
         metadata = {
             'tone_weight': wt,

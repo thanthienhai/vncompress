@@ -36,12 +36,17 @@ import sys
 # Add parent to path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from vncompress.config import (
+    ExperimentConfig, load_experiment_config, save_run_metadata, set_seed,
+)
 from vncompress.evaluation import VCCBench, VCCBenchConfig
 from vncompress.compressors import (
     CombinedCompressor,
     LLMLinguaCompressor,
     CompressionConfig,
 )
+
+DEFAULT_OUTPUT_DIR = './results_ablation'
 
 ABLATION_METHODS = ['ppl_only', 'tone_only', 'morph_only', 'combined']
 
@@ -105,11 +110,22 @@ def run_ablation(
     model_name: str = 'Qwen/Qwen2.5-7B-Instruct',
     device: str = 'cuda',
     ratios: list = None,
-    output_dir: str = './results_ablation',
+    output_dir: str = DEFAULT_OUTPUT_DIR,
     quick: bool = False,
     data_path: str = None,
+    exp_config: 'ExperimentConfig' = None,
 ):
-    """Run the ablation study end-to-end and print/save a comparison report."""
+    """Run the ablation study end-to-end and print/save a comparison report.
+
+    If `exp_config` is given, its seed is applied and a config.json +
+    environment.json snapshot is written to `output_dir` before the run
+    starts -- see vncompress/config.py and docs/benchmark.md.
+    """
+    if exp_config is not None:
+        set_seed(exp_config.seed)
+        os.makedirs(output_dir, exist_ok=True)
+        save_run_metadata(output_dir, exp_config)
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from run_benchmark import VIETNAMESE_DEMO_SAMPLES
@@ -150,7 +166,7 @@ def run_ablation(
             sample.context_length = len(tokenizer.encode(sample.context))
         bench.add_samples(samples)
 
-    print(f"\nAblation Configuration:")
+    print("\nAblation Configuration:")
     print(f"  Model: {model_name}")
     print(f"  Arms: {config.methods}")
     print(f"  Ratios: {[f'{r}x' for r in config.compression_ratios]}")
@@ -190,14 +206,20 @@ def main():
     parser = argparse.ArgumentParser(
         description='LACC Ablation Study: isolate tone/morph/perplexity signals'
     )
-    parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-7B-Instruct',
-                         help='Model name (HuggingFace)')
-    parser.add_argument('--device', type=str, default='cuda',
-                         choices=['cuda', 'cpu', 'mps'], help='Device to run on')
+    # None defaults for ExperimentConfig-owned fields -- see run_benchmark.py's
+    # main() and vncompress/config.py for the CLI/config-file precedence rule.
+    parser.add_argument('--config', type=str, default=None,
+                         help='Path to a JSON (or YAML, if PyYAML is installed) ExperimentConfig file.')
+    parser.add_argument('--seed', type=int, default=None,
+                         help='Random seed for all stochastic components (default: 42)')
+    parser.add_argument('--model', type=str, default=None,
+                         help='Model name (HuggingFace). Default: Qwen/Qwen2.5-7B-Instruct')
+    parser.add_argument('--device', type=str, default=None,
+                         choices=['cuda', 'cpu', 'mps'], help='Device to run on. Default: cuda')
     parser.add_argument('--ratios', type=str, default=None,
                          help='Comma-separated compression ratios (default: 2,4,8)')
-    parser.add_argument('--output-dir', type=str, default='./results_ablation',
-                         help='Output directory for results')
+    parser.add_argument('--output-dir', type=str, default=None,
+                         help=f'Output directory for results. Default: {DEFAULT_OUTPUT_DIR}')
     parser.add_argument('--quick', action='store_true',
                          help='Run quick evaluation with fewer ratios and samples')
     parser.add_argument('--data-path', type=str, default=None,
@@ -212,14 +234,35 @@ def main():
         except ValueError:
             parser.error(f"Invalid compression ratios: '{args.ratios}'. "
                          "Use comma-separated numbers, e.g. --ratios 2,4,8")
+    if args.quick and ratios is None:
+        ratios = [2.0]
+
+    exp_config = load_experiment_config(
+        config_path=args.config,
+        cli_overrides={
+            'seed': args.seed,
+            'model': args.model,
+            'device': args.device,
+            'compression_ratios': ratios,
+            'output_dir': args.output_dir,
+            'data_path': args.data_path,
+        },
+    )
+    # run_ablation.py's own default output dir differs from
+    # ExperimentConfig's ('./results') -- only apply it when nothing
+    # explicit (CLI or config file) set output_dir.
+    if args.output_dir is None and args.config is None:
+        exp_config.output_dir = DEFAULT_OUTPUT_DIR
+    set_seed(exp_config.seed)
 
     run_ablation(
-        model_name=args.model,
-        device=args.device,
-        ratios=ratios,
-        output_dir=args.output_dir,
+        model_name=exp_config.model,
+        device=exp_config.device,
+        ratios=exp_config.compression_ratios,
+        output_dir=exp_config.output_dir,
         quick=args.quick,
-        data_path=args.data_path,
+        data_path=exp_config.data_path,
+        exp_config=exp_config,
     )
 
 

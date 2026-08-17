@@ -391,6 +391,81 @@ class VietnameseToneAnalyzer:
 
 
 # ============================================================================
+# Tone Preservation Rate (TPR)
+# ============================================================================
+#
+# Formal definition -- see docs/tone_preservation_rate.md for the full
+# writeup (edge cases, limitations, interpretation guidance):
+#
+#   TPR = |{i in tone_bearing : i in retained}| / |tone_bearing|
+#
+#   tone_bearing = {i : tone_infos[i].tones_present is non-empty}
+#
+# i.e. of the original token positions that carry at least one
+# non-'ngang' tone mark, what fraction survive compression by index.
+# Tokens with no tone mark (ngang/level tone, punctuation, digits,
+# non-Vietnamese text) are excluded from both numerator and
+# denominator -- TPR only measures whether *tone-bearing* information
+# survives, not overall token retention (that's `compression_ratio`).
+#
+# Edge case: if the input has no tone-bearing tokens at all (denominator
+# = 0), TPR is defined as 1.0 by convention -- there is nothing to lose,
+# so nothing was lost.
+#
+# This is token-level (per decoded tokenizer output, not per Vietnamese
+# syllable/word): if a tokenizer ever splits a syllable's base vowel and
+# its diacritic across two tokens, each half is scored independently.
+# This is intentional -- it mirrors what a compressor can actually see
+# and drop (token IDs), not an idealized linguistic unit it has no
+# access to.
+
+def compute_tone_preservation_rate(
+    tone_infos: Sequence['TokenToneInfo'],
+    retained_indices: Sequence[int],
+) -> float:
+    """Canonical Tone Preservation Rate over one sequence's tone analysis.
+
+    Args:
+        tone_infos: per-token TokenToneInfo, in original sequence order
+            (e.g. from VietnameseToneAnalyzer.analyze_tokens()).
+        retained_indices: original-sequence indices that survived
+            compression (any container supporting `in`; a set is fastest
+            for repeated membership checks).
+
+    Returns:
+        TPR in [0.0, 1.0]. 1.0 if there are no tone-bearing tokens (see
+        module docs above for the edge-case rationale).
+    """
+    retained_set = retained_indices if isinstance(retained_indices, (set, frozenset)) else set(retained_indices)
+    tone_bearing = [i for i, info in enumerate(tone_infos) if info.tones_present]
+    if not tone_bearing:
+        return 1.0
+    preserved = sum(1 for i in tone_bearing if i in retained_set)
+    return preserved / len(tone_bearing)
+
+
+def majority_tone_baseline_rate(tone_infos: Sequence['TokenToneInfo']) -> float:
+    """TPR a compressor gets 'for free' by construction, independent of
+    which tokens it actually keeps -- the fraction of ALL tokens that are
+    NOT tone-bearing (majority-class rate for the binary
+    tone-bearing/not-tone-bearing label).
+
+    Used as a sanity baseline: TPR alone can look inflated on
+    tone-sparse text just because few tokens carry tones at all. A
+    compressor's TPR should be interpreted relative to this floor, and a
+    NoCompressor/keep-everything baseline always scores 1.0 (trivially,
+    since nothing is dropped) -- compare both when judging whether a
+    method's TPR reflects real tone-aware selection versus text that
+    happened to be easy.
+    """
+    n = len(tone_infos)
+    if n == 0:
+        return 1.0
+    non_tone_bearing = sum(1 for info in tone_infos if not info.tones_present)
+    return non_tone_bearing / n
+
+
+# ============================================================================
 # Utility Functions
 # ============================================================================
 

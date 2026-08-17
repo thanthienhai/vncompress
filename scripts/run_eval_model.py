@@ -8,12 +8,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vncompress.evaluation import VCCBench, VCCBenchConfig
-from vncompress.compressors import create_compressor
 from vncompress.compressors.no_model import (
     NoModelToneCompressor, NoModelCombinedCompressor,
     NoModelBaselineCompressor,
 )
-from vncompress.tone_aware.vietnamese_tones import VietnameseToneAnalyzer, TONE_NAME_TO_ID, get_tone_analyzer
+from vncompress.tone_aware.vietnamese_tones import TONE_NAME_TO_ID, get_tone_analyzer
 from vncompress.tone_aware.tone_scoring import PhonologicalConsistencyLoss
 
 tone_analyzer = get_tone_analyzer()
@@ -79,7 +78,6 @@ def model_tone_compress(input_ids, target_ratio):
     tone_probe.to(model.device)
     weights = tone_probe.score_importance(hs).squeeze(0).cpu()  # [S]
     weights = torch.clamp(weights, 0.5, 3.0)
-    mid_indices = list(range(k, n - k)) if n > 2 * k else []
     mid_weights = weights[k:n - k] if n > 2 * k else weights
     mid_budget = max(0, target_len - 2 * k)
     if mid_budget > 0 and len(mid_weights) > 0:
@@ -107,7 +105,6 @@ def model_perplexity_compress(input_ids, target_ratio):
     ppl = torch.cat([losses[:1], losses])  # pad first token
     ppl = 1.0 + ppl.cpu()
     ppl = torch.clamp(ppl, 0.5, 3.0)
-    mid_indices = list(range(k, n - k)) if n > 2 * k else []
     mid_ppl = ppl[k:n - k] if n > 2 * k else ppl
     mid_budget = max(0, target_len - 2 * k)
     if mid_budget > 0 and len(mid_ppl) > 0:
@@ -158,7 +155,7 @@ for task_name, samples in bench.samples.items():
                     crs.append(len(ids) / max(len(result.compressed_ids), 1))
                     tprs.append(compute_tpr(ids, result.compressed_ids, tokenizer))
                     times.append(dt)
-                except Exception as e:
+                except Exception:
                     pass
             if crs:
                 avg_cr = sum(crs)/len(crs); avg_tpr = sum(tprs)/len(tprs); avg_t = sum(times)/len(times)
@@ -219,5 +216,5 @@ print(f"\nPeak GPU memory: {mem_peak:.1f} GB")
 os.makedirs("./results_model", exist_ok=True)
 with open("./results_model/comparison.json", "w", encoding="utf-8") as f:
     json.dump(all_results, f, ensure_ascii=False, indent=2)
-print(f"Results saved: ./results_model/comparison.json")
+print("Results saved: ./results_model/comparison.json")
 print("Done!")

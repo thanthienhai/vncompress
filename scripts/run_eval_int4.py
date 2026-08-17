@@ -54,7 +54,7 @@ def model_tone_compress(ids, ratio):
     it = torch.tensor([s]).to(m.device)
     with torch.no_grad(): hs = m(it, output_hidden_states=True).hidden_states[-1]
     w = probe.score_importance(hs).squeeze(0).cpu().clamp(0.5, 3.0)
-    mid, mb = list(range(k, n-k)) if n>2*k else [], max(0, tl-2*k)
+    mb = max(0, tl-2*k)
     mw = w[k:n-k] if n>2*k else w
     keep = set(range(k)) | set(range(n-k, n))
     if mb > 0 and len(mw) > 0:
@@ -70,7 +70,7 @@ def model_ppl_compress(ids, ratio):
     with torch.no_grad(): lo = m(it, labels=it).logits.squeeze(0).float()
     ppl = torch.cat([torch.zeros(1), F.cross_entropy(lo[:-1], it[0,1:], reduction='none').cpu()])
     ppl = 1.0 + ppl; ppl.clamp_(0.5, 3.0)
-    mid, mb = list(range(k, n-k)) if n>2*k else [], max(0, tl-2*k)
+    mb = max(0, tl-2*k)
     mp = ppl[k:n-k] if n>2*k else ppl
     keep = set(range(k)) | set(range(n-k, n))
     if mb > 0 and len(mp) > 0:
@@ -143,7 +143,7 @@ for r in ["2.0","4.0"]:
             if d.get("n",0)>0: a.append(d["cr"]);b.append(d["tpr"]);c.append(d["ms"])
         if a: print(f"  {disp[mn]:<25s} {sum(a)/len(a):>6.2f} {sum(b)/len(b):>7.3f} {sum(c)/len(c):>7.0f}ms")
 
-print(f"\n  PER-TASK TPR @4x:")
+print("\n  PER-TASK TPR @4x:")
 print(f"  {'Task':<22s} {'Rule':>7s} {'PPL':>7s} {'Probe':>7s} {'Random':>7s}")
 print(f"  {'-'*22} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
 for tk in sorted(all_r.keys()):
@@ -155,4 +155,4 @@ for tk in sorted(all_r.keys()):
 
 os.makedirs("./results_int4",exist_ok=True)
 json.dump(all_r, open("./results_int4/comparison.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)
-print(f"\nSaved: ./results_int4/comparison.json")
+print("\nSaved: ./results_int4/comparison.json")

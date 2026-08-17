@@ -21,22 +21,23 @@ import argparse
 import json
 import os
 import sys
-import time
 import torch
 
 # Add parent to path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from vncompress.config import (
+    ExperimentConfig, load_experiment_config, save_run_metadata, set_seed,
+)
 from vncompress.evaluation import (
     VCCBench, VCCBenchConfig, VCCBenchSample,
-    CompressionMetrics, evaluate_compression,
+    evaluate_compression,
 )
 from vncompress.compressors import (
     create_compressor,
     COMPRESSOR_REGISTRY,
 )
 from vncompress.tone_aware import (
-    VietnameseToneAnalyzer,
     is_vietnamese,
     get_tone_analyzer,
 )
@@ -213,12 +214,23 @@ def run_benchmark(
     output_dir: str = './results',
     quick: bool = False,
     data_path: str = None,
+    exp_config: 'ExperimentConfig' = None,
 ):
-    """Run the full VCC-Bench evaluation."""
-    
+    """Run the full VCC-Bench evaluation.
+
+    If `exp_config` is given, its seed is applied and a config.json +
+    environment.json snapshot (git commit, package versions) is written
+    to `output_dir` before the run starts, so results can be traced back
+    to exactly what produced them (see vncompress/config.py).
+    """
+    if exp_config is not None:
+        set_seed(exp_config.seed)
+        os.makedirs(output_dir, exist_ok=True)
+        save_run_metadata(output_dir, exp_config)
+
     # Setup
     model, tokenizer = setup_model_and_tokenizer(model_name, device)
-    
+
     # Configure benchmark
     config = VCCBenchConfig(
         methods=methods or ['none', 'random', 'llmlingua', 'tone_aware', 'morphology_aware', 'combined'],
@@ -227,7 +239,7 @@ def run_benchmark(
         device=device,
         max_new_tokens=128 if quick else 256,
     )
-    
+
     # Load dataset
     default_data = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -245,17 +257,18 @@ def run_benchmark(
         for sample in samples:
             sample.context_length = len(tokenizer.encode(sample.context))
         bench.add_samples(samples)
-    
-    print(f"\nVCC-Bench Configuration:")
+
+    print("\nVCC-Bench Configuration:")
     print(f"  Model: {model_name}")
     print(f"  Methods: {config.methods}")
     print(f"  Ratios: {[f'{r}x' for r in config.compression_ratios]}")
     print(f"  Samples: {bench.total_samples}")
     print(f"  Tasks: {list(bench.samples.keys())}")
-    
+
     # Tone analysis summary
     tone_analyzer = get_tone_analyzer()
-    vi_samples = [s for s in samples if is_vietnamese(s.context[:500])]
+    all_samples = [s for task_samples in bench.samples.values() for s in task_samples]
+    vi_samples = [s for s in all_samples if is_vietnamese(s.context[:500])]
     if vi_samples:
         sample_tokens = []
         for s in vi_samples[:1]:
@@ -266,7 +279,7 @@ def run_benchmark(
         
         tone_stats = tone_analyzer.analyze_tokens(sample_tokens)
         avg_weight = sum(t.preservation_weight for t in tone_stats) / max(len(tone_stats), 1)
-        print(f"\n  Tone Analysis (first 100 tokens):")
+        print("\n  Tone Analysis (first 100 tokens):")
         print(f"    Avg tone preservation weight: {avg_weight:.3f}")
         print(f"    Tone-bearing tokens: {sum(1 for t in tone_stats if t.tones_present)}/{len(tone_stats)}")
     
@@ -377,16 +390,29 @@ def main():
     parser = argparse.ArgumentParser(
         description='VCC-Bench: Vietnamese Context Compression Benchmark'
     )
-    
+
+    # Fields also present in ExperimentConfig default to None here so
+    # "not passed on the CLI" is distinguishable from "explicitly passed
+    # the same value as the default" -- see vncompress/config.py's
+    # load_experiment_config() precedence: dataclass defaults < --config
+    # file < explicit CLI flag.
     parser.add_argument(
-        '--model', type=str,
-        default='Qwen/Qwen2.5-7B-Instruct',
-        help='Model name (HuggingFace)'
+        '--config', type=str, default=None,
+        help='Path to a JSON (or YAML, if PyYAML is installed) ExperimentConfig file. '
+             'CLI flags below override values from this file.'
     )
     parser.add_argument(
-        '--device', type=str, default='cuda',
+        '--seed', type=int, default=None,
+        help='Random seed for all stochastic components (default: 42, see ExperimentConfig)'
+    )
+    parser.add_argument(
+        '--model', type=str, default=None,
+        help='Model name (HuggingFace). Default: Qwen/Qwen2.5-7B-Instruct'
+    )
+    parser.add_argument(
+        '--device', type=str, default=None,
         choices=['cuda', 'cpu', 'mps'],
-        help='Device to run on'
+        help='Device to run on. Default: cuda'
     )
     parser.add_argument(
         '--methods', type=str, default=None,
@@ -397,8 +423,8 @@ def main():
         help='Comma-separated compression ratios (default: 2,4,8)'
     )
     parser.add_argument(
-        '--output-dir', type=str, default='./results',
-        help='Output directory for results'
+        '--output-dir', type=str, default=None,
+        help='Output directory for results. Default: ./results'
     )
     parser.add_argument(
         '--quick', action='store_true',
@@ -416,19 +442,15 @@ def main():
         '--data-path', type=str, default=None,
         help='Path to VCC-Bench JSON dataset (default: vcc_bench_data/vcc_bench_v1.json)'
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.list_methods:
         print("Available compression methods:")
         for name, cls in COMPRESSOR_REGISTRY.items():
             print(f"  {name:<25} -> {cls.__name__}")
         return
-    
-    if args.demo:
-        quick_demo(args.model, args.device)
-        return
-    
+
     methods = args.methods.split(',') if args.methods else None
     ratios = None
     if args.ratios:
@@ -437,15 +459,39 @@ def main():
         except ValueError:
             parser.error(f"Invalid compression ratios: '{args.ratios}'. "
                          "Use comma-separated numbers, e.g. --ratios 2,4,8")
-    
+    if args.quick and ratios is None:
+        # --quick without an explicit --ratios shrinks to a single ratio,
+        # taking precedence over any ratios set in --config (like other
+        # explicit CLI flags).
+        ratios = [2.0]
+
+    exp_config = load_experiment_config(
+        config_path=args.config,
+        cli_overrides={
+            'seed': args.seed,
+            'model': args.model,
+            'device': args.device,
+            'methods': methods,
+            'compression_ratios': ratios,
+            'output_dir': args.output_dir,
+            'data_path': args.data_path,
+        },
+    )
+    set_seed(exp_config.seed)
+
+    if args.demo:
+        quick_demo(exp_config.model, exp_config.device)
+        return
+
     run_benchmark(
-        model_name=args.model,
-        device=args.device,
-        methods=methods,
-        ratios=ratios,
-        output_dir=args.output_dir,
+        model_name=exp_config.model,
+        device=exp_config.device,
+        methods=exp_config.methods,
+        ratios=exp_config.compression_ratios,
+        output_dir=exp_config.output_dir,
         quick=args.quick,
-        data_path=args.data_path,
+        data_path=exp_config.data_path,
+        exp_config=exp_config,
     )
 
 

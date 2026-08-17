@@ -12,6 +12,12 @@ from .metrics import (
     compute_exact_match,
     evaluate_compression,
 )
+from .method_taxonomy import (
+    MethodCategory,
+    REGISTRY_METHOD_CATEGORY,
+    ABLATION_ARM_CATEGORY,
+    categorize,
+)
 
 __all__ = [
     "CompressionMetrics",
@@ -23,4 +29,8 @@ __all__ = [
     "compute_bert_score",
     "compute_exact_match",
     "evaluate_compression",
+    "MethodCategory",
+    "REGISTRY_METHOD_CATEGORY",
+    "ABLATION_ARM_CATEGORY",
+    "categorize",
 ]

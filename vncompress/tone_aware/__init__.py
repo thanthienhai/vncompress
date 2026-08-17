@@ -20,6 +20,8 @@ from .vietnamese_tones import (
     strip_tone,
     extract_tone_marks,
     get_tone_analyzer,
+    compute_tone_preservation_rate,
+    majority_tone_baseline_rate,
 )
 
 # Lazy import for torch-dependent classes — NOT pre-assigned here
@@ -67,6 +69,8 @@ __all__ = [
     "strip_tone",
     "extract_tone_marks",
     "get_tone_analyzer",
+    "compute_tone_preservation_rate",
+    "majority_tone_baseline_rate",
     "ToneAwareConfig",
     "ToneAwareScorer",
     "ToneEmbeddingAugmentation",
