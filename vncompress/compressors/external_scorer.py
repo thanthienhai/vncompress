@@ -42,7 +42,7 @@ import torch
 import torch.nn.functional as F
 import time
 from typing import List, Optional, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..tone_aware.vietnamese_tones import VietnameseToneAnalyzer, get_tone_analyzer
 from ..morphology.merge_policy import MorphologyAnalyzer, get_morphology_analyzer, WordClass
@@ -266,9 +266,8 @@ class TinyModelScorer:
 
         Returns normalized tensor of shape [n] (higher = keep).
         """
-        n = len(input_ids)
         w = self.weights
-        
+
         # Perplexity scoring from external model
         ppl_scores = self.compute_perplexity_scores(input_ids)
         
@@ -430,7 +429,6 @@ class VRAMManager:
         """Get current VRAM status."""
         if not torch.cuda.is_available():
             return {'used_gb': 0, 'free_gb': 0, 'total_gb': 0}
-        import torch
         used = torch.cuda.memory_allocated(0) / (1024**3)
         total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         return {
@@ -487,13 +485,13 @@ def create_tiny_scorer(
     print(f"[SCORER] Loading tiny model: {model_name}")
     
     if actual_device == 'cpu':
-        print(f"  Device: CPU (slower but 0 VRAM)")
+        print("  Device: CPU (slower but 0 VRAM)")
         model = AutoModelForCausalLM.from_pretrained(
             model_name, trust_remote_code=True, device_map='cpu',
             torch_dtype=torch.float32,
         )
     elif use_int4:
-        print(f"  Quantization: INT4 (~0.3 GB VRAM for 135M)")
+        print("  Quantization: INT4 (~0.3 GB VRAM for 135M)")
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,

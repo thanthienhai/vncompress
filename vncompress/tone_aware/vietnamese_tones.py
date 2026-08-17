@@ -21,10 +21,12 @@ Reference:
   - arxiv:2606.03618 "Cross-Lingual Token Arbitrage"
 """
 
-import re
 import unicodedata
-from typing import List, Dict, Tuple, Optional, Callable, Sequence
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Sequence
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    import torch
 
 
 # ============================================================================

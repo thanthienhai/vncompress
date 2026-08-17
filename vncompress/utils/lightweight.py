@@ -155,7 +155,7 @@ def load_model_4bit(
     # Flash Attention 2 (optional, requires compatible GPU + flash-attn package)
     if use_flash_attention:
         try:
-            import flash_attn
+            import flash_attn  # noqa: F401 -- import itself is the availability probe
             model_kwargs['attn_implementation'] = 'flash_attention_2'
             print("  Flash Attention 2 enabled")
         except (ImportError, ModuleNotFoundError):

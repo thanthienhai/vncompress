@@ -39,7 +39,6 @@ VRAM saved: ~5GB (the INT4 model needed for scoring)
 """
 
 import random
-import math
 import time
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -47,13 +46,11 @@ from dataclasses import dataclass
 from ..tone_aware.vietnamese_tones import (
     VietnameseToneAnalyzer,
     get_tone_analyzer,
-    TokenToneInfo,
 )
 from ..morphology.merge_policy import (
     MorphologyAnalyzer,
     get_morphology_analyzer,
     WordClass,
-    WordInfo,
 )
 
 

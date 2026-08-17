@@ -103,7 +103,7 @@ _MANUAL_SYLLABLE_TONES = {
     # Irregular cases
     'gì': 'huyền', 'bị': 'nặng', 'đã': 'ngã',
     # Common words
-    'và': 'huyền', 'mà': 'huyền', 'đã': 'ngã',
+    'và': 'huyền', 'mà': 'huyền',
     'sẽ': 'ngã', 'cũng': 'ngã', 'vẫn': 'ngã',
     'được': 'nặng', 'phải': 'hỏi', 'mới': 'sắc',
     'cũ': 'ngã', 'cả': 'hỏi', 'những': 'ngã',
@@ -112,7 +112,7 @@ _MANUAL_SYLLABLE_TONES = {
     'đây': 'ngang', 'ấy': 'sắc', 'nọ': 'nặng',
     'rất': 'sắc', 'quá': 'sắc', 'lắm': 'sắc',
     'hơi': 'ngang', 'khá': 'sắc', 'cực': 'nặng',
-    'luôn': 'ngang', 'cũng': 'ngã', 'vẫn': 'ngã',
+    'luôn': 'ngang',
     'cứ': 'sắc', 'chỉ': 'hỏi', 'đều': 'huyền',
     # Add more common Vietnamese words
     'tôi': 'ngang', 'anh': 'ngang', 'chị': 'nặng',
@@ -443,17 +443,17 @@ TEENCODE_MAP: Dict[str, str] = {
     't': 'tao', 'bn': 'bạn', 'mn': 'mọi_người',
     'ae': 'anh_em', 'ace': 'anh_chị_em',
     # Conjunctions/Prepositions
-    'vs': 'với', 'w': 'với', 'vs': 'với',
+    'vs': 'với', 'w': 'với',
     'cx': 'cũng', 'cxn': 'cũng', 'cug': 'cũng',
     'vc': 'vợ_chồng', 'ck': 'chồng', 'vk': 'vợ',
-    'ny': 'người_yêu', 'bn': 'bạn', 'bb': 'bạn_bè',
+    'ny': 'người_yêu', 'bb': 'bạn_bè',
     # Communication
     'nc': 'nói_chuyện', 'nt': 'nhắn_tin',
     'ib': 'nhắn_tin', 'inb': 'nhắn_tin',
     'cmt': 'bình_luận', 'cm': 'bình_luận',
     'rep': 'trả_lời', 'fb': 'facebook',
     # Time
-    'h': 'giờ', 'p': 'phút', 's': 'giây',
+    'h': 'giờ', 'p': 'phút',
     'tn': 'tuần', 'th': 'tháng', 'n': 'năm',
     # Common abbreviations
     'tk': 'tài_khoản', 'sp': 'sản_phẩm',
@@ -475,7 +475,7 @@ TEENCODE_MAP: Dict[str, str] = {
     'sao': 'sao', 'seo': 'sao', 's': 'sao',
     # Quantifiers
     'nhìu': 'nhiều', 'nhiu': 'nhiều', 'ít': 'ít',
-    'hơi': 'hơi', 'khá': 'khá', 'cực': 'cực',
+    'hơi': 'hơi', 'khá': 'khá',
     # Intensifiers
     'quá': 'quá', 'lắm': 'lắm', 'cực': 'rất',
     'siêu': 'rất', 'cực_kỳ': 'rất',
@@ -525,10 +525,10 @@ SINO_VIETNAMESE_MORPHEMES: Dict[str, str] = {
     # High-frequency Sino-Vietnamese morphemes
     'quốc': 'quốc_gia', 'gia': 'gia_đình',
     'xã': 'xã_hội', 'hội': 'hội_nghị',
-    'chính': 'chính_trị', 'phủ': 'chính_phủ',
+    'phủ': 'chính_phủ',
     'học': 'học_tập', 'sinh': 'sinh_viên',
     'giáo': 'giáo_dục', 'viên': 'giáo_viên',
-    'công': 'công_nghiệp', 'nghiệp': 'công_nghiệp',
+    'công': 'công_nghiệp',
     'thương': 'thương_mại', 'mại': 'thương_mại',
     'nông': 'nông_nghiệp', 'lâm': 'lâm_nghiệp',
     'ngư': 'ngư_nghiệp', 'nghiệp': 'sự_nghiệp',

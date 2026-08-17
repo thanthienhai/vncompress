@@ -90,48 +90,97 @@ Bộ đánh giá nén ngữ cảnh đầu tiên cho tiếng Việt với 5 tác 
 
 **Metrics**: ROUGE-L, BLEU, BERTScore, Exact Match, **Tone Preservation Rate**, Harmonized Score.
 
+## Yêu cầu hệ thống
+
+- **Python**: 3.10+ (đã kiểm thử trên 3.11 và 3.13).
+- **CPU-only**: đủ để chạy toàn bộ test suite, lint, smoke test, và các compressor `no_model`/`none`/`random` (không cần GPU, không cần model lớn).
+- **GPU (tuỳ chọn)**: cần cho benchmark/training với model thật (Qwen2.5-7B, v.v). Xem bảng VRAM ở mục [Kiến trúc phần cứng](#kiến-trúc-phần-cứng-3-mức) bên dưới — tối thiểu một GPU 16GB (T4/P100) cho pipeline `full`.
+
 ## Cài đặt
 
 ```bash
-git clone https://github.com/thanthien/vncompress.git
+git clone https://github.com/thanthienhai/vncompress.git
 cd vncompress
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r vncompress/requirements.txt
+```
+
+Để chỉ chạy trên CPU (test suite, smoke test, các compressor không cần model), có thể cài bản CPU-only của torch để giảm dung lượng tải:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r vncompress/requirements.txt
 ```
 
 ## Sử dụng
 
 ```bash
-# Benchmark đầy đủ
-python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
-
-# Demo nhanh
-python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --demo
-
-# Chạy trên Colab/Kaggle (T4 16GB)
-python run_colab.py --auto
-
-# Huấn luyện tone-aware
-python run_training.py --model Qwen/Qwen2.5-7B-Instruct --mode tone_aware
-
 # Liệt kê phương pháp nén
 python run_benchmark.py --list-methods
+
+# Demo nhanh (một vài ví dụ, in kết quả chi tiết theo từng phương pháp)
+python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --demo
+
+# Benchmark đầy đủ trên VCC-Bench
+python run_benchmark.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+
+# Ablation study (tách riêng từng tín hiệu: perplexity, tone, morphology)
+python run_ablation.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+
+# Huấn luyện tone-aware (model Qwen-family, LoRA)
+python run_training.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+
+# Huấn luyện LoRA cho SLM tiếng Việt nhỏ (tối ưu cho T4 16GB / GPU nhỏ hơn)
+python run_train_slm.py --quick
+python run_train_slm.py --batch-size 1 --max-length 128 --grad-accum 8  # GPU 6GB
+
+# Đánh giá SLM đã huấn luyện (perplexity + tone-probe accuracy)
+python evaluate_slm.py --adapter-dir trained_slm/final --tone-probe trained_slm/tone_probe.pt
 ```
+
+`run_benchmark.py`, `run_ablation.py` và `run_training.py` hỗ trợ `--device cpu` (chậm hơn nhiều nhưng chạy được để thử nghiệm nhanh). `run_train_slm.py` và `evaluate_slm.py` yêu cầu GPU NVIDIA (CUDA) bắt buộc — không hỗ trợ CPU.
+
+## Kiểm thử & CI
+
+```bash
+# Cài dev dependencies
+pip install pytest ruff
+
+# Chạy test suite (CPU-only, không cần GPU/model lớn, ~15s)
+pytest tests/ -v
+
+# Lint
+ruff check vncompress tests
+
+# CPU smoke test: import package + chạy nén end-to-end với tokenizer thật
+python scripts/smoke_test.py
+```
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) chạy đúng ba bước trên (lint → test → smoke test) tự động trên mỗi push và pull request vào `main`, dùng torch CPU-only — không yêu cầu GPU hay model lớn.
 
 ## Cấu trúc thư mục
 
 ```
 vncompress/
+├── .github/workflows/ci.yml  # CI: lint, test suite, CPU smoke test
 ├── run_benchmark.py          # VCC-Bench evaluation
-├── run_training.py           # Training pipeline (LoRA, tone-aware)
-├── run_colab.py              # Colab/Kaggle T4-optimized
+├── run_ablation.py           # Ablation study (tách từng tín hiệu LACC)
+├── run_training.py           # Training pipeline (LoRA, tone-aware, model Qwen-family)
+├── run_train_slm.py          # Training pipeline cho SLM tiếng Việt nhỏ
+├── evaluate_slm.py           # Đánh giá SLM: perplexity + tone-probe accuracy
+├── tests/                    # pytest test suite (CPU-only, MockTokenizer)
+├── scripts/                  # Tiện ích: build VCC-Bench, fetch data, eval, smoke test
 ├── paper/
 │   └── lacc_paper.tex        # Full LaTeX paper
 ├── vncompress/
-│   ├── compressors/          # Base, tone_aware, llmlingua, snapkv, external_scorer
+│   ├── compressors/          # Base, tone_aware, llmlingua, snapkv, external_scorer, no_model
 │   ├── tone_aware/           # Tones, scoring, linguistics
 │   ├── morphology/           # merge_policy, word classes
 │   ├── evaluation/           # VCC-Bench metrics
-│   └── docs/                 # Mathematical documentation
+│   ├── calibration/          # Weight/parameter search cho scoring blend
+│   └── docs/                 # Tài liệu toán học (math_framework.md)
+├── pyproject.toml            # Cấu hình ruff (lint)
+└── pytest.ini                # Cấu hình pytest
 ```
 
 ## Trích dẫn

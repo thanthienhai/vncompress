@@ -18,7 +18,7 @@ Method Overview:
 
 Token-Level Compression Formula:
   For each token t in sequence:
-    importance(t) = log P(t | context \ {t}) - log P(t | context)
+    importance(t) = log P(t | context minus {t}) - log P(t | context)
   
   This measures how much token t contributes to predicting itself.
   Tokens with LOW importance are redundant → remove them.
@@ -35,8 +35,7 @@ Acceleration via Small Model (LLMLingua optimization):
 import torch
 import torch.nn.functional as F
 import time
-import math
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional
 from transformers import PreTrainedTokenizer, PreTrainedModel
 
 from .base import BaseCompressor, CompressionResult, CompressionConfig
@@ -139,8 +138,6 @@ class LLMLinguaCompressor(BaseCompressor):
         
         Sentence importance = mean(token_importance) within sentence.
         """
-        n = len(input_ids)
-        
         # Identify sentence boundaries (periods, newlines, etc.)
         sentence_end_tokens = set()
         for token_str in ['.', '!', '?', '\n', '。', '！', '？']:

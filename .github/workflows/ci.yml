@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: vncompress/requirements.txt
+
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project dependencies
+        run: pip install -r vncompress/requirements.txt
+
+      - name: Install dev tools
+        run: pip install pytest ruff
+
+      - name: Lint (ruff)
+        run: ruff check vncompress tests
+
+      - name: Run test suite
+        run: pytest tests/ -v
+
+      - name: CPU smoke test (compress end-to-end, no GPU)
+        run: python scripts/smoke_test.py

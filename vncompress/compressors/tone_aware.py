@@ -72,16 +72,13 @@ from transformers import PreTrainedTokenizer, PreTrainedModel
 
 from .base import BaseCompressor, CompressionResult, CompressionConfig
 from ..tone_aware.vietnamese_tones import (
-    VietnameseToneAnalyzer,
     get_tone_analyzer,
     is_vietnamese,
 )
 from ..tone_aware.tone_scoring import (
     PhonologicalConsistencyLoss,
-    TonePreservationProbe,
 )
 from ..morphology.merge_policy import (
-    MorphologyAnalyzer,
     MorphologyConfig,
     get_morphology_analyzer,
     WordClass,
@@ -261,7 +258,6 @@ class ToneAwareCompressor(BaseCompressor):
         the model learns tone during training, and the same classifier
         guides compression decisions at inference time.
         """
-        n = len(input_ids)
         input_t = torch.tensor([input_ids]).to(self.device)
 
         with torch.no_grad():
@@ -600,13 +596,16 @@ class MorphologyAwareCompressor(BaseCompressor):
                     selected = indices
                 selected_mid.extend(selected)
         
-        # Build compressed sequence (keep original order)
-        selected_mid = sorted(set(selected_mid) - redup_merged)
-        compressed = (
-            input_ids[:k] +
-            [input_ids[i] for i in selected_mid] +
-            input_ids[n - k:]
+        # Build compressed sequence (keep original order). Use an index
+        # set rather than concatenating raw slices: for very short
+        # sequences (n <= 2*k) input_ids[:k] and input_ids[n - k:] overlap
+        # or cover the whole sequence, so naive concatenation would
+        # duplicate tokens.
+        selected_mid = set(selected_mid) - redup_merged
+        retained_indices = (
+            set(range(min(k, n))) | selected_mid | set(range(max(k, n - k), n))
         )
+        compressed = [input_ids[i] for i in sorted(retained_indices)]
         
         elapsed = (time.time() - start) * 1000
         

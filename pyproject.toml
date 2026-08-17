@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 120
+exclude = [
+    ".venv",
+    "results",
+    "results_int4",
+    "results_model",
+    "results_no_model",
+    "trained_models_quick",
+    "trained_slm",
+    "vcc_bench_data",
+    "paper",
+]
+
+[tool.ruff.lint]
+# Pyflakes (F) catches real bugs (unused imports/vars, undefined names,
+# duplicate dict keys); E9 catches syntax errors. Deliberately not
+# enabling the full pycodestyle style ruleset (E/W) -- this is a research
+# codebase with its own docstring/formatting conventions, and a full
+# style pass is out of scope for CI correctness checks.
+select = ["E9", "F"]

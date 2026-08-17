@@ -32,7 +32,7 @@ from __future__ import annotations
 import time
 import json
 import os
-from typing import List, Dict, Tuple, Optional, Any, Callable
+from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
 import numpy as np
@@ -493,7 +493,7 @@ class VCCBench:
             # Decode only new tokens
             generated = outputs[0][len(full_input):]
             return tokenizer.decode(generated, skip_special_tokens=True)
-        except Exception as e:
+        except Exception:
             return None
     
     def _aggregate_metrics(

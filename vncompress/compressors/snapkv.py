@@ -43,7 +43,7 @@ Also includes H2O (Heavy Hitter Oracle) and StreamingLLM logic as options.
 import torch
 import torch.nn.functional as F
 import time
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional
 from transformers import PreTrainedTokenizer, PreTrainedModel
 
 from .base import BaseCompressor, CompressionResult, CompressionConfig
@@ -109,8 +109,7 @@ class SnapKVCompressor(BaseCompressor):
             raise RuntimeError("SnapKV requires a model for attention computation")
         
         n = input_ids.shape[1]
-        device = input_ids.device
-        
+
         # Run model and get attention weights
         with torch.no_grad():
             outputs = self.model(

@@ -54,16 +54,12 @@ Reference Papers:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-import numpy as np
 from transformers import PreTrainedTokenizer, PreTrainedModel
 
 from .vietnamese_tones import (
-    VietnameseToneAnalyzer,
-    TokenToneInfo,
     TONE_NAME_TO_ID,
-    TONE_CONTRAST,
     get_tone_analyzer,
 )
 
