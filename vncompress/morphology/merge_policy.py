@@ -257,6 +257,22 @@ class MorphologyAnalyzer:
         )
         return unicodedata.normalize('NFC', no_tone)
 
+    # Vietnamese tone registers ("luật hài thanh"). Reduplicated syllables
+    # take both tones from the same register; a pair that crosses registers
+    # is a minimal pair, not reduplication. See _phonetic_similarity.
+    _TONE_REGISTER = {
+        '': 'bong', '̉': 'bong', '́': 'bong',          # ngang, hỏi, sắc
+        '̀': 'tram', '̃': 'tram', '̣': 'tram',    # huyền, ngã, nặng
+    }
+
+    @staticmethod
+    def _tone_register(syllable: str) -> str:
+        """'bong' (upper) or 'tram' (lower) register of a syllable's tone."""
+        for ch in unicodedata.normalize('NFD', syllable.lower()):
+            if ch in MorphologyAnalyzer._TONE_REGISTER and ch != '':
+                return MorphologyAnalyzer._TONE_REGISTER[ch]
+        return 'bong'  # no mark = ngang, which is upper register
+
     @staticmethod
     def _phonetic_similarity(a: str, b: str) -> float:
         """
@@ -264,12 +280,34 @@ class MorphologyAnalyzer:
         Measures: shared initial consonant + shared rhyme (vowel+ending).
         Returns 0.0-1.0.
         """
-        a = MorphologyAnalyzer._tone_strip(a)
-        b = MorphologyAnalyzer._tone_strip(b)
         if not a or not b:
             return 0.0
+
         if a == b:
             return 1.0
+
+        a_stripped = MorphologyAnalyzer._tone_strip(a)
+        b_stripped = MorphologyAnalyzer._tone_strip(b)
+        if a_stripped == b_stripped:
+            # Identical segments, different tone. Stripping tones before this
+            # comparison (the old behaviour) scored every such pair 1.0, so
+            # bàn/bán, ma/mà, đá/đã and má/mạ were all treated as perfect
+            # reduplication -- and compressors/tone_aware.py then gave the
+            # right-hand token a 0.1 multiplier, deleting exactly the tone
+            # contrast this project exists to preserve.
+            #
+            # But rejecting all of them is also wrong: tone-alternating
+            # reduplication is real (nhè nhẹ, đo đỏ, trăng trắng). Vietnamese
+            # tone harmony ("luật hài thanh") separates the two cases -- a
+            # reduplicated pair takes both tones from the same register:
+            #   bổng (upper): ngang, hỏi, sắc
+            #   trầm (lower): huyền, ngã, nặng
+            # nhè(huyền)+nhẹ(nặng) are both trầm -> reduplication.
+            # bàn(huyền)+bán(sắc) cross registers -> a minimal pair.
+            reg_a = MorphologyAnalyzer._tone_register(a)
+            reg_b = MorphologyAnalyzer._tone_register(b)
+            return 1.0 if reg_a == reg_b else 0.0
+        a, b = a_stripped, b_stripped
 
         initials = r'^(b|c|ch|d|đ|g|gh|gi|h|k|kh|l|m|n|ng|ngh|nh|p|ph|qu|r|s|t|th|tr|v|x)?'
         a_init = re.match(initials, a)
@@ -312,10 +350,24 @@ class MorphologyAnalyzer:
         """
         token_lower = token.strip().lower()
 
+        # Punctuation, numbers and whitespace are not content words. Without
+        # this they fell through to CONTENT and were protected like real
+        # vocabulary (f_content=1.2), which also inflated the denominator of
+        # _content_word_retention in calibration/weight_search.py.
+        if not token_lower or not any(c.isalpha() for c in token_lower):
+            return WordClass.OTHER
+
         if token_lower in self.function_words:
             return WordClass.FUNC
 
-        if token_lower in self.redup_pairs:
+        # NOT `token_lower in self.redup_pairs`: that dict also maps each
+        # second syllable back to its first, so standalone content words that
+        # happen to be the second syllable of some reduplication were all
+        # classified REDUP -- 'vàng', 'tình', 'năng', 'thái', 'linh' -- and
+        # compressed at r_redup=0.5 instead of r_content=0.85. Reduplication
+        # is a property of an adjacent PAIR, and classify_batch already
+        # handles that via find_reduplicative_pairs.
+        if '_' in token_lower and token_lower in self.redup_pairs:
             return WordClass.REDUP
 
         if '_' in token_lower:
@@ -455,7 +507,15 @@ class MorphologyAnalyzer:
                 right = tokens[j].strip().lower()
                 pair_key = f"{left}_{right}"
 
-                if pair_key in self.redup_pairs or right in self.redup_pairs:
+                # `right in self.redup_pairs` used to be accepted on its own.
+                # redup_pairs also maps every second syllable back to its first
+                # (see _build_redup_pairs), so ANY token preceding a known
+                # second syllable matched, regardless of the left token:
+                #   ['tôi','mua','vàng','ở','chợ'] -> [(0,2,1.0), (1,2,1.0)]
+                # i.e. "tôi"-"vàng" and "mua"-"vàng". The right-hand token then
+                # got a 0.1 multiplier, so the content word "vàng" was dropped.
+                # Require the actual pair, in the right order.
+                if pair_key in self.redup_pairs or self.redup_pairs.get(right) == left:
                     pairs.append((i, j, 1.0))
                     break
 

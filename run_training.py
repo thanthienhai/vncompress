@@ -18,11 +18,11 @@ Usage:
     python run_training.py --model Qwen/Qwen2.5-0.5B-Instruct --epochs 3 --lambda-tone 0.1
     python run_training.py --model Qwen/Qwen2.5-1.5B-Instruct --use-qlora
 """
-import argparse, os, sys, json, time
-import torch, torch.nn as nn
+import argparse, os, sys, json
+import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Dict, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -212,8 +212,11 @@ def load_training_texts(data_path: Optional[str] = None) -> List[str]:
             return [item if isinstance(item, str) else item.get('text', item.get('context', '')) for item in data]
         return []
 
-    # Try VCC-Bench dataset
+    # Try VCC-Bench dataset (training_corpus_v1.json, if built via
+    # scripts/build_training_corpus.py, takes priority -- it's a larger,
+    # more diverse mix than the 393-paragraph Wikipedia-only snapshot).
     bench_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vcc_bench_data', 'training_corpus_v1.json'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vcc_bench_data', 'wikipedia_vi_raw.json'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vcc_bench_data', 'vcc_bench_v1.json'),
     ]
@@ -264,7 +267,7 @@ def run_training(model_name: str = 'Qwen/Qwen2.5-0.5B-Instruct',
     """Run tone-aware training with manual PyTorch loop."""
 
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from vncompress.tone_aware import PhonologicalConsistencyLoss, get_tone_analyzer, TONE_NAME_TO_ID
+    from vncompress.tone_aware import PhonologicalConsistencyLoss
 
     print("=" * 60)
     print("VNCOMPRESS — Tone-Aware Training")

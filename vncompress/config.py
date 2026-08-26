@@ -15,7 +15,7 @@ This module provides:
     installed) config file and merges CLI overrides on top of it.
     Precedence (lowest to highest): dataclass defaults < config file <
     explicit CLI flags. A CLI flag counts as "explicit" only if the
-    caller passed a non-None override (see merge_cli_overrides).
+    caller passed a non-None override (see load_experiment_config).
   - set_seed(): seeds python `random`, numpy, and torch (CPU + all CUDA
     devices) so stochastic components (RandomCompressor, class-budget
     sampling in NoModelMorphCompressor, model sampling, ...) are
@@ -83,6 +83,37 @@ class ExperimentConfig:
 
     # Output
     output_dir: str = "./results"
+
+    def __post_init__(self):
+        """Reject settings that produce a crash or, worse, silent nonsense.
+
+        Measured behaviour before this guard, with `--ratios 0,2,4`:
+        `ZeroDivisionError` in 5 of 6 compressors -- after the generation
+        model was already loaded. A negative ratio was worse: no compressor
+        raised, and they disagreed with each other (random/selective/
+        morphology_aware returned 4 tokens, combined returned all 31), so a
+        typo produced plausible-looking results instead of an error.
+
+        Validating here covers both entry points, since the CLI and the
+        --config file both build an ExperimentConfig.
+        """
+        bad = [r for r in self.compression_ratios if not r >= 1.0]
+        if bad:
+            raise ValueError(
+                f"compression_ratios must all be >= 1.0 (ratio = original/compressed); got {bad}. "
+                "A ratio of 1.0 means no compression; values <= 0 crash the compressors and "
+                "values in (0, 1) silently return the uncompressed input."
+            )
+        if not self.compression_ratios:
+            raise ValueError("compression_ratios is empty: there would be nothing to evaluate.")
+        if not self.methods:
+            raise ValueError("methods is empty: there would be nothing to evaluate.")
+        if self.device not in ("cuda", "cpu", "mps"):
+            raise ValueError(f"device must be one of 'cuda', 'cpu', 'mps'; got {self.device!r}")
+        if self.dtype not in ("float16", "bfloat16", "float32"):
+            raise ValueError(
+                f"dtype must be one of 'float16', 'bfloat16', 'float32'; got {self.dtype!r}"
+            )
 
     def resolved_tokenizer(self) -> str:
         return self.tokenizer or self.model

@@ -71,6 +71,38 @@ class Collator:
                 "tone_labels": tones}
 
 
+def resize_embeddings_if_needed(model, tokenizer) -> bool:
+    """Grow the embedding matrix to cover every tokenizer id, deterministically.
+
+    Some community checkpoints (e.g. chronopt-research/vietnamese-gpt2-base)
+    ship a tokenizer with more ids than the checkpoint has embedding rows --
+    here `<|endoftext|>` sits at id 50257 while the matrix has 50257 rows, so
+    valid ids stop at 50256. That id is also pad_token_id, so it appears in
+    `input_ids` whenever a batch pads, and an un-resized model dies with a CUDA
+    `srcIndex < srcSelectDimSize` assertion on nearly every batch.
+
+    The new rows are zeroed rather than left to `resize_token_embeddings`'s
+    random mean-resizing, for two reasons: the row is never a prediction
+    target (padding is masked to -100) so its value is irrelevant to training,
+    and a *deterministic* row means the adapter does not have to ship the whole
+    embedding matrix to be reloadable. That matters -- PEFT flips
+    `save_embedding_layers` on as soon as embeddings are resized, which grew
+    the saved adapter from 4.7 MB to 313 MB of frozen, untrained weights.
+
+    Returns True if a resize happened.
+    """
+    if len(tokenizer) == model.get_input_embeddings().weight.shape[0]:
+        return False
+    old_rows = model.get_input_embeddings().weight.shape[0]
+    model.resize_token_embeddings(len(tokenizer))
+    with torch.no_grad():
+        model.get_input_embeddings().weight[old_rows:].zero_()
+        out = model.get_output_embeddings()
+        if out is not None and out.weight.shape[0] >= len(tokenizer):
+            out.weight[old_rows:].zero_()
+    return True
+
+
 def load_texts(path: Optional[str]):
     """Reuse the project's VCC-Bench/demo data loader."""
     from run_training import load_training_texts
@@ -123,7 +155,9 @@ def main():
     # Keep master/trainable weights in FP32 for stable GradScaler updates.
     # AMP below still performs CUDA matrix operations in FP16; this 137M model
     # remains comfortably within a T4's 16 GB even with FP32 weights.
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32).to(device)
+    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+    resize_embeddings_if_needed(model, tokenizer)
+    model = model.to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.use_cache = False
     if not args.no_gradient_checkpointing:
@@ -185,7 +219,11 @@ def main():
 
     final_dir = os.path.join(args.output_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
-    model.save_pretrained(final_dir)
+    # save_embedding_layers=False: PEFT turns it on automatically once
+    # embeddings are resized, which shipped 2 x [vocab, 768] frozen tensors
+    # (4.7 MB -> 313 MB) that were never trained. resize_embeddings_if_needed()
+    # is deterministic, so the loader reconstructs them exactly.
+    model.save_pretrained(final_dir, save_embedding_layers=False)
     tokenizer.save_pretrained(final_dir)
     torch.save(tone_loss.state_dict(), os.path.join(args.output_dir, "tone_probe.pt"))
     # Persist the exact held-out split so evaluate_slm.py scores the same

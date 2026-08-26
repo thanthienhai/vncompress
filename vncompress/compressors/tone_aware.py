@@ -302,7 +302,12 @@ class ToneAwareCompressor(BaseCompressor):
         # Auto-detect language
         if self.auto_detect_language:
             lang = self._detect_language(input_ids)
-            if lang != 'vi' and self.fallback_to_base:
+            # `self.model is not None` matters: LLMLingua's sentence filter
+            # raises RuntimeError without a model, while this compressor runs
+            # fine without one (_compute_base_scores returns ones). Falling
+            # back unconditionally turned a working no-model run into a crash
+            # on any non-Vietnamese input of >= 4 sentences.
+            if lang != 'vi' and self.fallback_to_base and self.model is not None:
                 # Non-Vietnamese: use base method directly
                 from .llmlingua import LLMLinguaCompressor
                 base = LLMLinguaCompressor(
@@ -311,7 +316,6 @@ class ToneAwareCompressor(BaseCompressor):
                 )
                 return base.compress(input_ids)
         
-        target_len = max(int(n / self.config.target_ratio), self.config.min_compressed_length)
 
         base_scores = self._compute_base_scores(input_ids)
 
@@ -335,17 +339,12 @@ class ToneAwareCompressor(BaseCompressor):
         if len(tone_weights) == len(combined_scores):
             combined_scores *= tone_weights
 
-        # Step 4: Select tokens
-        k = self.config.keep_boundary_tokens
-        mid_scores = combined_scores[k:n - k] if n > 2 * k else combined_scores
-        mid_budget = max(0, target_len - 2 * k)
-
-        if mid_budget > 0 and mid_budget < len(mid_scores):
-            _, top_indices = torch.topk(mid_scores, mid_budget)
-            top_indices = sorted(top_indices.tolist())
-            retained_indices = list(range(k)) + [k + i for i in top_indices] + list(range(n - k, n))
-        else:
-            retained_indices = list(range(n))
+        # Step 4: Select tokens (shared selector -- see
+        # BaseCompressor.select_with_boundary for the two bugs the old inline
+        # version had: returning the whole sequence when the budget left no
+        # middle room, and offsetting indices by k after falling back to the
+        # full score vector for n <= 2k, which raised IndexError.)
+        retained_indices = self.select_with_boundary(combined_scores.tolist(), n)
 
         gate_info: Dict = {}
         if self.quality_gate is not None:
@@ -763,7 +762,6 @@ class CombinedCompressor(BaseCompressor):
             elapsed = (time.time() - start) * 1000
             return self._build_result(list(input_ids), n, elapsed)
         
-        target_len = max(int(n / self.config.target_ratio), self.config.min_compressed_length)
         
         # Get scores from both methods
         base_scores = self.tone_comp._compute_base_scores(input_ids)
@@ -809,17 +807,8 @@ class CombinedCompressor(BaseCompressor):
             if len(query_weights) == len(combined_scores):
                 combined_scores = combined_scores * query_weights
 
-        # Select tokens
-        k = self.config.keep_boundary_tokens
-        mid_scores = combined_scores[k:n - k] if n > 2 * k else combined_scores
-        mid_budget = max(0, target_len - 2 * k)
-
-        if mid_budget > 0 and mid_budget < len(mid_scores):
-            _, top_indices = torch.topk(mid_scores, mid_budget)
-            top_indices = sorted(top_indices.tolist())
-            retained_indices = list(range(k)) + [k + i for i in top_indices] + list(range(n - k, n))
-        else:
-            retained_indices = list(range(n))
+        # Select tokens -- shared selector, see BaseCompressor.
+        retained_indices = self.select_with_boundary(combined_scores.tolist(), n)
 
         gate_info: Dict = {}
         if self.quality_gate is not None:

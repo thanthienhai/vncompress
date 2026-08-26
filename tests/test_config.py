@@ -115,3 +115,41 @@ def test_save_run_metadata_writes_both_files(tmp_path):
 
     saved_env = json.loads(env_path.read_text(encoding="utf-8"))
     assert "git_commit" in saved_env
+
+
+class TestExperimentConfigValidation:
+    """Guards against settings that used to crash mid-run or, worse, produce
+    plausible-looking nonsense.
+
+    Measured before the guard existed, with a 31-token input:
+      ratio=0   -> ZeroDivisionError in 5 of 6 compressors, only after the
+                   generation model had already been loaded.
+      ratio=-2  -> no compressor raised, and they disagreed with each other
+                   (random/selective/morphology_aware returned 4 tokens,
+                   combined returned all 31).
+    """
+
+    @pytest.mark.parametrize("ratios", [[0.0], [-2.0], [0.5], [2.0, 0.0], []])
+    def test_invalid_compression_ratios_are_rejected(self, ratios):
+        with pytest.raises(ValueError, match="compression_ratios"):
+            ExperimentConfig(compression_ratios=ratios)
+
+    def test_ratio_one_is_allowed_as_a_no_compression_control(self):
+        assert ExperimentConfig(compression_ratios=[1.0]).compression_ratios == [1.0]
+
+    def test_empty_methods_is_rejected(self):
+        with pytest.raises(ValueError, match="methods is empty"):
+            ExperimentConfig(methods=[])
+
+    def test_unknown_device_is_rejected(self):
+        with pytest.raises(ValueError, match="device"):
+            ExperimentConfig(device="banana")
+
+    def test_unknown_dtype_is_rejected(self):
+        with pytest.raises(ValueError, match="dtype"):
+            ExperimentConfig(dtype="float8")
+
+    def test_defaults_are_valid(self):
+        cfg = ExperimentConfig()
+        assert cfg.compression_ratios == [2.0, 4.0, 8.0]
+        assert cfg.device == "cuda"

@@ -30,9 +30,9 @@
   "rank_pattern": {},
   "revision": null,
   "target_modules": [
-    "c_fc",
     "c_attn",
-    "c_proj"
+    "c_proj",
+    "c_fc"
   ],
   "target_parameters": null,
   "task_type": "CAUSAL_LM",

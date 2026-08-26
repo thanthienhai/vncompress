@@ -215,6 +215,7 @@ def run_benchmark(
     quick: bool = False,
     data_path: str = None,
     exp_config: 'ExperimentConfig' = None,
+    scorer_adapter_dir: str = None,
 ):
     """Run the full VCC-Bench evaluation.
 
@@ -289,6 +290,7 @@ def run_benchmark(
             method_name, tokenizer, model,
             config=None,  # Will use default
             device=device,
+            scorer_adapter_dir=scorer_adapter_dir,
         )
     
     results = bench.evaluate(
@@ -442,6 +444,12 @@ def main():
         '--data-path', type=str, default=None,
         help='Path to VCC-Bench JSON dataset (default: vcc_bench_data/vcc_bench_v1.json)'
     )
+    parser.add_argument(
+        '--scorer-adapter-dir', type=str, default=None,
+        help="Scorer for the 'slm_scorer' / 'slm_scorer_base' methods: a LoRA "
+             "adapter directory from run_train_slm.py (e.g. trained_slm/final) "
+             "or a HuggingFace model id. Ignored by all other methods."
+    )
 
     args = parser.parse_args()
 
@@ -492,6 +500,7 @@ def main():
         quick=args.quick,
         data_path=exp_config.data_path,
         exp_config=exp_config,
+        scorer_adapter_dir=args.scorer_adapter_dir,
     )
 
 

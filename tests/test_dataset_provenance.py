@@ -8,7 +8,12 @@ import os
 
 import pytest
 
-from scripts.checksum_datasets import DATA_DIR, MANIFEST_PATH, compute_manifest
+from scripts.checksum_datasets import (
+    DATA_DIR,
+    LOCALLY_GENERATED,
+    MANIFEST_PATH,
+    compute_manifest,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,9 +33,19 @@ def test_checksums_manifest_matches_files_on_disk():
         recorded = json.load(f)
     actual = compute_manifest()
 
-    assert set(recorded) == set(actual), (
-        "vcc_bench_data/CHECKSUMS.json is out of sync with the files on disk -- "
+    # Artifacts the docs tell users to build locally may or may not exist on
+    # any given machine, so their presence must not fail the suite. They are
+    # still checked below if someone deliberately recorded them.
+    unregistered = set(actual) - set(recorded) - LOCALLY_GENERATED
+    assert not unregistered, (
+        f"dataset file(s) on disk but not in CHECKSUMS.json: {sorted(unregistered)} -- "
         "run `python scripts/checksum_datasets.py --write` and commit the update."
+    )
+    missing = set(recorded) - set(actual)
+    assert not missing, (
+        f"CHECKSUMS.json records file(s) missing on disk: {sorted(missing)} -- "
+        "if these are locally-generated artifacts they should not have been committed "
+        "to the manifest (see scripts/checksum_datasets.py --include-generated)."
     )
     for name, expected in recorded.items():
         assert expected["sha256"] == actual[name]["sha256"], (

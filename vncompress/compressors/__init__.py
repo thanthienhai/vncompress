@@ -61,6 +61,7 @@ def _ensure_compressors():
     global LLMLinguaCompressor, LLMLinguaWithSmallModel
     global SnapKVCompressor, SelectiveContextCompressor
     global ToneAwareCompressor, MorphologyAwareCompressor, CombinedCompressor
+    global SLMScorerCompressor, SLMPerplexityScorer
     global COMPRESSOR_REGISTRY, create_compressor
 
     if _compressors_loaded:
@@ -81,6 +82,9 @@ def _ensure_compressors():
             ToneAwareCompressor as _TAC, MorphologyAwareCompressor as _MAC,
             CombinedCompressor as _CCB,
         )
+        from .slm_scorer import (
+            SLMScorerCompressor as _SLM, SLMPerplexityScorer as _SLMS,
+        )
     except ImportError as e:
         raise ImportError(
             "Cannot load torch-dependent compressors. "
@@ -100,6 +104,8 @@ def _ensure_compressors():
     ToneAwareCompressor = _TAC
     MorphologyAwareCompressor = _MAC
     CombinedCompressor = _CCB
+    SLMScorerCompressor = _SLM
+    SLMPerplexityScorer = _SLMS
 
     COMPRESSOR_REGISTRY = {
         'none': NoCompressor,
@@ -111,22 +117,39 @@ def _ensure_compressors():
         'tone_aware': ToneAwareCompressor,
         'morphology_aware': MorphologyAwareCompressor,
         'combined': CombinedCompressor,
+        # LACC lightweight: real SLM as the perplexity scorer. `_base` is the
+        # same scorer WITHOUT the LoRA adapter -- the ablation that isolates
+        # what fine-tuning contributed. Both need --scorer-adapter-dir.
+        'slm_scorer': SLMScorerCompressor,
+        'slm_scorer_base': SLMScorerCompressor,
+    }
+
+    # These share one class, so the class alone can't say which is which.
+    _SLM_METHOD_KWARGS = {
+        'slm_scorer': {'use_adapter': True, 'name': 'slm_scorer'},
+        'slm_scorer_base': {'use_adapter': False, 'name': 'slm_scorer_base'},
     }
 
     def _create_compressor(method, tokenizer, model=None, config=None, device='cuda', **kwargs):
         if method not in COMPRESSOR_REGISTRY:
             raise ValueError(f"Unknown method: {method}. Available: {list(COMPRESSOR_REGISTRY.keys())}")
         cls = COMPRESSOR_REGISTRY[method]
-        if method == 'tone_aware':
+        if method in _SLM_METHOD_KWARGS:
+            return cls(tokenizer, model, config, device, **{**kwargs, **_SLM_METHOD_KWARGS[method]})
+        # Only the SLM methods understand scorer kwargs; drop them elsewhere so
+        # a single --scorer-adapter-dir flag can be passed for every method.
+        kwargs = {k: v for k, v in kwargs.items()
+                  if k not in ('scorer_adapter_dir', 'use_adapter', 'scorer')}
+        if method in ('tone_aware', 'morphology_aware', 'combined', 'snapkv'):
             return cls(tokenizer, model, config, device, **kwargs)
-        elif method == 'morphology_aware':
-            return cls(tokenizer, model, config, device, **kwargs)
-        elif method == 'combined':
-            return cls(tokenizer, model, config, device, **kwargs)
-        elif method in ('snapkv',):
-            return cls(tokenizer, model, config, device, **kwargs)
-        else:
-            return cls(tokenizer, model, config)
+        if method in ('llmlingua', 'llmlingua_small', 'selective'):
+            # Keyword args, not positional: LLMLinguaCompressor's third
+            # parameter is `small_model`, so `cls(tokenizer, model, config)`
+            # bound the CompressionConfig into the small-model slot and left
+            # config None. It only avoided crashing because run_benchmark.py
+            # happened to pass config=None.
+            return cls(tokenizer, model=model, config=config, device=device, **kwargs)
+        return cls(tokenizer, model=model, config=config)
 
     create_compressor = _create_compressor
     _compressors_loaded = True
@@ -139,6 +162,7 @@ def __getattr__(name):
         'LLMLinguaCompressor', 'LLMLinguaWithSmallModel',
         'SnapKVCompressor', 'SelectiveContextCompressor',
         'ToneAwareCompressor', 'MorphologyAwareCompressor', 'CombinedCompressor',
+        'SLMScorerCompressor', 'SLMPerplexityScorer',
         'COMPRESSOR_REGISTRY', 'create_compressor',
     ):
         _ensure_compressors()
@@ -160,5 +184,6 @@ __all__ = [
     "LLMLinguaCompressor", "LLMLinguaWithSmallModel",
     "SnapKVCompressor", "SelectiveContextCompressor",
     "ToneAwareCompressor", "MorphologyAwareCompressor", "CombinedCompressor",
+    "SLMScorerCompressor", "SLMPerplexityScorer",
     "COMPRESSOR_REGISTRY", "create_compressor",
 ]

@@ -137,13 +137,41 @@ python run_training.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
 python run_train_slm.py --quick
 python run_train_slm.py --batch-size 1 --max-length 128 --grad-accum 8  # GPU 6GB
 
-# Đánh giá SLM đã huấn luyện (perplexity + tone-probe accuracy)
+# Đánh giá SLM đã huấn luyện (perplexity, macro-F1 + confusion matrix theo thanh,
+# trần lookup miễn phí để biết con số tone accuracy nằm ở đâu)
 python evaluate_slm.py --adapter-dir trained_slm/final --tone-probe trained_slm/tone_probe.pt
+
+# Baseline + kiểm định thống kê theo cặp (bootstrap CI, Wilcoxon)
+python evaluate_slm.py --adapter-dir trained_slm/final --no-adapter --dump-per-sample results_slm/base.json
+python evaluate_slm.py --adapter-dir trained_slm/final --tone-probe trained_slm/tone_probe.pt --dump-per-sample results_slm/lora.json
+python scripts/compare_slm_runs.py results_slm/base.json results_slm/lora.json
+
+# Control cho tone probe: LoRA có thực sự thêm gì vào biểu diễn không? (frozen-base + selectivity)
+python scripts/train_probe_control.py --mode frozen_base --out results_slm/probe.jsonl
+python scripts/train_probe_control.py --mode lora --out results_slm/probe.jsonl
+
+# Đo tác động THẬT của SLM lên pipeline nén (slm_scorer vs slm_scorer_base vs combined)
+python run_benchmark.py --model Qwen/Qwen2.5-1.5B-Instruct \
+  --methods none,combined,slm_scorer_base,slm_scorer \
+  --scorer-adapter-dir trained_slm/final --output-dir results/slm-impact-v1
+
+# Xây training corpus lớn hơn cho SLM/tone-probe (UVW-2026 + Vietnamese Poetry,
+# thay cho wikipedia_vi_raw.json vốn chỉ có 393 đoạn) — xem
+# vcc_bench_data/PROVENANCE.md để biết license/gated-access của từng nguồn
+python scripts/build_training_corpus.py
+python run_train_slm.py --train-data-path vcc_bench_data/training_corpus_v1.json
+
+# Xây eval task QA thật (không phải synthetic) từ UIT-ViQuAD2.0, đo ảnh hưởng
+# của nén lên độ chính xác QA downstream (EM/ROUGE-L)
+python scripts/build_viquad_eval.py
+python run_benchmark.py --data-path vcc_bench_data/vcc_bench_uit_viquad_qa.json --config configs/example_experiment.json
 ```
 
 `run_benchmark.py`, `run_ablation.py` và `run_training.py` hỗ trợ `--device cpu` (chậm hơn nhiều nhưng chạy được để thử nghiệm nhanh). `run_train_slm.py` và `evaluate_slm.py` yêu cầu GPU NVIDIA (CUDA) bắt buộc — không hỗ trợ CPU.
 
 `run_benchmark.py` và `run_ablation.py` đọc chung một [`ExperimentConfig`](vncompress/config.py) (`--config path/to.json`, xem [`configs/example_experiment.json`](configs/example_experiment.json)) — cố định seed, ghi lại `config.json` + `environment.json` (git commit, version các package chính) vào `--output-dir` trước khi chạy, để mọi kết quả đều truy nguyên được. Cờ CLI (`--model`, `--device`, `--ratios`, ...) ghi đè giá trị trong file config. Chi tiết đầy đủ về protocol đánh giá (dataset version, split, ratio/seed cố định, schema kết quả) ở [`docs/benchmark.md`](docs/benchmark.md).
+
+Hướng dẫn đầy đủ cho việc xây/mở rộng dataset, huấn luyện, đánh giá SLM (external scorer + tone probe) và cách đọc kết quả eval cho đúng (tone accuracy, perplexity, các sự cố thường gặp) ở [`docs/slm_training_guide.md`](docs/slm_training_guide.md).
 
 ## Kiểm thử & CI
 
@@ -172,7 +200,9 @@ GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) chạy lin
 vncompress/
 ├── .github/workflows/ci.yml  # CI: lint, test suite, CPU smoke test, checksum dataset
 ├── docs/
-│   └── benchmark.md          # Protocol đánh giá VCC-Bench (dataset version, split, seed, schema kết quả)
+│   ├── benchmark.md               # Protocol đánh giá VCC-Bench (dataset version, split, seed, schema kết quả)
+│   ├── slm_training_guide.md      # Xây dataset, train, eval SLM (external scorer + tone probe) + cách đọc kết quả
+│   └── training_eval_report_template.md  # Mẫu ghi kết quả từng lần train/eval
 ├── configs/
 │   └── example_experiment.json  # Ví dụ ExperimentConfig cho run_benchmark.py --config
 ├── run_benchmark.py          # VCC-Bench evaluation

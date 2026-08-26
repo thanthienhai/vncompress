@@ -7,11 +7,18 @@ integration issues the mocked unit test suite (tests/) can't see, without
 requiring any of the large models used by the full benchmark/training
 scripts.
 """
+import os
 import sys
 
-from transformers import AutoTokenizer
+# Make the repo root importable, as the other scripts/ entry points do.
+# Without this, the documented `python scripts/smoke_test.py` fails with
+# ModuleNotFoundError: it only worked in CI because the workflow happens to
+# set PYTHONPATH at the job level.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vncompress.compressors.no_model import NoModelCombinedCompressor
+from transformers import AutoTokenizer  # noqa: E402
+
+from vncompress.compressors.no_model import NoModelCombinedCompressor  # noqa: E402
 
 
 def main() -> int:

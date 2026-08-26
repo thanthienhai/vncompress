@@ -34,7 +34,7 @@ import json
 import os
 from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
-from collections import defaultdict
+from collections import Counter, defaultdict
 import numpy as np
 try:
     from tqdm import tqdm
@@ -68,6 +68,7 @@ class CompressionMetrics:
     bleu_score: Optional[float] = None
     bert_score_f1: Optional[float] = None
     exact_match: bool = False
+    token_f1: Optional[float] = None
     
     # Vietnamese-specific metrics
     tone_preservation_rate: Optional[float] = None
@@ -97,6 +98,7 @@ class CompressionMetrics:
             'bleu_score': self.bleu_score,
             'bert_score_f1': self.bert_score_f1,
             'exact_match': self.exact_match,
+            'token_f1': self.token_f1,
             'tone_preservation_rate': self.tone_preservation_rate,
             'function_word_keep_ratio': self.function_word_keep_ratio,
             'content_word_keep_ratio': self.content_word_keep_ratio,
@@ -106,16 +108,59 @@ class CompressionMetrics:
         }
 
 
+class VietnameseRougeTokenizer:
+    """Tokenizer for `rouge_score` that does not destroy Vietnamese.
+
+    `rouge_score`'s default tokenizer lowercases and replaces every character
+    outside [a-z0-9] with a space. Every Vietnamese vowel carrying a tone mark
+    lives in Latin Extended Additional (U+1EA0-U+1EF9) and is therefore
+    *deleted*, which silently collapses distinct words:
+
+        'bàn' -> ['b', 'n']      'bán' -> ['b', 'n']      'bạn' -> ['b', 'n']
+        'Hà Nội là thủ đô' -> ['h', 'n', 'i', 'l', 'th']
+
+    So ROUGE-L scored "bạn của tôi" against "bàn của tôi" as a *perfect* 1.0.
+    For a project whose entire claim is tone-aware compression, scoring with a
+    metric that cannot see tone marks invalidates the numbers it produces.
+
+    Tokenizes to whitespace-separated syllables (with punctuation stripped)
+    rather than running a word segmenter. That matches `compute_token_f1`, so
+    the two metrics count the same units, and it sidesteps the open dispute
+    over whether Vietnamese NLP should segment syllables into words at all
+    (cf. VnCoreNLP/PhoBERT vs. Nguyen et al., AAAI 2025). It is also
+    deterministic and needs no extra dependency.
+
+    Precedent: LongBench does exactly this for Chinese -- its `rouge_zh_score`
+    runs jieba before scoring instead of using the default tokenizer.
+    """
+
+    def tokenize(self, text: str) -> List[str]:
+        return _normalize_answer(text)
+
+
+def _mean_or_none(values):
+    """Mean of the non-None values, or None if there are none.
+
+    np.mean([]) is NaN, and NaN serialises to a bare `NaN` token that is not
+    valid JSON -- which silently corrupted vcc_bench_results.json whenever
+    every generation in a cell failed.
+    """
+    present = [v for v in values if v is not None]
+    return float(np.mean(present)) if present else None
+
+
 def compute_rouge_l(predictions: List[str], references: List[str]) -> Dict[str, float]:
     """
     Compute ROUGE-L scores.
-    
-    Uses word-level tokenization for Vietnamese.
-    Falls back to character-level if word tokenizer unavailable.
+
+    Uses syllable-level tokenization that preserves Vietnamese tone marks --
+    see VietnameseRougeTokenizer for why the library default cannot be used.
+    Falls back to character-level if rouge_score is unavailable.
     """
     try:
         from rouge_score import rouge_scorer
-        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=False)
+        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=False,
+                                          tokenizer=VietnameseRougeTokenizer())
         
         scores = {'rougeL_f1': [], 'rougeL_precision': [], 'rougeL_recall': []}
         for pred, ref in zip(predictions, references):
@@ -178,9 +223,53 @@ def compute_bert_score(
 
 def compute_exact_match(predictions: List[str], references: List[str]) -> float:
     """Compute exact match rate."""
-    matches = sum(1 for p, r in zip(predictions, references) 
+    matches = sum(1 for p, r in zip(predictions, references)
                   if p.strip().lower() == r.strip().lower())
     return matches / len(predictions) if predictions else 0.0
+
+
+def _normalize_answer(text: str) -> List[str]:
+    """Lowercase, strip punctuation, split on whitespace (SQuAD-style).
+
+    Vietnamese is whitespace-tokenized into syllables rather than words, so
+    this is syllable-level overlap. That is the same unit the compressor
+    drops, and it avoids depending on a word segmenter at eval time.
+    """
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize('NFC', text).lower()
+    text = re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE)
+    return text.split()
+
+
+def compute_token_f1(predictions: List[str], references: List[str]) -> float:
+    """Mean SQuAD-style token-overlap F1.
+
+    Exact match alone is far too harsh for generative answers -- a model that
+    answers "Thủ tướng Phạm Văn Đồng" against the reference "Phạm Văn Đồng"
+    scores 0 EM but should not score 0. Token F1 is the standard companion
+    metric for extractive QA and is what compression papers report alongside
+    EM when measuring how much a compressed context degrades answers.
+    """
+    if not predictions:
+        return 0.0
+    scores = []
+    for pred, ref in zip(predictions, references):
+        p_tokens, r_tokens = _normalize_answer(pred), _normalize_answer(ref)
+        if not p_tokens or not r_tokens:
+            # Both empty counts as agreement; one empty counts as total miss.
+            scores.append(float(p_tokens == r_tokens))
+            continue
+        common = Counter(p_tokens) & Counter(r_tokens)
+        overlap = sum(common.values())
+        if overlap == 0:
+            scores.append(0.0)
+            continue
+        precision = overlap / len(p_tokens)
+        recall = overlap / len(r_tokens)
+        scores.append(2 * precision * recall / (precision + recall))
+    return float(np.mean(scores))
 
 
 # ============================================================================
@@ -414,7 +503,11 @@ class VCCBench:
             
             # Compress
             start_time = time.time()
-            result = compressor.compress(input_ids)
+            # Pass the query: without it CombinedCompressor's query-aware
+            # boost (LACC C2) and SelectiveContext's embedding path never ran
+            # in ANY benchmark -- metadata['query_applied'] was always False.
+            # Compressors that don't use it absorb it via **kwargs.
+            result = compressor.compress(input_ids, query=sample.query)
             comp_time = (time.time() - start_time) * 1000
             
             metric = CompressionMetrics(
@@ -451,7 +544,8 @@ class VCCBench:
                 
                 metric.bleu_score = compute_bleu([output], [sample.reference_answer])
                 metric.exact_match = output.strip().lower() == sample.reference_answer.strip().lower()
-            
+                metric.token_f1 = compute_token_f1([output], [sample.reference_answer])
+
             # Compute quality score (combination of metrics)
             metric.quality_score = (
                 (metric.rouge_l_f1 or 0) * 0.4 +
@@ -508,9 +602,18 @@ class VCCBench:
             'mean_compression_ratio': np.mean([m.compression_ratio for m in metrics_list]),
             'mean_token_savings_pct': np.mean([m.token_savings_pct for m in metrics_list]),
             'mean_processing_time_ms': np.mean([m.processing_time_ms for m in metrics_list]),
-            'mean_rouge_l_f1': np.mean([m.rouge_l_f1 for m in metrics_list if m.rouge_l_f1 is not None]),
-            'mean_bleu': np.mean([m.bleu_score for m in metrics_list if m.bleu_score is not None]),
+            # `if xs else None`: when every generation failed these lists are
+            # empty and np.mean([]) returns NaN, which json.dump writes as a
+            # bare `NaN` token -- not valid JSON per RFC 8259, so strict
+            # parsers reject vcc_bench_results.json.
+            'mean_rouge_l_f1': _mean_or_none([m.rouge_l_f1 for m in metrics_list]),
+            'mean_bleu': _mean_or_none([m.bleu_score for m in metrics_list]),
             'exact_match_rate': np.mean([float(m.exact_match) for m in metrics_list]),
+            'mean_token_f1': _mean_or_none([m.token_f1 for m in metrics_list]),
+            # Quality metrics above skip failed generations; quality_score and
+            # exact_match_rate count them as 0. Report the denominator so the
+            # two are not read as sharing one.
+            'num_generated': sum(1 for m in metrics_list if m.rouge_l_f1 is not None),
             'mean_quality_score': np.mean([m.quality_score for m in metrics_list]),
             'mean_efficiency_score': np.mean([m.efficiency_score for m in metrics_list]),
             'num_samples': len(metrics_list),
@@ -535,24 +638,34 @@ class VCCBench:
                 continue
             
             # Average across all tasks and ratios
-            quality_scores = []
-            efficiency_scores = []
-            
+            # Weight each (task, ratio) cell by its sample count. Plain
+            # np.mean over cells gave the 8-sample agent_tool_calling task the
+            # same weight as the 160-sample long_document_qa task, so a method
+            # strong on the smallest task climbed the ranking this table is
+            # used to produce.
+            q_sum = e_sum = n_sum = 0.0
             for task_name, task_results in method_results.items():
                 for ratio_key, metrics in task_results.items():
-                    if 'mean_quality_score' in metrics:
-                        quality_scores.append(metrics['mean_quality_score'])
-                    if 'mean_efficiency_score' in metrics:
-                        efficiency_scores.append(metrics['mean_efficiency_score'])
-            
-            mq = np.mean(quality_scores) if quality_scores else 0
-            me = np.mean(efficiency_scores) if efficiency_scores else 0
+                    n = metrics.get('num_samples', 0) or 0
+                    if not n:
+                        continue
+                    n_sum += n
+                    q_sum += (metrics.get('mean_quality_score') or 0.0) * n
+                    e_sum += (metrics.get('mean_efficiency_score') or 0.0) * n
+
+            mq = q_sum / n_sum if n_sum else 0.0
+            me = e_sum / n_sum if n_sum else 0.0
+            # Clamp before the harmonic mean: token_savings_pct goes negative
+            # when a compressor returns more tokens than it received, and
+            # 2*q*e/(q+e) then explodes -- measured -18,000,000 for q=0.3,
+            # e=-0.3, which sorts to the top of a table labelled
+            # "higher is better".
+            mq, me = max(mq, 0.0), max(me, 0.0)
             summary[method_name] = {
                 'avg_quality': mq,
                 'avg_efficiency': me,
-                'harmonized_score': (
-                    2 * mq * me / (mq + me + 1e-8)
-                ),
+                'total_samples': int(n_sum),
+                'harmonized_score': (2 * mq * me / (mq + me)) if (mq + me) > 0 else 0.0,
             }
         
         return summary

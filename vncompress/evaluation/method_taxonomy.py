@@ -51,6 +51,15 @@ REGISTRY_METHOD_CATEGORY: Dict[str, MethodCategory] = {
     "tone_aware": MethodCategory.PROPOSED,
     "morphology_aware": MethodCategory.PROPOSED,
     "combined": MethodCategory.PROPOSED,
+    # LACC lightweight: the full proposed method with a fine-tuned SLM
+    # supplying the perplexity signal.
+    "slm_scorer": MethodCategory.PROPOSED,
+    # Same compressor with the LoRA adapter switched off. This is an
+    # ablation, not a baseline: it removes one component (scorer
+    # fine-tuning) from the proposed method rather than representing prior
+    # work, so reporting it as a peer of llmlingua/snapkv would misread the
+    # table.
+    "slm_scorer_base": MethodCategory.ABLATION,
 }
 
 ABLATION_ARM_CATEGORY: Dict[str, MethodCategory] = {

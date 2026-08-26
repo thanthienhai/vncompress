@@ -29,7 +29,11 @@ jobs:
         run: pip install pytest ruff
 
       - name: Lint (ruff)
-        run: ruff check vncompress tests scripts
+        # Includes the top-level runner scripts: they were outside the lint
+        # scope, so pyflakes checks that catch real crashes (F821 undefined
+        # name, F811 redefinition, duplicate dict keys) never ran on the
+        # largest and most-executed files in the repo.
+        run: ruff check vncompress tests scripts *.py
 
       - name: Run test suite
         run: pytest tests/ -v

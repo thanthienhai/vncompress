@@ -8,6 +8,8 @@ Resolves P1 issue "data: document dataset provenance và versioning".
 |---|---|---|
 | **Raw** | `wikipedia_vi_raw.json` | `scripts/fetch_vietnamese_data.py` (fetches live from Wikimedia API) |
 | **Derived** | `vcc_bench_agent_tool_calling.json`, `vcc_bench_cross_lingual.json`, `vcc_bench_long_document_qa.json`, `vcc_bench_multi_turn_conversation.json`, `vcc_bench_needle_in_haystack.json`, `vcc_bench_v1.json` (merge of the five task files) | `scripts/build_vcc_bench.py`, from `wikipedia_vi_raw.json` + embedded legal texts + generated synthetic templates |
+| **Derived (training)** | `training_corpus_v1.json` (not committed by default -- generated on demand, see below) | `scripts/build_training_corpus.py`, from `undertheseanlp/UVW-2026` + `bigscience-data/roots_vi_vietnamese_poetry` (both external HF datasets, not derived from `wikipedia_vi_raw.json`) |
+| **Derived (eval)** | `vcc_bench_uit_viquad_qa.json` (not committed by default -- generated on demand) | `scripts/build_viquad_eval.py`, from `taidng/UIT-ViQuAD2.0` (external HF dataset) |
 
 `vcc_bench_v1.json` is the file the evaluation scripts (`run_benchmark.py`,
 `run_ablation.py`) load by default; the five per-task files are the same
@@ -74,6 +76,67 @@ single task in isolation.
   synthetic templates, runs `validate_dataset()` (schema + basic quality
   checks), and writes the five task files plus the merged `vcc_bench_v1.json`.
 - **Total samples**: 243 across 5 tasks (`metadata.total_samples`).
+
+### `training_corpus_v1.json` (derived, training-only, not committed)
+
+- **Purpose**: larger/more diverse replacement for `wikipedia_vi_raw.json`
+  as `--train-data-path` for `run_train_slm.py` (the SLM external-scorer +
+  tone-probe trainer). The original 393-paragraph Wikipedia snapshot was
+  too small for the tone probe to learn meaningfully above chance -- see
+  the evaluation writeup that motivated this file.
+- **Sources**:
+  - `undertheseanlp/UVW-2026` (Vietnamese Wikipedia, cleaned/deduplicated,
+    quality-scored, Wikidata-linked) -- **License: CC BY-SA 4.0**. Sampled
+    (not the full 1.1M-article corpus) via streaming + shuffle, filtered
+    to `quality_score >= 7` by default.
+  - `bigscience-data/roots_vi_vietnamese_poetry` (BigScience ROOTS,
+    sourced from Fsoft AI Lab) -- **License: MIT**. This dataset is
+    **gated**: it requires a Hugging Face account, accepting the
+    BigScience Ethical Charter on the dataset page, and a local
+    `huggingface-cli login` (or `HF_TOKEN`) before `build_training_corpus.py`
+    can download it. ~10% of the final corpus by default (`--poetry-ratio`),
+    used as tone/diacritic-density augmentation, not as a bulk source (see
+    `build_training_corpus.py` docstring for rationale).
+- **Build**: `python scripts/build_training_corpus.py` (see its `--help`
+  for `--uvw-n`, `--poetry-ratio`, `--min-quality-score`, `--skip-poetry`).
+  Deterministic given the same `--seed` (default 42) *for the shuffle/sample
+  step*, but **not** byte-for-byte reproducible across runs, since UVW-2026
+  and the Poetry dataset are pulled live from the Hub and could change
+  upstream between runs (same caveat as `wikipedia_vi_raw.json` regeneration
+  below).
+- **Not committed to git by default** (not gitignored, just not generated
+  automatically): run the build script locally first. If you commit it
+  (its sources are clearly licensed, unlike the ViQuAD eval file below),
+  run `python scripts/checksum_datasets.py --write` and commit the updated
+  `CHECKSUMS.json` in the **same commit** -- CI runs
+  `scripts/checksum_datasets.py` in verify mode, which fails if
+  `CHECKSUMS.json` references a file that isn't actually tracked in git.
+
+### `vcc_bench_uit_viquad_qa.json` (derived, eval-only, not committed)
+
+- **Purpose**: a *real* (non-synthetic) Vietnamese long-document QA task
+  to measure compression's effect on downstream QA accuracy (EM /
+  ROUGE-L, via the existing `vncompress.evaluation.metrics` pipeline),
+  complementing the fully synthetic `long_document_qa` task in
+  `vcc_bench_v1.json`.
+- **Source**: `taidng/UIT-ViQuAD2.0` -- built from Vietnamese Wikipedia,
+  includes both answerable and unanswerable (SQuAD2.0-style) questions.
+- **License**: not stated on the Hugging Face dataset page as of the date
+  this file was added -- verify against the original UIT-ViQuAD
+  paper/repository before any redistribution beyond local research use.
+- **Split discipline**: only the dataset's own `test` split (7,301 rows)
+  is used, and **only for evaluation** -- never for training a scorer or
+  compressor. This is a hard rule, not a default: `run_train_slm.py` /
+  `run_training.py` do not read from this file.
+- **Build**: `python scripts/build_viquad_eval.py` (`--include-unanswerable`
+  to keep `is_impossible=True` rows -- off by default, since the current
+  EM/ROUGE-L metrics assume a real reference-answer string; `--max-samples`
+  for a quick-iteration subset). Use with `run_benchmark.py --data-path
+  vcc_bench_data/vcc_bench_uit_viquad_qa.json` -- pass it explicitly; it is
+  never loaded by default, so it doesn't change `vcc_bench_v1.json`'s
+  checksum or composition.
+- **Gitignored, not committed**: license is unconfirmed (see above), so
+  this file stays local-only until that's resolved -- see `.gitignore`.
 
 ## Preprocessing, cleaning, deduplication
 

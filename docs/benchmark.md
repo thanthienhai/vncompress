@@ -125,6 +125,34 @@ these result files in the same `--output-dir`, so a results directory is
 self-describing: dataset + code + dependencies + aggregated results + raw
 per-sample predictions, all in one place.
 
+## ⚠️ ROUGE-L: kết quả trước 2026-08-20 không dùng được
+
+`compute_rouge_l` trước đây gọi `rouge_scorer.RougeScorer(...)` **không
+truyền tokenizer**. Tokenizer mặc định của thư viện thay mọi ký tự ngoài
+`[a-z0-9]` bằng space — mà **mọi nguyên âm mang thanh của tiếng Việt đều
+nằm ngoài khoảng đó** (Latin Extended Additional, U+1EA0–U+1EF9). Hệ quả
+đã đo được:
+
+```
+'bàn' -> ['b','n']   'bán' -> ['b','n']   'bạn' -> ['b','n']
+'Hà Nội là thủ đô của Việt Nam' -> ['h','n','i','l','th','c','a','vi','t','nam']
+
+ROUGE-L('bàn của tôi', 'bạn của tôi') = 1.0000   <-- điểm tuyệt đối cho câu SAI
+```
+
+Với một dự án mà toàn bộ luận điểm là nén *có ý thức về thanh điệu*, việc
+chấm bằng metric **không nhìn thấy dấu thanh** làm vô hiệu mọi con số nó
+sinh ra — và ROUGE-L chiếm **40% của `quality_score`**
+(`0.4·ROUGE-L + 0.2·BLEU + 0.4·EM`).
+
+Đã sửa bằng `VietnameseRougeTokenizer` (tách âm tiết theo khoảng trắng,
+bỏ dấu câu, giữ nguyên dấu thanh; cùng đơn vị đếm với `compute_token_f1`).
+Tiền lệ: LongBench làm đúng như vậy cho tiếng Trung (`rouge_zh_score` chạy
+jieba trước khi chấm).
+
+**➜ Mọi `results/` sinh ra trước bản sửa này phải chạy lại.** Kiểm tra
+`environment.json.git_commit` để biết thư mục kết quả thuộc bản nào.
+
 ## Baseline vs. proposed vs. ablation
 
 See [`vncompress/evaluation/method_taxonomy.py`](../vncompress/evaluation/method_taxonomy.py)

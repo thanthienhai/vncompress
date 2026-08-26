@@ -110,6 +110,29 @@ TONE_CONTRAST = {
     ('nặng', 'nặng'): 0.0,
 }
 
+
+def _nfc(text: str) -> str:
+    """Compose to NFC before any per-character tone lookup.
+
+    Vietnamese tone marks exist in two Unicode forms: composed (NFC, 'á' =
+    U+00E1, one codepoint) and decomposed (NFD, 'á' = 'a' + U+0301, two).
+    MANUAL_TONE_MAP contains only composed characters, so iterating an NFD
+    string finds no tone-bearing character at all.
+
+    That failure is silent and inverts the project's headline metric rather
+    than raising. Measured on decomposed text, dropping *every* token:
+
+        NFC: tone-bearing 4/4 -> TPR 0.0   (correct: all tone info lost)
+        NFD: tone-bearing 0/4 -> TPR 1.0   (claims perfect preservation)
+
+    `is_vietnamese()` likewise returned False for decomposed Vietnamese,
+    which switches the tone-aware path off in run_benchmark.py and
+    compressors/tone_aware.py without any warning. The committed datasets
+    happen to be NFC, so this is latent -- until one new source is not.
+    """
+    return unicodedata.normalize('NFC', text)
+
+
 @dataclass
 class ToneInfo:
     """Information about tone in a character or token."""
@@ -182,11 +205,14 @@ class VietnameseToneAnalyzer:
         # Character -> tone name (fast dict lookup)
         self.char_to_tone: Dict[str, str] = {}
         for char, tone in MANUAL_TONE_MAP.items():
-            self.char_to_tone[char] = tone
+            self.char_to_tone[_nfc(char)] = tone
     
     def get_char_tone(self, char: str) -> ToneInfo:
         """Get tone information for a single character."""
-        tone = self.char_to_tone.get(char)
+        # MANUAL_TONE_MAP holds precomposed (NFC) characters only. In NFD,
+        # 'á' is 'a' + U+0301 and matches nothing, so every tone silently
+        # reads as ngang -- see _nfc() for why that is dangerous.
+        tone = self.char_to_tone.get(_nfc(char))
         if tone and tone != 'ngang':
             return ToneInfo(
                 has_tone=True,
@@ -200,12 +226,12 @@ class VietnameseToneAnalyzer:
 
     def detect_tones(self, text: str) -> List[ToneInfo]:
         """Detect tones for all characters in a text string."""
-        return [self.get_char_tone(c) for c in text]
+        return [self.get_char_tone(c) for c in _nfc(text)]
     
     def get_tone_sequence(self, text: str) -> List[int]:
         """Get tone sequence as integer IDs (0=ngang, 1=huyền, ..., 5=nặng)."""
         tones = []
-        for c in text:
+        for c in _nfc(text):
             info = self.get_char_tone(c)
             tones.append(info.tone_id if info.tone_id is not None else 0)
         return tones
@@ -216,6 +242,7 @@ class VietnameseToneAnalyzer:
 
         ρ(t) = (count of tone-carrying chars) / (token length)
         """
+        token = _nfc(token)
         if not token:
             return 0.0
         tone_count = sum(1 for c in token if self.char_to_tone.get(c, 'ngang') != 'ngang')
@@ -224,7 +251,7 @@ class VietnameseToneAnalyzer:
     def compute_tone_variety(self, token: str) -> int:
         """Count distinct non-ngang tones in a token."""
         tones = set()
-        for c in token:
+        for c in _nfc(token):
             t = self.char_to_tone.get(c, 'ngang')
             if t != 'ngang':
                 tones.add(t)
@@ -233,7 +260,7 @@ class VietnameseToneAnalyzer:
     def get_dominant_tone(self, token: str) -> Optional[str]:
         """Get the most frequent non-ngang tone in a token."""
         tone_counts: Dict[str, int] = {}
-        for c in token:
+        for c in _nfc(token):
             t = self.char_to_tone.get(c, 'ngang')
             if t != 'ngang':
                 tone_counts[t] = tone_counts.get(t, 0) + 1
@@ -318,12 +345,15 @@ class VietnameseToneAnalyzer:
           - Tone variety: how many distinct tones in token
           - Contrast: how different from neighbor tokens' tones
         """
+        # `tones_present` is what compute_tone_preservation_rate() counts, so
+        # a missed normalisation here makes TPR report 1.0 on text where every
+        # tone was in fact dropped. See _nfc().
         tones_present = []
-        for c in token:
+        for c in _nfc(token):
             t = self.char_to_tone.get(c, 'ngang')
             if t != 'ngang':
                 tones_present.append(t)
-        
+
         dominant = self.get_dominant_tone(token)
         density = self.compute_tone_density(token)
         variety = self.compute_tone_variety(token)
@@ -478,7 +508,12 @@ def is_vietnamese(text: str, threshold: float = 0.10) -> bool:
     """
     if not text:
         return False
-    
+
+    # Composed form required: vi_chars below holds precomposed characters, so
+    # decomposed Vietnamese would score 0 and read as non-Vietnamese, silently
+    # disabling the tone-aware path in run_benchmark.py / compressors.
+    text = _nfc(text)
+
     vi_chars = set('àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ'
                     'ÀÁẢÃẠẰẮẲẴẶẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ'
                     'ăâêôơưĂÂÊÔƠƯđĐ')
@@ -496,20 +531,17 @@ def strip_tone(text: str) -> str:
     Remove tone marks from Vietnamese text.
     Useful for ablation studies: comparing compression with/without tone info.
     """
-    result = []
-    for c in text:
-        # Decompose character
-        decomposed = unicodedata.normalize('NFD', c)
-        # Remove tone marks (combining diacritics)
-        without_tone = ''.join(ch for ch in decomposed if ch not in TONE_MARK_TO_NAME)
-        result.append(unicodedata.normalize('NFC', without_tone))
-    return ''.join(result)
+    # Normalise first so NFC and NFD inputs give byte-identical output --
+    # otherwise the ablation's stripped text depends on the source encoding.
+    decomposed = unicodedata.normalize('NFD', _nfc(text))
+    without_tone = ''.join(ch for ch in decomposed if ch not in TONE_MARK_TO_NAME)
+    return unicodedata.normalize('NFC', without_tone)
 
 
 def extract_tone_marks(text: str) -> List[str]:
     """Extract the sequence of tone marks from Vietnamese text."""
     marks = []
-    for c in text:
+    for c in _nfc(text):
         tone = MANUAL_TONE_MAP.get(c, 'ngang')
         marks.append(tone)
     return marks
