@@ -108,7 +108,16 @@ def detect_gpu() -> dict:
 
 def load_model_4bit(
     model_name: str,
-    device_map: str = 'auto',
+    # bitsandbytes quantization requires a device_map at load time (can't
+    # .to() a quantized model afterward). Not 'auto': accelerate's
+    # multi-device get_balanced_memory segfaults (Windows access violation)
+    # on single-GPU Windows/CUDA setups; {'': 0} pins to GPU 0 directly and
+    # sidesteps that specific crash. Any device_map still makes transformers
+    # run caching_allocator_warmup() -> torch.cuda.mem_get_info(), which has
+    # also been observed to segfault here -- see docs/benchmark.md. There is
+    # no fully crash-proof way to load a quantized model on this machine;
+    # {'': 0} is the best available mitigation.
+    device_map=None,
     max_memory: Optional[dict] = None,
     trust_remote_code: bool = True,
     use_flash_attention: bool = False,
@@ -127,11 +136,14 @@ def load_model_4bit(
         (model, tokenizer) tuple
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    
+
+    if device_map is None:
+        device_map = {'': 0} if torch.cuda.is_available() else 'cpu'
+
     print(f"[LIGHTWEIGHT] Loading {model_name} in INT4...")
     print(f"  GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory/(1024**3):.1f} GB" if torch.cuda.is_available() else "")
-    
+
     # INT4 config
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -146,7 +158,11 @@ def load_model_4bit(
         'device_map': device_map,
         'trust_remote_code': trust_remote_code,
         'torch_dtype': torch.float16,
-        'low_cpu_mem_usage': True,
+        # NOT True: low_cpu_mem_usage's caching_allocator_warmup() calls
+        # torch.cuda.mem_get_info(), which segfaults (Windows access
+        # violation) on this machine when combined with an explicit
+        # device_map. Loading is a little slower without it, but reliable.
+        'low_cpu_mem_usage': False,
     }
     
     if max_memory:
@@ -187,12 +203,15 @@ def load_model_4bit(
 
 def load_model_8bit(
     model_name: str,
-    device_map: str = 'auto',
+    device_map=None,  # see load_model_4bit() for why not 'auto'
     trust_remote_code: bool = True,
 ) -> Tuple[any, any]:
     """Load INT8 quantized model (~8GB for 7B)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    
+
+    if device_map is None:
+        device_map = {'': 0} if torch.cuda.is_available() else 'cpu'
+
     bnb_config = BitsAndBytesConfig(load_in_8bit=True)
     
     model = AutoModelForCausalLM.from_pretrained(
@@ -201,7 +220,7 @@ def load_model_8bit(
         device_map=device_map,
         trust_remote_code=trust_remote_code,
         torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False,  # see load_model_4bit() for why not True
     )
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
@@ -256,17 +275,20 @@ def load_tiny_model(
         except Exception as e:
             print(f"  INT4 failed ({e}), falling back to FP16")
     
-    # Fallback: FP16 or CPU
+    # Fallback: FP16 or CPU. No device_map here (unlike load_model_4bit):
+    # a plain fp16 load can be moved with .to() afterward, which avoids
+    # transformers' caching_allocator_warmup() -> torch.cuda.mem_get_info()
+    # entirely -- see docs/benchmark.md for why that segfaults on this
+    # single-GPU Windows/CUDA machine.
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    
+
     model_kwargs = {'trust_remote_code': True}
     if device == 'cuda':
         model_kwargs['torch_dtype'] = torch.float16
-        model_kwargs['device_map'] = 'auto'
-    else:
-        model_kwargs['device_map'] = 'cpu'
-    
+
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    if device == 'cuda':
+        model = model.to('cuda')
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

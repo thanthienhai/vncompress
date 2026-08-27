@@ -188,18 +188,27 @@ def setup_model_and_tokenizer(model_name: str, device: str = 'cuda'):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Load model with appropriate settings
+    # Load model with appropriate settings.
+    #
+    # Deliberately NOT passing device_map at all (neither 'auto' nor
+    # {'': 0}): whenever transformers sees a non-None device_map it runs
+    # `caching_allocator_warmup()`, which calls `torch.cuda.mem_get_info()`
+    # -- and that segfaults (Windows access violation) on this single-GPU
+    # Windows/CUDA machine, regardless of low_cpu_mem_usage. Loading plain
+    # and moving to the device afterward (the same pattern already used
+    # successfully by vncompress/compressors/slm_scorer.py and by
+    # run_train_slm.py's three training runs) avoids that code path
+    # entirely. See docs/benchmark.md for the full writeup.
     model_kwargs = {
         'trust_remote_code': True,
         'torch_dtype': torch.float16,
     }
-    
-    if device == 'cuda':
-        model_kwargs['device_map'] = 'auto'
-    
+
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    if device == 'cuda':
+        model = model.to('cuda')
     model.eval()
-    
+
     print(f"Model loaded. Vocab size: {len(tokenizer)}, "
           f"Params: {sum(p.numel() for p in model.parameters()) / 1e9:.1f}B")
     
@@ -225,12 +234,24 @@ def run_benchmark(
     to exactly what produced them (see vncompress/config.py).
     """
     if exp_config is not None:
-        set_seed(exp_config.seed)
         os.makedirs(output_dir, exist_ok=True)
         save_run_metadata(output_dir, exp_config)
 
     # Setup
     model, tokenizer = setup_model_and_tokenizer(model_name, device)
+
+    if exp_config is not None:
+        # Seed AFTER the model is on its device, not before: calling
+        # torch.cuda.manual_seed_all() before any real CUDA tensor exists
+        # has been observed to corrupt the CUDA allocator on this
+        # single-GPU Windows/CUDA machine, causing a later `.to('cuda')` (or
+        # even process exit) to segfault -- see docs/benchmark.md. Moving
+        # the seed here doesn't weaken reproducibility: generation in this
+        # benchmark is greedy (do_sample=False), so no CUDA RNG is consumed
+        # during scoring/generation; only Python's `random` (used by
+        # RandomCompressor and class-budget sampling) and NumPy need to be
+        # seeded before compression runs, which they still are, right here.
+        set_seed(exp_config.seed)
 
     # Configure benchmark
     config = VCCBenchConfig(
@@ -346,10 +367,11 @@ def quick_demo(model_name: str = 'Qwen/Qwen2.5-7B-Instruct', device: str = 'cuda
         model_name,
         trust_remote_code=True,
         torch_dtype=torch.float16,
-        device_map='auto' if device == 'cuda' else None,
     )
+    if device == 'cuda':
+        model = model.to('cuda')  # see setup_model_and_tokenizer(): no device_map
     model.eval()
-    
+
     # Use first demo sample
     sample = VIETNAMESE_DEMO_SAMPLES[0]
     
@@ -485,8 +507,11 @@ def main():
             'data_path': args.data_path,
         },
     )
-    set_seed(exp_config.seed)
-
+    # NOT seeded here: seeding must happen after the model is moved onto its
+    # CUDA device, not before (see run_benchmark()'s own set_seed() call and
+    # docs/benchmark.md for why). run_benchmark() below seeds itself at the
+    # right point. --demo isn't seeded at all: it's a single-sample,
+    # not-for-comparable-metrics eyeball check (see docs/benchmark.md).
     if args.demo:
         quick_demo(exp_config.model, exp_config.device)
         return

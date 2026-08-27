@@ -125,6 +125,53 @@ these result files in the same `--output-dir`, so a results directory is
 self-describing: dataset + code + dependencies + aggregated results + raw
 per-sample predictions, all in one place.
 
+## ⚠️ `device_map='auto'` segfault trên Windows single-GPU (2026-08-26)
+
+Trên máy Windows single-GPU (vd GTX 1060 6GB) dùng để chạy các benchmark
+này, `AutoModelForCausalLM.from_pretrained(..., device_map='auto')` gây
+**access violation (segmentation fault)** — không phải Python exception,
+process chết ngay lập tức, không có traceback hữu ích trừ khi bật
+`PYTHONFAULTHANDLER=1`. Hai điểm crash quan sát được (cả hai đều bên trong
+`accelerate`/`transformers`, không phải trong code của dự án):
+
+1. `device_map='auto'` → `accelerate.utils.modeling.get_balanced_memory`
+   → `get_max_memory` — crash khi truy vấn bộ nhớ đa thiết bị dù máy chỉ
+   có 1 GPU. `device_map={'': 0}` (chỉ định thẳng GPU 0) tránh được crash
+   này vì né hẳn logic auto-balance.
+2. **Nhưng** `transformers` (`modeling_utils.py`, hàm `_load_pretrained_model`)
+   gọi `caching_allocator_warmup(model, expanded_device_map, ...)` bất cứ
+   khi nào `device_map is not None` — **không phụ thuộc** giá trị của
+   `low_cpu_mem_usage` (đã kiểm chứng đọc source: điều kiện chỉ là
+   `load_config.device_map is not None and not is_hqq_or_quark`). Hàm này
+   gọi `torch.cuda.mem_get_info()`, và lệnh gọi đó access-violation trên
+   máy này. Vì vậy `device_map={'': 0}` **+** `low_cpu_mem_usage=False`
+   (thử ban đầu) vẫn crash — chỉ né được crash #1, không né được #2.
+
+**Fix thật sự dùng trong repo**: với các model load **không lượng tử hóa**
+(fp16/fp32 thường) — `run_benchmark.py`, `run_ablation.py` (nhánh chính),
+`run_training.py` (nhánh không QLoRA), `vncompress/compressors/external_scorer.py`
+(nhánh fp16), `vncompress/utils/lightweight.py` (`load_tiny_model` fallback),
+`scripts/run_eval*.py` — **không truyền `device_map` chút nào**, load model
+xong rồi gọi `.to('cuda')` thủ công. Cách này né hẳn `caching_allocator_warmup`
+vì điều kiện gọi nó yêu cầu `device_map is not None`. Đây chính xác là cách
+`vncompress/compressors/slm_scorer.py` đã làm từ đầu (không truyền
+`device_map`, `.to(device)` sau khi load) — và là lý do `run_train_slm.py`/
+`evaluate_slm.py` (cũng không dùng `device_map`) chưa từng gặp lỗi này ở
+ba lần train SLM trước đó. Đã kiểm chứng: crash 100% khi còn `device_map`
+(dù `{'': 0}` + `low_cpu_mem_usage=False`), ổn định 100% khi bỏ hẳn
+`device_map`, lặp lại nhiều lần.
+
+Với các model load **có lượng tử hóa bitsandbytes** (INT4/INT8 qua
+`quantization_config`) — nhánh INT4 của `external_scorer.py`,
+`vncompress/utils/lightweight.py`'s `load_model_4bit`/`load_model_8bit`,
+nhánh QLoRA của `run_training.py` — `device_map` là bắt buộc (không thể
+`.to()` một model đã lượng tử hóa), nên các nhánh này **vẫn còn rủi ro
+crash residual** trên máy này; đã đổi `'auto'` → `{'': 0}` để né ít nhất
+crash #1, nhưng chưa có cách né hoàn toàn crash #2 cho load có lượng tử
+hóa. Không nằm trong phạm vi benchmark hiện tại (chỉ dùng model fp16
+Qwen2.5-0.5B-Instruct, không lượng tử hóa) nên chưa chặn công việc, nhưng
+cần lưu ý nếu sau này chạy lại tầng `full/INT4`.
+
 ## ⚠️ ROUGE-L: kết quả trước 2026-08-20 không dùng được
 
 `compute_rouge_l` trước đây gọi `rouge_scorer.RougeScorer(...)` **không

@@ -37,8 +37,8 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     trust_remote_code=True,
     torch_dtype=torch.float16,
-    device_map="auto",
-)
+)  # no device_map: see docs/benchmark.md (caching_allocator_warmup segfault)
+model = model.to('cuda')
 model.eval()
 mem_model = torch.cuda.max_memory_allocated() / 1024**3
 print(f"  Model loaded. GPU mem: {mem_model:.1f} GB")

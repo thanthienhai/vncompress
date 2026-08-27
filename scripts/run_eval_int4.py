@@ -35,9 +35,9 @@ tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", trust_remote_c
 if tok.pad_token is None: tok.pad_token = tok.eos_token
 
 m = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-0.5B-Instruct", trust_remote_code=True,
-    torch_dtype=torch.float16, device_map="auto",
-)
+    "Qwen/Qwen2.5-0.5B-Instruct", trust_remote_code=True, torch_dtype=torch.float16,
+)  # no device_map: see docs/benchmark.md (caching_allocator_warmup segfault)
+m = m.to('cuda')
 m.eval(); m.config.output_hidden_states = True
 
 probe = PhonologicalConsistencyLoss(hidden_dim=m.config.hidden_size)

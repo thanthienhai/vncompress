@@ -283,15 +283,32 @@ def run_training(model_name: str = 'Qwen/Qwen2.5-0.5B-Instruct',
     print("[2/5] Loading model...")
     model_kwargs = dict(trust_remote_code=True,
                         torch_dtype=torch.float16)
-    if device == 'cuda' and torch.cuda.is_available():
-        model_kwargs['device_map'] = 'auto'
     if use_qlora:
+        # bitsandbytes quantization requires an explicit device_map at load
+        # time (unlike plain fp16, it can't be moved with .to() afterward).
+        # That means this branch still exercises transformers'
+        # caching_allocator_warmup() -> torch.cuda.mem_get_info(), which has
+        # been observed to segfault (Windows access violation) on this
+        # single-GPU Windows/CUDA machine -- see docs/benchmark.md. No known
+        # workaround short of not using device_map, which QLoRA needs; retry
+        # if it crashes, or use the non-QLoRA path below instead.
+        if device == 'cuda' and torch.cuda.is_available():
+            model_kwargs['device_map'] = {'': 0}
+            model_kwargs['low_cpu_mem_usage'] = False
         model_kwargs['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True,
         )
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    else:
+        # No device_map at all: any non-None value (including {'': 0})
+        # triggers caching_allocator_warmup() -> torch.cuda.mem_get_info(),
+        # which segfaults on this machine. Load plain, then move to device --
+        # the same pattern run_train_slm.py already uses successfully.
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        if device == 'cuda' and torch.cuda.is_available():
+            model = model.to('cuda')
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     model.config.output_hidden_states = True
 
     from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training

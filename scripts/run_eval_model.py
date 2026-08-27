@@ -45,9 +45,9 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, trust_remote_code=True,
-    torch_dtype=torch.float16, device_map="auto",
-)
+    MODEL_ID, trust_remote_code=True, torch_dtype=torch.float16,
+)  # no device_map: see docs/benchmark.md (caching_allocator_warmup segfault)
+model = model.to('cuda')
 model.eval()
 model.config.output_hidden_states = True
 mem_used = torch.cuda.max_memory_allocated() / 1024**3

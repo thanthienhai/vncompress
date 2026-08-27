@@ -498,16 +498,28 @@ def create_tiny_scorer(
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type='nf4',
         )
+        # bitsandbytes quantization requires an explicit device_map at load
+        # time (can't .to() a quantized model afterward). Any non-None
+        # device_map ('auto' or {'': 0}, regardless of low_cpu_mem_usage)
+        # makes transformers run caching_allocator_warmup() ->
+        # torch.cuda.mem_get_info(), which has been observed to segfault
+        # (Windows access violation) on single-GPU Windows/CUDA machines --
+        # see docs/benchmark.md. {'': 0} at least avoids accelerate's
+        # separate multi-device get_balanced_memory crash; the
+        # mem_get_info() one is unavoidable for a quantized load here.
         model = AutoModelForCausalLM.from_pretrained(
             model_name, trust_remote_code=True,
             quantization_config=bnb_config,
-            device_map='auto',
+            device_map={'': 0},
         )
     else:
+        # No device_map at all: plain fp16 load can be moved with .to()
+        # afterward, which avoids caching_allocator_warmup() entirely (see
+        # docs/benchmark.md).
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, trust_remote_code=True,
-            torch_dtype=torch.float16, device_map='auto',
+            model_name, trust_remote_code=True, torch_dtype=torch.float16,
         )
+        model = model.to(actual_device)
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:

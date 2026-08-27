@@ -122,7 +122,6 @@ def run_ablation(
     starts -- see vncompress/config.py and docs/benchmark.md.
     """
     if exp_config is not None:
-        set_seed(exp_config.seed)
         os.makedirs(output_dir, exist_ok=True)
         save_run_metadata(output_dir, exp_config)
 
@@ -135,11 +134,21 @@ def run_ablation(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # See run_benchmark.setup_model_and_tokenizer(): deliberately no
+    # device_map at all (any non-None value triggers caching_allocator_warmup
+    # -> torch.cuda.mem_get_info(), which segfaults on this single-GPU
+    # Windows/CUDA machine). Load plain, then move to device.
     model_kwargs = {'trust_remote_code': True, 'torch_dtype': torch.float16}
-    if device == 'cuda':
-        model_kwargs['device_map'] = 'auto'
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    if device == 'cuda':
+        model = model.to('cuda')
     model.eval()
+
+    if exp_config is not None:
+        # Seed AFTER the model is on its device -- see run_benchmark.py's
+        # run_benchmark() and docs/benchmark.md for why (early
+        # torch.cuda.manual_seed_all() corrupts the CUDA allocator here).
+        set_seed(exp_config.seed)
 
     config = VCCBenchConfig(
         methods=ABLATION_METHODS,
@@ -253,7 +262,8 @@ def main():
     # explicit (CLI or config file) set output_dir.
     if args.output_dir is None and args.config is None:
         exp_config.output_dir = DEFAULT_OUTPUT_DIR
-    set_seed(exp_config.seed)
+    # NOT seeded here: run_ablation() below seeds itself after the model is
+    # moved onto its CUDA device, not before -- see docs/benchmark.md.
 
     run_ablation(
         model_name=exp_config.model,
