@@ -243,6 +243,33 @@ def _normalize_answer(text: str) -> List[str]:
     return text.split()
 
 
+def compute_needle_recall(predictions: List[str], references: List[str]) -> float:
+    """Mean needle-retrieval recall for needle-in-haystack / synthetic tasks.
+
+    LongBench and RULER score their synthetic retrieval tasks by whether the
+    planted answer (the "needle") is recovered, not by ROUGE/BLEU overlap with
+    a full sentence -- a compressor that keeps the needle but phrases the answer
+    differently should still score 1.0. Here recall = fraction of the
+    reference's syllables that appear in the prediction (so a fully recovered
+    needle scores 1.0, a partial one scores in between), using the same
+    tone-preserving normalization as ROUGE-L / token-F1.
+
+    This is deliberately recall, not F1: for retrieval, surrounding filler in
+    the answer should not be penalized -- only whether the needle survived.
+    """
+    if not predictions:
+        return 0.0
+    scores = []
+    for pred, ref in zip(predictions, references):
+        p_tokens, r_tokens = _normalize_answer(pred), _normalize_answer(ref)
+        if not r_tokens:
+            scores.append(float(not p_tokens))  # empty reference: match iff empty pred
+            continue
+        common = Counter(p_tokens) & Counter(r_tokens)
+        scores.append(sum(common.values()) / len(r_tokens))
+    return float(np.mean(scores))
+
+
 def compute_token_f1(predictions: List[str], references: List[str]) -> float:
     """Mean SQuAD-style token-overlap F1.
 

@@ -108,6 +108,12 @@ def main():
     ap.add_argument("--dump-per-sample", metavar="PATH",
                     help="Write per-sample NLL to PATH (JSON) for a paired significance "
                          "test against another run -- see scripts/compare_slm_runs.py")
+    ap.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32",
+                    help="Base weight dtype. Use bfloat16 for a multi-billion-param base "
+                         "(e.g. Qwen3-4B) that will not fit in float32.")
+    ap.add_argument("--load-4bit", action="store_true",
+                    help="Load the base in 4-bit NF4 (QLoRA-style) to fit a ~4B base on a "
+                         "smaller GPU. Must match how the adapter was trained.")
     args = ap.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required.")
@@ -121,11 +127,22 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.adapter_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, dtype=torch.float32)
-    # Must match run_train_slm.py exactly, or the adapter loads onto a
-    # differently-shaped (or differently-initialised) embedding matrix.
-    resize_embeddings_if_needed(base, tokenizer)
-    base = base.to(device)
+    if args.load_4bit:
+        from transformers import BitsAndBytesConfig
+        base = AutoModelForCausalLM.from_pretrained(
+            config.base_model_name_or_path,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True),
+            device_map={"": 0})
+        resize_embeddings_if_needed(base, tokenizer)  # no-op for Qwen (matched vocab)
+    else:
+        dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
+        base = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, dtype=dtype)
+        # Must match run_train_slm.py exactly, or the adapter loads onto a
+        # differently-shaped (or differently-initialised) embedding matrix.
+        resize_embeddings_if_needed(base, tokenizer)
+        base = base.to(device)
     if args.no_adapter:
         model = base.eval()
         probe = None

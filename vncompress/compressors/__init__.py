@@ -62,6 +62,7 @@ def _ensure_compressors():
     global SnapKVCompressor, SelectiveContextCompressor
     global ToneAwareCompressor, MorphologyAwareCompressor, CombinedCompressor
     global SLMScorerCompressor, SLMPerplexityScorer
+    global SLMToneProbeCompressor, SLMToneProbeScorer
     global COMPRESSOR_REGISTRY, create_compressor
 
     if _compressors_loaded:
@@ -85,6 +86,9 @@ def _ensure_compressors():
         from .slm_scorer import (
             SLMScorerCompressor as _SLM, SLMPerplexityScorer as _SLMS,
         )
+        from .slm_tone_probe import (
+            SLMToneProbeCompressor as _STP, SLMToneProbeScorer as _STPS,
+        )
     except ImportError as e:
         raise ImportError(
             "Cannot load torch-dependent compressors. "
@@ -106,6 +110,8 @@ def _ensure_compressors():
     CombinedCompressor = _CCB
     SLMScorerCompressor = _SLM
     SLMPerplexityScorer = _SLMS
+    SLMToneProbeCompressor = _STP
+    SLMToneProbeScorer = _STPS
 
     COMPRESSOR_REGISTRY = {
         'none': NoCompressor,
@@ -122,6 +128,12 @@ def _ensure_compressors():
         # what fine-tuning contributed. Both need --scorer-adapter-dir.
         'slm_scorer': SLMScorerCompressor,
         'slm_scorer_base': SLMScorerCompressor,
+        # LACC full/INT4 tier: the trained tone probe (Sect. 3.4) as the live
+        # tone signal. `_rule` is the controlled ablation -- same SLM, same
+        # perplexity/morphology signals, tone from the dictionary heuristic
+        # instead of the probe -- so the two isolate exactly what the probe adds.
+        'slm_tone_probe': SLMToneProbeCompressor,
+        'slm_tone_probe_rule': SLMToneProbeCompressor,
     }
 
     # These share one class, so the class alone can't say which is which.
@@ -129,17 +141,26 @@ def _ensure_compressors():
         'slm_scorer': {'use_adapter': True, 'name': 'slm_scorer'},
         'slm_scorer_base': {'use_adapter': False, 'name': 'slm_scorer_base'},
     }
+    _TONE_PROBE_METHOD_KWARGS = {
+        'slm_tone_probe': {'tone_source': 'model', 'name': 'slm_tone_probe'},
+        'slm_tone_probe_rule': {'tone_source': 'rule', 'name': 'slm_tone_probe_rule'},
+    }
 
     def _create_compressor(method, tokenizer, model=None, config=None, device='cuda', **kwargs):
         if method not in COMPRESSOR_REGISTRY:
             raise ValueError(f"Unknown method: {method}. Available: {list(COMPRESSOR_REGISTRY.keys())}")
         cls = COMPRESSOR_REGISTRY[method]
         if method in _SLM_METHOD_KWARGS:
-            return cls(tokenizer, model, config, device, **{**kwargs, **_SLM_METHOD_KWARGS[method]})
+            # slm_scorer needs no tone probe; drop the tone-probe-only kwarg.
+            sk = {k: v for k, v in kwargs.items() if k != 'tone_probe_path'}
+            return cls(tokenizer, model, config, device, **{**sk, **_SLM_METHOD_KWARGS[method]})
+        if method in _TONE_PROBE_METHOD_KWARGS:
+            return cls(tokenizer, model, config, device, **{**kwargs, **_TONE_PROBE_METHOD_KWARGS[method]})
         # Only the SLM methods understand scorer kwargs; drop them elsewhere so
-        # a single --scorer-adapter-dir flag can be passed for every method.
+        # a single --scorer-adapter-dir / --tone-probe-path flag can be passed
+        # for every method.
         kwargs = {k: v for k, v in kwargs.items()
-                  if k not in ('scorer_adapter_dir', 'use_adapter', 'scorer')}
+                  if k not in ('scorer_adapter_dir', 'use_adapter', 'scorer', 'tone_probe_path')}
         if method in ('tone_aware', 'morphology_aware', 'combined', 'snapkv'):
             return cls(tokenizer, model, config, device, **kwargs)
         if method in ('llmlingua', 'llmlingua_small', 'selective'):
@@ -163,6 +184,7 @@ def __getattr__(name):
         'SnapKVCompressor', 'SelectiveContextCompressor',
         'ToneAwareCompressor', 'MorphologyAwareCompressor', 'CombinedCompressor',
         'SLMScorerCompressor', 'SLMPerplexityScorer',
+        'SLMToneProbeCompressor', 'SLMToneProbeScorer',
         'COMPRESSOR_REGISTRY', 'create_compressor',
     ):
         _ensure_compressors()
@@ -185,5 +207,6 @@ __all__ = [
     "SnapKVCompressor", "SelectiveContextCompressor",
     "ToneAwareCompressor", "MorphologyAwareCompressor", "CombinedCompressor",
     "SLMScorerCompressor", "SLMPerplexityScorer",
+    "SLMToneProbeCompressor", "SLMToneProbeScorer",
     "COMPRESSOR_REGISTRY", "create_compressor",
 ]

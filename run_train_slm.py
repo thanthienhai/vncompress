@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Memory-conscious tone-aware LoRA training for small Vietnamese Causal LMs.
+"""Tone-aware LoRA training for Vietnamese Causal LMs (SLM up to a few-B base).
 
-Default: chronopt-research/vietnamese-gpt2-base (137M parameters).
-Tuned for an NVIDIA T4 16 GB: batch=8, sequence length=256, FP16 AMP and
-activation checkpointing.  For a 6 GB card use --batch-size 1 --max-length 128
---grad-accum 8.  This is a *new* trainer; run_training.py is left unchanged
-for Qwen-family models.
+Default: chronopt-research/vietnamese-gpt2-base (137M parameters), FP32 master
+weights + FP16 AMP, tuned for a T4 16 GB (batch=8, len=256) or a 6 GB card
+(--batch-size 1 --max-length 128 --grad-accum 8).
+
+Larger bases (e.g. Qwen3-4B) load in bfloat16 or 4-bit NF4 (QLoRA) so they fit a
+single GPU; the tone probe auto-sizes to the base's hidden dim, and everything
+downstream (evaluate_slm.py, the slm_tone_probe compressor) is base-agnostic.
 
 Examples:
   python run_train_slm.py --quick
-  python run_train_slm.py --epochs 3
-  python run_train_slm.py --batch-size 1 --max-length 128 --grad-accum 8  # 6 GB
-  python run_train_slm.py --model VLAI-AIVN/vigpt2-aio --quick
+  python run_train_slm.py --batch-size 1 --max-length 128 --grad-accum 8   # 6 GB, gpt2-base
+  # Qwen3-4B, evaluate the tone loss on a strong base:
+  python run_train_slm.py --model Qwen/Qwen3-4B --load-4bit \
+      --train-data-path vcc_bench_data/training_corpus_v1.json \
+      --epochs 2 --batch-size 1 --max-length 512 --grad-accum 16   # ~12-16 GB
+  python run_train_slm.py --model Qwen/Qwen3-4B --base-dtype bfloat16 ...   # >=24 GB, no quant
 """
 import argparse
 import json
@@ -110,12 +115,15 @@ def load_texts(path: Optional[str]):
 
 
 def target_modules(model):
-    """PEFT names for GPT-2-style SLMs; retain a useful Qwen fallback."""
+    """PEFT target module names by architecture (GPT-2 SLM and Qwen/LLaMA-style)."""
     model_type = getattr(model.config, "model_type", "")
     if model_type in {"gpt2", "gpt_neo", "gptj"}:
         # GPT-2 uses fused QKV Conv1D (c_attn), projection and MLP modules.
         return ["c_attn", "c_proj", "c_fc"]
-    if model_type in {"qwen2", "qwen"}:
+    # Qwen (qwen/qwen2/qwen3/qwen3_moe) and LLaMA-family share the standard
+    # attention + MLP projection names. startswith keeps new Qwen revisions
+    # working without another edit here.
+    if model_type.startswith("qwen") or model_type in {"llama", "mistral"}:
         return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     raise ValueError(f"Unsupported model_type={model_type!r}. Add its PEFT target modules to target_modules().")
 
@@ -134,6 +142,16 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--no-gradient-checkpointing", action="store_true")
+    ap.add_argument("--base-dtype", choices=["float32", "bfloat16"], default="float32",
+                    help="Base weight dtype. float32 for a small SLM (default); "
+                         "bfloat16 for multi-billion-param bases (e.g. Qwen3-4B) that "
+                         "would not fit in float32.")
+    ap.add_argument("--load-4bit", action="store_true",
+                    help="QLoRA: load the base in 4-bit NF4 so a ~4B model fits a single "
+                         "12-16 GB GPU. Overrides --base-dtype for the base weights "
+                         "(compute stays bfloat16). NOTE: bitsandbytes needs device_map "
+                         "at load, which can segfault on this Windows/CUDA dev box "
+                         "(see docs/benchmark.md) -- intended for a Linux/T4-class GPU.")
     ap.add_argument("--quick", action="store_true", help="30 optimizer steps, 1 epoch, 128 tokens")
     args = ap.parse_args()
 
@@ -152,16 +170,37 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Keep master/trainable weights in FP32 for stable GradScaler updates.
-    # AMP below still performs CUDA matrix operations in FP16; this 137M model
-    # remains comfortably within a T4's 16 GB even with FP32 weights.
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
-    resize_embeddings_if_needed(model, tokenizer)
-    model = model.to(device)
+
+    # Precision: a tiny SLM trains fine with FP32 master weights + FP16 autocast
+    # (the original low-VRAM path). A multi-billion-param base (Qwen3-4B) cannot
+    # hold FP32 weights on one GPU, so it loads in bfloat16 or 4-bit NF4 (QLoRA)
+    # and trains under bfloat16 autocast, which needs no loss scaling.
+    if args.load_4bit:
+        from transformers import BitsAndBytesConfig
+        from peft import prepare_model_for_kbit_training
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True),
+            device_map={"": 0},
+        )
+        resize_embeddings_if_needed(model, tokenizer)
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=not args.no_gradient_checkpointing)
+        autocast_dtype = torch.bfloat16
+    else:
+        base_dtype = torch.bfloat16 if args.base_dtype == "bfloat16" else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=base_dtype)
+        resize_embeddings_if_needed(model, tokenizer)
+        model = model.to(device)
+        if not args.no_gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+        # FP32 base -> FP16 autocast (needs GradScaler); bf16 base -> bf16
+        # autocast (no scaler). See the training loop's use_scaler below.
+        autocast_dtype = torch.float16 if base_dtype == torch.float32 else torch.bfloat16
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.use_cache = False
-    if not args.no_gradient_checkpointing:
-        model.gradient_checkpointing_enable()
     model = get_peft_model(model, LoraConfig(
         task_type=TaskType.CAUSAL_LM, r=args.lora_r, lora_alpha=args.lora_r * 2,
         lora_dropout=0.05, target_modules=target_modules(model), bias="none",
@@ -185,7 +224,11 @@ def main():
     updates_per_epoch = max(1, (len(loader) + args.grad_accum - 1) // args.grad_accum)
     planned = args.max_steps if args.max_steps > 0 else updates_per_epoch * args.epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, min(10, planned // 10), planned)
-    scaler = torch.amp.GradScaler("cuda")
+    # GradScaler is only needed for FP16 (bf16 has FP32's exponent range and
+    # needs no loss scaling). enabled=False makes every scaler call a no-op, so
+    # the same loop below serves both precisions.
+    use_scaler = autocast_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     step = 0
     optimizer.zero_grad(set_to_none=True)
@@ -198,7 +241,7 @@ def main():
             # small corpora where len(loader) < grad_accum — are weighted right.
             window_start = (batch_i // args.grad_accum) * args.grad_accum
             window_size = min(window_start + args.grad_accum, len(loader)) - window_start
-            with torch.amp.autocast("cuda", dtype=torch.float16):
+            with torch.amp.autocast("cuda", dtype=autocast_dtype):
                 out = model(**{k: batch[k] for k in ("input_ids", "attention_mask", "labels")}, output_hidden_states=True)
                 tl = tone_loss(out.hidden_states[-1], batch["tone_labels"], batch["attention_mask"])
                 loss = out.loss + tl
@@ -226,6 +269,22 @@ def main():
     model.save_pretrained(final_dir, save_embedding_layers=False)
     tokenizer.save_pretrained(final_dir)
     torch.save(tone_loss.state_dict(), os.path.join(args.output_dir, "tone_probe.pt"))
+    # Record what the probe belongs to, so the inference-time loader
+    # (compressors/slm_tone_probe.py) can verify it is being paired with the
+    # right base model / adapter instead of silently loading a mismatched
+    # classifier. tone_probe.pt is only a raw state_dict and carries none of
+    # this on its own.
+    with open(os.path.join(args.output_dir, "tone_probe_meta.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "base_model": args.model,
+            "adapter_dir": final_dir,
+            "hidden_size": model.config.hidden_size,
+            "num_tones": tone_loss.num_tones,
+            "lambda_tone": args.lambda_tone,
+            "max_length": args.max_length,
+            "lora_r": args.lora_r,
+            "base_dtype": "4bit-nf4" if args.load_4bit else args.base_dtype,
+        }, f, ensure_ascii=False, indent=2)
     # Persist the exact held-out split so evaluate_slm.py scores the same
     # validation set regardless of --train-data-path/--max-length at eval time.
     val_samples = [dataset[i] for i in val_ds.indices]
@@ -234,7 +293,7 @@ def main():
                    "samples": val_samples}, f)
     print(f"Saved LoRA adapter and tokenizer: {final_dir}")
     print(f"Saved held-out validation split ({len(val_samples)} texts): {final_dir}/val_split.json")
-    print(f"Saved trained tone probe: {args.output_dir}/tone_probe.pt | optimizer steps={step}")
+    print(f"Saved trained tone probe: {args.output_dir}/tone_probe.pt (+ tone_probe_meta.json) | optimizer steps={step}")
 
 
 if __name__ == "__main__":

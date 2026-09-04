@@ -167,6 +167,10 @@ def main():
                     help="Subsample the train half for speed on small GPUs")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", help="Append the result as one JSON line to this file")
+    ap.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32",
+                    help="Base weight dtype; bfloat16 for a ~4B base (e.g. Qwen3-4B).")
+    ap.add_argument("--load-4bit", action="store_true",
+                    help="Load the base in 4-bit NF4 to fit a large base on a smaller GPU.")
     args = ap.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA GPU is required.")
@@ -183,11 +187,22 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.adapter_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path,
-                                                 dtype=torch.float32)
-    if len(tokenizer) != model.get_input_embeddings().weight.shape[0]:
-        model.resize_token_embeddings(len(tokenizer))
-    model = model.to(device)
+    if args.load_4bit:
+        from transformers import BitsAndBytesConfig
+        model = AutoModelForCausalLM.from_pretrained(
+            peft_config.base_model_name_or_path,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True),
+            device_map={"": 0})
+        if len(tokenizer) != model.get_input_embeddings().weight.shape[0]:
+            model.resize_token_embeddings(len(tokenizer))
+    else:
+        dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path, dtype=dtype)
+        if len(tokenizer) != model.get_input_embeddings().weight.shape[0]:
+            model.resize_token_embeddings(len(tokenizer))
+        model = model.to(device)
     if args.mode == "lora":
         model = PeftModel.from_pretrained(model, args.adapter_dir)
     model.eval()

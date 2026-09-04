@@ -60,6 +60,14 @@ REGISTRY_METHOD_CATEGORY: Dict[str, MethodCategory] = {
     # work, so reporting it as a peer of llmlingua/snapkv would misread the
     # table.
     "slm_scorer_base": MethodCategory.ABLATION,
+    # LACC full/INT4 tier: the trained tone probe (Sect. 3.4) as the live tone
+    # signal -- the training->inference bridge, the paper's headline proposed
+    # contribution for the model-based path.
+    "slm_tone_probe": MethodCategory.PROPOSED,
+    # Same compressor and same SLM, but the tone term comes from the dictionary
+    # heuristic instead of the trained probe. This is the controlled ablation
+    # that isolates the probe's contribution, not prior work -- so ABLATION.
+    "slm_tone_probe_rule": MethodCategory.ABLATION,
 }
 
 ABLATION_ARM_CATEGORY: Dict[str, MethodCategory] = {
