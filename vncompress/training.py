@@ -33,7 +33,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
-from .linguistics import TONE_NAME_TO_ID, PhonologicalConsistencyLoss, get_tone_analyzer
+from .linguistics import (
+    TONE_NAME_TO_ID,
+    PhonologicalConsistencyLoss,
+    RelevanceConsistencyLoss,
+    build_relevance_labels,
+    get_tone_analyzer,
+)
 from .models import lora_target_modules, resize_embeddings_if_needed
 
 
@@ -508,6 +514,205 @@ def run_slm_training(
     print(f"Saved LoRA adapter + tokenizer: {final_dir}")
     print(f"Saved held-out validation split ({len(val_samples)} texts): {final_dir}/val_split.json")
     print(f"Saved trained tone probe: {output_dir}/tone_probe.pt (+ tone_probe_meta.json) | optimizer steps={step}")
+
+
+# ============================================================================
+# 3. Query-relevance probe training (wave-2 E4)
+# ============================================================================
+#
+# Same frozen-base-plus-probe recipe as the tone probe / probe-control study,
+# but the label is answer-relevance (build_relevance_labels) instead of tone.
+# The base model is frozen; only the RelevanceConsistencyLoss probe learns, so
+# this is cheap (no fine-tuning) -- it teaches a probe to read "is this token
+# answer-relevant" off the SLM's hidden states, the signal wave-1 showed LACC
+# was missing. The saved relevance_probe.pt loads via models.load_scorer(
+# probe_kind='relevance') and plugs into LACC's tone_source='model' path.
+
+
+def load_relevance_samples(data_path: Optional[str], tasks=('long_document_qa', 'needle_in_haystack')) -> List[dict]:
+    """Load (context, reference_answer) pairs from a VCC-Bench-shaped JSON
+    ({"samples": [{context, reference_answer, task}]}), keeping only tasks whose
+    answer is a span/needle in the context (so span-overlap supervision is
+    meaningful). Falls back to the built-in demo QA if no file is present."""
+    if data_path and os.path.exists(data_path):
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        samples = data.get('samples', data if isinstance(data, list) else [])
+        out = [
+            {'context': s.get('context', ''), 'reference_answer': s.get('reference_answer', '')}
+            for s in samples
+            if (not tasks or s.get('task') in tasks)
+            and len(s.get('context', '')) > 100 and s.get('reference_answer')
+        ]
+        if out:
+            return out
+    # Minimal fallback so the pipeline is runnable without a dataset file.
+    return [
+        {'context': "Công ty XYZ được thành lập năm 2010 tại Thành phố Hồ Chí Minh và hoạt động "
+                    "trong lĩnh vực công nghệ. Mã kích hoạt của hệ thống là BẢO MẬT bảy ba hai. "
+                    "Công ty có hơn năm nghìn nhân viên trên toàn quốc.",
+         'reference_answer': "BẢO MẬT bảy ba hai"},
+        {'context': "Luật Bảo vệ Môi trường năm 2020 quy định nguyên tắc bảo vệ môi trường là "
+                    "quyền và trách nhiệm của mọi tổ chức, cá nhân, phải công khai, minh bạch.",
+         'reference_answer': "quyền và trách nhiệm của mọi tổ chức, cá nhân"},
+    ]
+
+
+class RelevanceDataset(Dataset):
+    """Causal-LM token ids plus a per-token answer-relevance label built by
+    span overlap with the reference answer (build_relevance_labels)."""
+
+    def __init__(self, samples: List[dict], tokenizer, max_length: int):
+        self.samples = []
+        for s in samples:
+            ids = tokenizer.encode(s['context'], add_special_tokens=True, truncation=True, max_length=max_length)
+            if len(ids) < 10:
+                continue
+            labels = build_relevance_labels(tokenizer, ids, s['reference_answer'])
+            # Skip degenerate samples where no token is positive (nothing to learn).
+            if not any(lab == 1 for lab in labels):
+                continue
+            self.samples.append((ids, labels))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        return self.samples[index]
+
+
+class RelevanceCollator:
+    """Pads a batch; relevance labels are padded with -100 (ignore_index) so
+    padding neither trains nor scores the probe."""
+
+    def __init__(self, pad_id: int, ignore_index: int = -100):
+        self.pad_id = pad_id
+        self.ignore_index = ignore_index
+
+    def __call__(self, batch):
+        width = max(len(ids) for ids, _ in batch)
+        bsz = len(batch)
+        ids = torch.full((bsz, width), self.pad_id, dtype=torch.long)
+        mask = torch.zeros((bsz, width), dtype=torch.long)
+        labels = torch.full((bsz, width), self.ignore_index, dtype=torch.long)
+        for row, (sample_ids, sample_labels) in enumerate(batch):
+            n = len(sample_ids)
+            ids[row, :n] = torch.tensor(sample_ids)
+            mask[row, :n] = 1
+            labels[row, :n] = torch.tensor(sample_labels)
+        return {'input_ids': ids, 'attention_mask': mask, 'relevance_labels': labels}
+
+
+def run_relevance_probe_training(
+    adapter_dir: Optional[str] = None,
+    base_model: str = 'chronopt-research/vietnamese-gpt2-base',
+    output_dir: str = './models/relevance',
+    train_data_path: Optional[str] = None,
+    use_adapter: bool = True,
+    epochs: int = 3,
+    batch_size: int = 8,
+    max_length: int = 256,
+    lr: float = 1e-3,
+    max_steps: int = -1,
+    base_dtype: str = 'float32',
+    load_4bit: bool = False,
+    seed: int = 42,
+):
+    """Train ONLY a query-relevance probe on a frozen SLM's hidden states (E4).
+
+    `adapter_dir` (a LoRA adapter from `train.py --mode slm`) is loaded on top
+    of its base when given and `use_adapter=True`; otherwise `base_model` is
+    used directly. The base is frozen -- only the RelevanceConsistencyLoss probe
+    learns -- so this is cheap. Saves `<output_dir>/relevance_probe.pt` +
+    `relevance_probe_meta.json` (probe_kind='relevance'), loadable by
+    models.load_scorer(..., probe_kind='relevance')."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("Relevance-probe training requires an NVIDIA CUDA GPU.")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    torch.manual_seed(seed)
+    device = torch.device('cuda')
+
+    resolved_base = base_model
+    if adapter_dir:
+        try:
+            from peft import PeftConfig
+            resolved_base = PeftConfig.from_pretrained(adapter_dir).base_model_name_or_path
+        except Exception:
+            pass
+    tokenizer = AutoTokenizer.from_pretrained(adapter_dir or base_model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if load_4bit:
+        from transformers import BitsAndBytesConfig
+        model = AutoModelForCausalLM.from_pretrained(
+            resolved_base,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True),
+            device_map={'': 0})
+        resize_embeddings_if_needed(model, tokenizer)
+    else:
+        weight_dtype = torch.bfloat16 if base_dtype == 'bfloat16' else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(resolved_base, torch_dtype=weight_dtype)
+        resize_embeddings_if_needed(model, tokenizer)
+        model = model.to(device)
+    if adapter_dir and use_adapter:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, adapter_dir)
+    model.eval()
+    model.config.use_cache = False
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    samples = load_relevance_samples(train_data_path)
+    dataset = RelevanceDataset(samples, tokenizer, max_length)
+    if len(dataset) < 1:
+        raise RuntimeError("No usable relevance-labelled samples (need answers that overlap their context).")
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        collate_fn=RelevanceCollator(tokenizer.pad_token_id))
+    print(f"  {len(dataset)} relevance-labelled samples")
+
+    probe = RelevanceConsistencyLoss(model.config.hidden_size, lambda_relevance=1.0).to(device)
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=0.01)
+    scaler = torch.amp.GradScaler('cuda')
+
+    step = 0
+    for epoch in range(epochs):
+        probe.train()
+        for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            with torch.no_grad():
+                hs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'],
+                           output_hidden_states=True).hidden_states[-1]
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                loss = probe(hs.float(), batch['relevance_labels'], batch['attention_mask'])
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            step += 1
+            if step == 1 or step % 20 == 0:
+                print(f"  epoch={epoch} step={step} relevance_loss={loss.item():.4f}")
+            if 0 < max_steps <= step:
+                break
+        if 0 < max_steps <= step:
+            break
+
+    os.makedirs(output_dir, exist_ok=True)
+    probe_path = os.path.join(output_dir, 'relevance_probe.pt')
+    torch.save(probe.state_dict(), probe_path)
+    with open(os.path.join(output_dir, 'relevance_probe_meta.json'), 'w', encoding='utf-8') as f:
+        json.dump({
+            'base_model': resolved_base, 'adapter_dir': adapter_dir, 'hidden_size': model.config.hidden_size,
+            'num_classes': probe.num_classes, 'probe_kind': 'relevance', 'max_length': max_length,
+            'base_dtype': '4bit-nf4' if load_4bit else base_dtype,
+        }, f, ensure_ascii=False, indent=2)
+    print(f"Saved relevance probe: {probe_path} (+ relevance_probe_meta.json) | optimizer steps={step}")
+    return probe
 
 
 # ============================================================================

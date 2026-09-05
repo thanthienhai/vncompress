@@ -1223,6 +1223,123 @@ class PhonologicalConsistencyLoss(nn.Module):
         return torch.clamp(1.0 + max_prob, 0.5, 3.0)
 
 
+# --- Wave-2 E4: query-relevance probe (Sentinel / EXIT-style learned relevance) --
+#
+# Wave 1 refuted tone as a compression signal, but the training method itself
+# works (LoRA + a probe on hidden states genuinely learns structure). E4
+# keeps that machinery and swaps the LABEL: instead of predicting a token's
+# tone (a deterministic function of the token id, and useless for choosing
+# which tokens to keep), the probe predicts whether a token is RELEVANT to the
+# answer -- exactly the signal LACC lacked. Because RelevanceConsistencyLoss
+# mirrors PhonologicalConsistencyLoss's public surface (a `.tone_classifier`
+# Sequential, `.num_tones`, `forward`, `score_importance`), it drops into the
+# existing LACCScorer / tone_source='model' path with no change to compression.py.
+
+
+def _normalize_for_overlap(text: str) -> List[str]:
+    """Lowercase, NFC, strip punctuation, split on whitespace -- the same
+    syllable-level tokenization evaluation._normalize_answer uses, replicated
+    here to keep linguistics.py free of an evaluation.py import (and the tone
+    marks intact, which the default [a-z0-9] tokenizers would destroy)."""
+    text = unicodedata.normalize('NFC', text).lower()
+    text = re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE)
+    return text.split()
+
+
+def build_relevance_labels(
+    tokenizer, input_ids: Sequence[int], answer_text: str, min_token_len: int = 2, ignore_index: int = -100,
+) -> List[int]:
+    """Weak-supervision per-token relevance labels for a (context, answer) pair.
+
+    A context token is labelled RELEVANT (1) iff its decoded, normalized
+    surface form is a non-trivial syllable (>= `min_token_len` chars after
+    stripping) that appears among the answer's syllables; NOT-RELEVANT (0)
+    otherwise. Punctuation / whitespace / sub-`min_token_len` pieces are set to
+    `ignore_index` so they neither train nor score (they are neither reliably
+    relevant nor a clean negative). This is deliberately noisy span-overlap
+    supervision (RECOMP/EXIT-style), not gold labels -- enough to teach a probe
+    "does this token carry answer content", cheap to produce from VCC-Bench's
+    existing reference answers and constructed needles.
+    """
+    answer_syllables = set(_normalize_for_overlap(answer_text or ''))
+    labels: List[int] = []
+    for tid in input_ids:
+        piece = tokenizer.decode([tid], clean_up_tokenization_spaces=False)
+        norm = _normalize_for_overlap(piece)
+        # A token often decodes to one syllable (possibly with a leading space);
+        # treat the whole decoded piece as relevant if ANY of its syllables is
+        # a long-enough answer syllable.
+        keep = [s for s in norm if len(s) >= min_token_len]
+        if not keep:
+            labels.append(ignore_index)
+        elif any(s in answer_syllables for s in keep):
+            labels.append(1)
+        else:
+            labels.append(0)
+    return labels
+
+
+class RelevanceConsistencyLoss(nn.Module):
+    """Binary query-relevance probe: a drop-in, interface-compatible sibling of
+    PhonologicalConsistencyLoss (E4).
+
+    L_rel = lambda * CE(linear(h_i), relevant_i);  `score_importance` reuses the
+    trained classifier as LACC's model signal -- a token the probe judges more
+    likely to be answer-relevant is scored as more important to keep. The
+    classifier is stored under the attribute name `tone_classifier` and
+    `num_tones` aliases `num_classes` (=2) purely so the existing loader
+    (models.load_scorer) and scorer (compression.LACCScorer, which reads
+    `.tone_classifier[0].weight` and calls `.score_importance`) work unchanged.
+    """
+
+    def __init__(self, hidden_dim: int, num_classes: int = 2, lambda_relevance: float = 1.0, ignore_index: int = -100):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_tones = num_classes  # alias: keeps the tone-probe interface/loader working
+        self.lambda_relevance = lambda_relevance
+        self.ignore_index = ignore_index
+        self.tone_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim // 4),
+            nn.Linear(hidden_dim // 4, num_classes),
+        )
+
+    def forward(self, hidden_states: torch.Tensor, labels: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, S, D = hidden_states.shape
+        Bt, St = labels.shape
+        if S != St:
+            raise ValueError(
+                f"Sequence length mismatch: hidden_states has S={S} but relevance labels "
+                f"have S={St}. Labels must align with input positions."
+            )
+        logits = self.tone_classifier(hidden_states)
+        if mask is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, self.num_classes), labels.view(-1),
+                reduction='none', ignore_index=self.ignore_index,
+            )
+            loss = (loss * mask.view(-1)).sum() / (mask.sum() + 1e-8)
+        else:
+            loss = F.cross_entropy(
+                logits.view(-1, self.num_classes), labels.view(-1),
+                reduction='mean', ignore_index=self.ignore_index,
+            )
+        return self.lambda_relevance * loss
+
+    def predict_relevance(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.tone_classifier(hidden_states).argmax(dim=-1)
+
+    def score_importance(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """1.0 + P(relevant), clamped to [0.5, 3.0] -- a token the probe judges
+        more likely to be answer-relevant is preserved more. Unlike the tone
+        probe, this reads a signal (relevance) that is NOT a deterministic
+        function of the token id, so it can actually help token selection."""
+        probs = F.softmax(self.tone_classifier(hidden_states), dim=-1)
+        relevant_prob = probs[..., 1]  # class 1 = relevant
+        return torch.clamp(1.0 + relevant_prob, 0.5, 3.0)
+
+
 class TonePreservationProbe(nn.Module):
     """Lightweight probe trained on frozen hidden states to *measure* how well
     tonal information survives after compression (evaluation only, not a

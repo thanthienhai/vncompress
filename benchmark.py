@@ -37,6 +37,29 @@ ABLATION_KWARGS = {
     'lacc': dict(),
 }
 
+# Wave-2 arms (research/wave2_proposals.md). Each maps an arm name to a base
+# registry method + constructor kwargs. LACC arms are given the loaded scorer;
+# 'llmlingua_contrastive'/'encoder' are not. Select with e.g.
+#   --methods none,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph
+WAVE2_ARMS = {
+    # E1/E11: LongLLMLingua question-conditioned (contrastive) perplexity baseline.
+    'llmlingua_contrastive': ('llmlingua', dict(contrastive=True)),
+    # E1: LACC using only query-conditioned perplexity (the highest-value arm).
+    'lacc_ppl_contrastive': ('lacc', dict(use_tone=False, use_morphology=False, contrastive_ppl=True)),
+    # E2: perplexity x morphology (multiplicative), tone off.
+    'lacc_ppl_morph': ('lacc', dict(use_tone=False, morph_combine='multiply')),
+    # E1+E2: query-conditioned perplexity x morphology.
+    'lacc_cx_morph': ('lacc', dict(use_tone=False, morph_combine='multiply', contrastive_ppl=True)),
+    # E5: sentence-level extractive selection.
+    'lacc_sentence': ('lacc', dict(selection_unit='sentence', use_tone=False, contrastive_ppl=True)),
+    # E7: class-proportional budget allocation.
+    'lacc_classprop': ('lacc', dict(budget_mode='class_proportional', use_tone=False)),
+    # E8: tone kept only for surface tasks.
+    'lacc_tone_gated': ('lacc', dict(tone_task_gate=True)),
+    # E6/E11: encoder token-classification compressor (LLMLingua-2 / PhoBERT-style).
+    'encoder': ('encoder', dict()),
+}
+
 DEFAULT_OUTPUT_DIR = './results'
 DEFAULT_ABLATION_OUTPUT_DIR = './results_ablation'
 
@@ -240,6 +263,10 @@ def run_benchmark(
     def make_compressor(method_name: str):
         if ablation:
             return create_compressor('lacc', tokenizer, model, config=None, device=device, scorer=scorer, **ABLATION_KWARGS[method_name])
+        if method_name in WAVE2_ARMS:
+            base, kw = WAVE2_ARMS[method_name]
+            extra = dict(scorer=scorer) if base == 'lacc' else {}
+            return create_compressor(base, tokenizer, model, config=None, device=device, **extra, **kw)
         if method_name == 'lacc':
             return create_compressor('lacc', tokenizer, model, config=None, device=device, scorer=scorer)
         return create_compressor(method_name, tokenizer, model, config=None, device=device)
@@ -315,8 +342,12 @@ def main():
     if args.list_methods:
         print("Available compression methods:")
         for name, cls in METHODS.items():
-            print(f"  {name:<12} -> {cls.__name__}")
+            print(f"  {name:<22} -> {cls.__name__}")
+        print("  encoder                -> EncoderClassifierCompressor (lazy; wave-2 E6)")
         print(f"\nAblation arms (--ablation): {ABLATION_METHODS}")
+        print("\nWave-2 arms (research/wave2_proposals.md), selectable via --methods:")
+        for name, (base, kw) in WAVE2_ARMS.items():
+            print(f"  {name:<22} -> {base} {kw}")
         return
 
     methods = args.methods.split(',') if args.methods else None

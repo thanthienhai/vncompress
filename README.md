@@ -65,13 +65,35 @@ python train.py --mode slm --validate --adapter-dir models/slm/final --tone-prob
 
 Chi tiết đầy đủ (xây dataset, tuning theo GPU, cách đọc kết quả validate, đo tác động thật lên pipeline nén) ở [`docs/training.md`](docs/training.md).
 
+### Wave 2 — hai pipeline huấn luyện mới
+
+Sau khi wave 1 bác bỏ giả thuyết tone-aware, wave 2 thêm hai hướng huấn luyện (đề xuất & trạng thái ở [`research/wave2_proposals.md`](research/wave2_proposals.md), hướng dẫn chạy ở [`WAVE2_HANDOFF.md`](WAVE2_HANDOFF.md)):
+
+```bash
+# E4 — probe dự đoán liên-quan-câu-hỏi (thay cho probe thanh điệu), freeze base, chỉ train probe
+python scripts/train_relevance_probe.py --adapter-dir models/qwen3/final \
+    --data-path data/benchmark/vcc_bench_v2.json --output-dir models/qwen3 --load-4bit
+#   -> models/qwen3/relevance_probe.pt (+ relevance_probe_meta.json), cắm vào LACC qua tone_source='model'
+
+# E6 — encoder token-classification compressor (LLMLingua-2 / PhoBERT), distill nhãn keep/drop từ teacher
+python scripts/train_encoder_compressor.py --encoder-id vinai/phobert-base \
+    --train-data-path data/benchmark/training_corpus_v1.json \
+    --teacher-model Qwen/Qwen2.5-0.5B-Instruct --ratio 4 --output-dir models/encoder_cls
+```
+
+`load_scorer(..., probe_kind='relevance')` nạp relevance probe; A/B nó với probe thanh điệu bằng `scripts/verify_tone_probe_e2e.py`. Đo token inflation (P3): `python scripts/measure_token_inflation.py`.
+
 ## 7. Benchmark
 
 ```bash
-python benchmark.py --list-methods
+python benchmark.py --list-methods                                   # gồm cả các arm wave-2
 python benchmark.py --config configs/benchmark.json                  # VCC-Bench đầy đủ
 python benchmark.py --ablation --model Qwen/Qwen2.5-7B-Instruct --ratios 2,4,8   # tách từng tín hiệu
 python evaluate.py --input results/qwen2.5-7b-vcc-bench-v1            # bảng baseline/proposed/ablation
+
+# Wave-2 arms (query-conditioned perplexity, ppl×morph, sentence-level, class-proportional budget):
+python benchmark.py --model Qwen/Qwen2.5-7B-Instruct --ratios 2,4,8 \
+    --methods none,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_sentence,lacc_classprop
 ```
 
 VCC-Bench: 5 tác vụ (Long-Document QA, Multi-turn Conversation, Needle-in-Haystack, Agent Tool-Calling, Cross-lingual). Metrics: ROUGE-L, BLEU, BERTScore, Exact Match, Token-F1, **Tone Preservation Rate**, Harmonized Score. Giao thức đầy đủ ở [`docs/benchmark.md`](docs/benchmark.md).

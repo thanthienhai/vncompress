@@ -327,7 +327,9 @@ class VCCBench:
             start_time = time.time()
             # `query`: without it, LACC's query-relevance boost and
             # SelectiveContext's embedding path never run in any benchmark.
-            result = compressor.compress(input_ids, query=sample.query)
+            # `task`: lets LACC's task-gated tone signal (E8) know whether this
+            # is a surface task. Compressors that don't accept it ignore it via **kwargs.
+            result = compressor.compress(input_ids, query=sample.query, task=task_name)
             comp_time = (time.time() - start_time) * 1000
 
             metric = CompressionMetrics(
@@ -562,9 +564,17 @@ REGISTRY_METHOD_CATEGORY: Dict[str, MethodCategory] = {
     "none": MethodCategory.BASELINE,
     "random": MethodCategory.BASELINE,
     "llmlingua": MethodCategory.BASELINE,
+    "llmlingua_contrastive": MethodCategory.BASELINE,  # LongLLMLingua (wave-2 E1/E11)
     "snapkv": MethodCategory.BASELINE,
     "selective": MethodCategory.BASELINE,
+    "encoder": MethodCategory.BASELINE,                # LLMLingua-2 / PhoBERT-style (wave-2 E6/E11)
     "lacc": MethodCategory.PROPOSED,
+    # wave-2 LACC arms (E1/E2/E5/E7): proposed variants of the LACC method
+    "lacc_ppl_contrastive": MethodCategory.PROPOSED,
+    "lacc_ppl_morph": MethodCategory.PROPOSED,
+    "lacc_sentence": MethodCategory.PROPOSED,
+    "lacc_classprop": MethodCategory.PROPOSED,
+    "lacc_tone_gated": MethodCategory.PROPOSED,
 }
 
 ABLATION_ARM_CATEGORY: Dict[str, MethodCategory] = {

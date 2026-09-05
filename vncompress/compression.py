@@ -241,9 +241,28 @@ def _normalize(scores: torch.Tensor) -> torch.Tensor:
     return torch.full_like(scores, 0.5)
 
 
+# Perplexity-scorer windowing defaults (wave-2 E3, see research/wave2_proposals.md
+# §6.2 of the wave-1 report): a 2048-token window with only 256-token overlap
+# (stride = window - 256) matches LLMLingua and cuts the forward-pass count
+# ~6-7x versus the old 512/stride-256 (50% overlap) configuration, which put
+# every token through the model ~2x for no quality gain. `DEFAULT_PPL_OVERLAP`
+# is the number of left-context tokens each window shares with the previous one.
+DEFAULT_PPL_WINDOW = 2048
+DEFAULT_PPL_OVERLAP = 256
+
+
+def _default_stride(window_size: int) -> int:
+    """Stride for a given window: `window - DEFAULT_PPL_OVERLAP`, clamped to a
+    valid range. Overlap keeps left context at window boundaries without the
+    old 50%-overlap redundancy."""
+    if window_size <= 1:
+        return 1
+    return max(1, min(window_size - DEFAULT_PPL_OVERLAP, window_size - 1))
+
+
 @torch.no_grad()
 def sliding_window_perplexity(
-    model, input_ids: Sequence[int], window_size: int = 512, stride: Optional[int] = None,
+    model, input_ids: Sequence[int], window_size: int = DEFAULT_PPL_WINDOW, stride: Optional[int] = None,
 ) -> torch.Tensor:
     """importance(t_i) = -log P(t_i | context), scored over overlapping
     sliding windows of at most `window_size` tokens so tokens after the first
@@ -256,7 +275,7 @@ def sliding_window_perplexity(
         return torch.zeros(0)
     device = next(model.parameters()).device
     if stride is None:
-        stride = max(1, window_size // 2)
+        stride = _default_stride(window_size)
     stride = max(1, min(stride, window_size - 1)) if window_size > 1 else 1
 
     scores = torch.zeros(n)
@@ -286,6 +305,85 @@ def sliding_window_perplexity(
             break
         begin += stride
     return scores
+
+
+@torch.no_grad()
+def question_conditioned_perplexity(
+    model, input_ids: Sequence[int], question_ids: Sequence[int],
+    window_size: int = DEFAULT_PPL_WINDOW, stride: Optional[int] = None,
+) -> torch.Tensor:
+    """-log P(t_i | question, left_context) for each context token: the
+    question is prepended to every window so each context token is scored with
+    the question in view (LongLLMLingua's question-aware conditioning,
+    arxiv:2310.06839). Returns a length-n tensor of conditioned NLLs, NOT
+    normalized. Falls back to plain `sliding_window_perplexity` when there is
+    no question."""
+    n = len(input_ids)
+    if n == 0:
+        return torch.zeros(0)
+    q = list(question_ids or [])
+    if not q:
+        return sliding_window_perplexity(model, input_ids, window_size, stride)
+
+    device = next(model.parameters()).device
+    if stride is None:
+        stride = _default_stride(window_size)
+    stride = max(1, min(stride, window_size - 1)) if window_size > 1 else 1
+    # Leave room for the question prefix inside each window.
+    ctx_window = max(1, window_size - len(q))
+    ctx_stride = max(1, min(stride, ctx_window - 1)) if ctx_window > 1 else 1
+    qn = len(q)
+
+    scores = torch.full((n,), float('nan'))
+    begin, prev_end = 0, 0
+    while begin < max(n - 1, 1) or begin == 0:
+        end = min(begin + ctx_window, n)
+        chunk = list(input_ids[begin:end])
+        if not chunk:
+            break
+        seq = q + chunk
+        input_tensor = torch.tensor([seq], device=device)
+        logits = model(input_tensor).logits
+        log_probs = F.log_softmax(logits[:, :-1, :], dim=-1)
+        token_lp = log_probs.gather(-1, input_tensor[:, 1:].unsqueeze(-1)).squeeze(-1)[0]
+        importance = (-token_lp).cpu()  # length len(seq) - 1
+
+        target_start = 0 if begin == 0 else prev_end
+        for j in range(len(chunk)):
+            pos = begin + j
+            pred_idx = qn + j - 1  # prediction index for context token j (>= 0 since qn >= 1)
+            if target_start <= pos < n and 0 <= pred_idx < importance.numel():
+                scores[pos] = importance[pred_idx]
+
+        prev_end = end
+        if end >= n:
+            break
+        begin += ctx_stride
+
+    if torch.isnan(scores).any():
+        valid = scores[~torch.isnan(scores)]
+        scores[torch.isnan(scores)] = valid.median() if valid.numel() else torch.tensor(0.0)
+    return scores
+
+
+@torch.no_grad()
+def contrastive_perplexity(
+    model, input_ids: Sequence[int], question_ids: Sequence[int],
+    window_size: int = DEFAULT_PPL_WINDOW, stride: Optional[int] = None,
+) -> torch.Tensor:
+    """LongLLMLingua contrastive importance: plain_ppl(t) - conditioned_ppl(t).
+    A token whose perplexity DROPS most once the question is in view is the
+    one the question makes most predictable -- i.e. most relevant to it.
+    Higher = more query-relevant. Returns a length-n tensor, NOT normalized.
+    Directly targets the wave-1 'kept the tone, deleted the answer sentence'
+    failure by scoring tokens against the question instead of the context alone."""
+    if len(input_ids) == 0:
+        return torch.zeros(0)
+    if not question_ids:
+        return sliding_window_perplexity(model, input_ids, window_size, stride)
+    plain = sliding_window_perplexity(model, input_ids, window_size, stride)
+    conditioned = question_conditioned_perplexity(model, input_ids, question_ids, window_size, stride)
+    return plain - conditioned
 
 
 def _decode_tokens(tokenizer, input_ids: Sequence[int]) -> List[str]:
@@ -337,22 +435,28 @@ class LLMLinguaCompressor(BaseCompressor):
 
     def __init__(
         self, tokenizer, model=None, small_model=None, config: Optional[CompressionConfig] = None, device: str = 'cuda',
+        contrastive: bool = False,
     ):
         super().__init__(tokenizer, model, config)
         self.small_model = small_model or model
         self.device = device
+        # contrastive=True -> LongLLMLingua-style question-conditioned scoring
+        # (needs a `query` at compress() time); False -> plain LLMLingua.
+        self.contrastive = contrastive
         if self.small_model:
             self.small_model.eval()
 
     def get_name(self) -> str:
-        return "LLMLingua"
+        return "LongLLMLingua" if self.contrastive else "LLMLingua"
 
-    def _compute_token_importance(self, input_ids: List[int]) -> torch.Tensor:
+    def _compute_token_importance(self, input_ids: List[int], question_ids: Optional[List[int]] = None) -> torch.Tensor:
         if self.small_model is None:
             raise RuntimeError("No model available for perplexity computation")
+        if self.contrastive and question_ids:
+            return _normalize(contrastive_perplexity(self.small_model, input_ids, question_ids))
         return _normalize(sliding_window_perplexity(self.small_model, input_ids))
 
-    def _sentence_level_filter(self, input_ids: List[int], budget: int) -> List[int]:
+    def _sentence_level_filter(self, input_ids: List[int], budget: int, question_ids: Optional[List[int]] = None) -> List[int]:
         """Coarse sentence-level filtering: if the input has 4+ sentences,
         drop the least-important ones (mean token importance) before
         token-level compression."""
@@ -372,7 +476,7 @@ class LLMLinguaCompressor(BaseCompressor):
             return input_ids
 
         all_ids_flat = [tid for sent in sentences for tid in sent]
-        importance = self._compute_token_importance(all_ids_flat)
+        importance = self._compute_token_importance(all_ids_flat, question_ids)
 
         offset = 0
         sent_importance = []
@@ -390,17 +494,21 @@ class LLMLinguaCompressor(BaseCompressor):
             result.extend(sentences[i])
         return result
 
-    def compress(self, input_ids: List[int], **kwargs) -> CompressionResult:
+    def compress(self, input_ids: List[int], query: Optional[str] = None, **kwargs) -> CompressionResult:
         start = time.time()
         n = len(input_ids)
         if not self.validate_input(input_ids):
             return self._build_result(list(input_ids), n, (time.time() - start) * 1000)
 
+        question_ids = None
+        if self.contrastive and query:
+            question_ids = self.tokenizer.encode(query, add_special_tokens=False)
+
         target_len = max(int(n / self.config.target_ratio), self.config.min_compressed_length)
-        filtered_ids = self._sentence_level_filter(input_ids, target_len)
+        filtered_ids = self._sentence_level_filter(input_ids, target_len, question_ids)
 
         if len(filtered_ids) > target_len * 1.5:
-            importance = self._compute_token_importance(filtered_ids)
+            importance = self._compute_token_importance(filtered_ids, question_ids)
             k = self.config.keep_boundary_tokens
             mid_start, mid_end = k, len(filtered_ids) - k
             if mid_start < mid_end:
@@ -724,12 +832,12 @@ class LACCScorer:
     pools back onto its own tokenizer's token spans.
     """
 
-    def __init__(self, model, tokenizer, tone_probe=None, window_size: int = 512, stride: Optional[int] = None):
+    def __init__(self, model, tokenizer, tone_probe=None, window_size: int = DEFAULT_PPL_WINDOW, stride: Optional[int] = None):
         self.model = model
         self.tokenizer = tokenizer
         self.tone_probe = tone_probe  # linguistics.PhonologicalConsistencyLoss, or None
         self.window_size = window_size
-        self.stride = stride if stride is not None else max(1, window_size // 2)
+        self.stride = stride if stride is not None else _default_stride(window_size)
 
     @torch.no_grad()
     def _token_signals(self, ids: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -799,9 +907,23 @@ class LACCScorer:
                     cursor = found + len(piece)
             return ids, offsets
 
-    def char_signals(self, text: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    @torch.no_grad()
+    def _conditioned_ppl(self, ids: Sequence[int], question_ids: Sequence[int]) -> torch.Tensor:
+        """Per-SLM-token conditioned perplexity (question prepended to each
+        window) -- the scorer-tokenizer analogue of
+        `question_conditioned_perplexity`, used to build the contrastive
+        (query-aware) perplexity signal."""
+        return question_conditioned_perplexity(
+            self.model, list(ids), list(question_ids), window_size=self.window_size, stride=self.stride,
+        )
+
+    def char_signals(self, text: str, question: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-character (perplexity, model-tone); NaN where no scorer token
-        covers the character, so the caller can distinguish that from a real 0."""
+        covers the character, so the caller can distinguish that from a real 0.
+
+        When `question` is given, the perplexity channel carries the LongLLMLingua
+        contrastive score plain_ppl - conditioned_ppl (higher = more relevant to
+        the question) instead of plain perplexity."""
         ppl_char = torch.full((len(text),), float('nan'))
         tone_char = torch.full((len(text),), float('nan'))
         if not text:
@@ -810,6 +932,10 @@ class LACCScorer:
         if not ids:
             return ppl_char, tone_char
         ppl, tone = self._token_signals(ids)
+        if question:
+            question_ids = self.tokenizer.encode(question, add_special_tokens=False)
+            if question_ids:
+                ppl = ppl - self._conditioned_ppl(ids, question_ids)
         for (start, end), pv, tv in zip(offsets, ppl.tolist(), tone.tolist()):
             if end > start:
                 ppl_char[start:end] = pv
@@ -879,11 +1005,23 @@ class LACCCompressor(BaseCompressor):
         weights: Optional[ScoreWeights] = None,
         quality_gate: Optional[SemanticQualityGate] = None,
         query_boost: float = 1.5,
+        contrastive_ppl: bool = False,
+        morph_combine: str = 'add',
+        selection_unit: str = 'token',
+        budget_mode: str = 'global',
+        tone_task_gate: bool = False,
+        surface_tasks: Optional[Sequence[str]] = None,
         name: Optional[str] = None,
     ):
         super().__init__(tokenizer, model, config)
         if tone_source not in ('rule', 'model'):
             raise ValueError(f"tone_source must be 'rule' or 'model'; got {tone_source!r}")
+        if morph_combine not in ('add', 'multiply'):
+            raise ValueError(f"morph_combine must be 'add' or 'multiply'; got {morph_combine!r}")
+        if selection_unit not in ('token', 'sentence'):
+            raise ValueError(f"selection_unit must be 'token' or 'sentence'; got {selection_unit!r}")
+        if budget_mode not in ('global', 'class_proportional'):
+            raise ValueError(f"budget_mode must be 'global' or 'class_proportional'; got {budget_mode!r}")
 
         self.device = device
         self.use_perplexity = use_perplexity
@@ -896,6 +1034,15 @@ class LACCCompressor(BaseCompressor):
         self.merge_redup_pairs = merge_redup_pairs
         self.quality_gate = quality_gate
         self.default_query_boost = query_boost
+        # --- wave-2 knobs (see research/wave2_proposals.md) ---
+        self.contrastive_ppl = contrastive_ppl          # E1: query-conditioned perplexity
+        self.morph_combine = morph_combine              # E2: 'multiply' = morphology as a factor, not a summand
+        self.selection_unit = selection_unit            # E5: 'sentence' = keep/drop whole sentences
+        self.budget_mode = budget_mode                  # E7: 'class_proportional' = per-word-class quotas
+        self.tone_task_gate = tone_task_gate            # E8: enable tone only for surface tasks
+        self.surface_tasks = set(surface_tasks) if surface_tasks is not None else {
+            'cross_lingual', 'translation', 'transliteration', 'quotation',
+        }
         self._name = name
 
         self.tone_analyzer: VietnameseToneAnalyzer = get_tone_analyzer(alpha=alpha, beta=beta, gamma=gamma, tone_contrast=tone_contrast)
@@ -920,12 +1067,17 @@ class LACCCompressor(BaseCompressor):
             return self._name
         parts = []
         if self.use_perplexity:
-            parts.append('ppl' + ('-slm' if self.scorer else ''))
+            parts.append('ppl' + ('-slm' if self.scorer else '') + ('-cx' if self.contrastive_ppl else ''))
         if self.use_tone:
-            parts.append('tone' + ('-probe' if self.tone_source == 'model' else ''))
+            parts.append('tone' + ('-probe' if self.tone_source == 'model' else '') + ('-gated' if self.tone_task_gate else ''))
         if self.use_morphology:
-            parts.append('morph')
-        return 'LACC[' + '+'.join(parts) + ']'
+            parts.append('morph' + ('*' if self.morph_combine == 'multiply' else ''))
+        suffix = ''
+        if self.selection_unit == 'sentence':
+            suffix += '|sent'
+        elif self.budget_mode == 'class_proportional':
+            suffix += '|classprop'
+        return 'LACC[' + '+'.join(parts) + ']' + suffix
 
     def _compute_model_tone_weights(self, input_ids: List[int]) -> torch.Tensor:
         """Trained tone probe scored on `model`'s own hidden states (same
@@ -937,7 +1089,10 @@ class LACCCompressor(BaseCompressor):
         self._tone_probe.to(hidden_states.device)
         return self._tone_probe.score_importance(hidden_states).squeeze(0).cpu()
 
-    def compress(self, input_ids: List[int], query: Optional[str] = None, query_boost: Optional[float] = None, **kwargs) -> CompressionResult:
+    def compress(
+        self, input_ids: List[int], query: Optional[str] = None, query_boost: Optional[float] = None,
+        task: Optional[str] = None, **kwargs,
+    ) -> CompressionResult:
         start = time.time()
         n = len(input_ids)
         if not self.validate_input(input_ids):
@@ -945,13 +1100,36 @@ class LACCCompressor(BaseCompressor):
 
         tokens = _decode_tokens(self.tokenizer, input_ids)
 
+        # E8: task-gated tone -- keep the tone signal only for tasks where the
+        # surface string IS the output (translation/transliteration/quotation/
+        # cross-lingual). Elsewhere tone anti-correlates with answer quality
+        # (wave-1 report §8.4), so gate it off for this call.
+        effective_use_tone = self.use_tone
+        tone_gated_off = False
+        if self.tone_task_gate and self.use_tone and task is not None and task not in self.surface_tasks:
+            effective_use_tone = False
+            tone_gated_off = True
+
         # --- perplexity signal ------------------------------------------------
+        # E1: when contrastive_ppl is on and a query is present, score tokens by
+        # how much the question conditions them (LongLLMLingua), not by plain
+        # context perplexity.
+        want_contrastive = self.contrastive_ppl and bool(query)
         if self.use_perplexity and self.scorer is not None:
             text, spans, _ = _token_spans(self.tokenizer, input_ids)
-            ppl_char, _ = self.scorer.char_signals(text)
+            # Only pass `question` when contrastive scoring is requested, so
+            # scorers with a plain char_signals(text) signature still work.
+            if want_contrastive:
+                ppl_char, _ = self.scorer.char_signals(text, question=query)
+            else:
+                ppl_char, _ = self.scorer.char_signals(text)
             ppl_scores = _pool_char_to_token(ppl_char, spans, n, fill_neutral=True)
         elif self.use_perplexity and self.model is not None:
-            ppl_scores = sliding_window_perplexity(self.model, input_ids)
+            if want_contrastive:
+                q_ids = self.tokenizer.encode(query, add_special_tokens=False)
+                ppl_scores = contrastive_perplexity(self.model, input_ids, q_ids)
+            else:
+                ppl_scores = sliding_window_perplexity(self.model, input_ids)
         else:
             ppl_scores = torch.full((n,), 0.5)
 
@@ -959,7 +1137,7 @@ class LACCCompressor(BaseCompressor):
         tone_infos = self.tone_analyzer.analyze_tokens(tokens, window_size=self.tone_window)
         rule_tone_scores = torch.tensor([max(0.5, min(3.0, info.preservation_weight)) for info in tone_infos]) \
             if tone_infos else torch.ones(n)
-        if not self.use_tone:
+        if not effective_use_tone:
             tone_scores = torch.ones(n)
         elif self.tone_source == 'model' and self.scorer is not None and self.scorer.tone_probe is not None:
             text, spans, _ = _token_spans(self.tokenizer, input_ids)
@@ -991,17 +1169,39 @@ class LACCCompressor(BaseCompressor):
         else:
             morph_scores = torch.ones(n)
 
-        combined = (
-            self.weights.perplexity * _normalize(ppl_scores)
-            + self.weights.tone * _normalize(tone_scores)
-            + self.weights.morphology * _normalize(morph_scores)
-        )
+        # E2: morphology as a multiplicative factor rather than an additive
+        # summand. The wave-1 blend diluted the strong perplexity signal by
+        # averaging it with weaker ones (report §8.3); multiplying keeps
+        # perplexity's ranking and lets morphology only re-weight it.
+        if self.use_morphology and self.morph_combine == 'multiply':
+            base_w = ScoreWeights(
+                perplexity=self.weights.perplexity if self.use_perplexity else 0.0,
+                tone=self.weights.tone if effective_use_tone else 0.0,
+                morphology=1e-9,  # placeholder; morphology applied multiplicatively below
+            )
+            base = base_w.perplexity * _normalize(ppl_scores) + base_w.tone * _normalize(tone_scores)
+            # Map normalized morphology to a [0.5, 1.5] gain so a factor never
+            # zeroes a token outright.
+            morph_gain = 0.5 + _normalize(morph_scores)
+            combined = base * morph_gain
+        else:
+            combined = (
+                self.weights.perplexity * _normalize(ppl_scores)
+                + self.weights.tone * _normalize(tone_scores)
+                + self.weights.morphology * _normalize(morph_scores)
+            )
 
         if query:
             qw = torch.tensor(compute_query_relevance_weights(tokens, query, boost=query_boost or self.default_query_boost))
             combined = combined * qw
 
-        retained_indices = self.select_with_boundary(combined.tolist(), n)
+        # --- selection ----------------------------------------------------------
+        if self.selection_unit == 'sentence':
+            retained_indices = self._select_sentences(input_ids, combined.tolist(), n)
+        elif self.budget_mode == 'class_proportional' and self.use_morphology:
+            retained_indices = self._select_class_proportional(word_infos, combined.tolist(), n)
+        else:
+            retained_indices = self.select_with_boundary(combined.tolist(), n)
 
         gate_info: Dict = {}
         if self.quality_gate is not None:
@@ -1012,11 +1212,16 @@ class LACCCompressor(BaseCompressor):
             retained_set = set(retained_indices)
 
         metadata = {
-            'signals': {'perplexity': self.use_perplexity, 'tone': self.use_tone, 'morphology': self.use_morphology},
+            'signals': {'perplexity': self.use_perplexity, 'tone': effective_use_tone, 'morphology': self.use_morphology},
             'weights': self.weights.to_dict(),
-            'tone_source': self.tone_source if self.use_tone else None,
+            'tone_source': self.tone_source if effective_use_tone else None,
             'tone_preservation_rate': compute_tone_preservation_rate(tone_infos, retained_set),
             'query_applied': bool(query),
+            'contrastive_ppl': want_contrastive,
+            'morph_combine': self.morph_combine,
+            'selection_unit': self.selection_unit,
+            'budget_mode': self.budget_mode,
+            'tone_gated_off': tone_gated_off,
             'redup_pairs_found': n_redup_pairs,
         }
         if gate_info:
@@ -1024,11 +1229,110 @@ class LACCCompressor(BaseCompressor):
 
         return self._build_result(compressed, n, (time.time() - start) * 1000, metadata)
 
+    # ------------------------------------------------------------------------
+    # Selection strategies (wave-2 E5 / E7)
+    # ------------------------------------------------------------------------
+
+    def _sentence_spans(self, input_ids: List[int]) -> List[Tuple[int, int]]:
+        """Split a token sequence into (start, end) sentence spans on Vietnamese
+        sentence-final punctuation (or every ~200 tokens as a hard cap)."""
+        enders: set = set()
+        for tok in ('.', '!', '?', '\n', '。', '！', '？', ';'):
+            try:
+                enders.update(self.tokenizer.encode(tok, add_special_tokens=False))
+            except Exception:
+                pass
+        spans, s = [], 0
+        for i, tid in enumerate(input_ids):
+            if tid in enders or (i - s) >= 200:
+                spans.append((s, i + 1))
+                s = i + 1
+        if s < len(input_ids):
+            spans.append((s, len(input_ids)))
+        return spans or [(0, len(input_ids))]
+
+    def _select_sentences(self, input_ids: List[int], scores: Sequence[float], n: int) -> List[int]:
+        """E5: keep whole sentences (ranked by mean token score) until the token
+        budget is reached, instead of scattering individual tokens -- so the
+        sentence carrying the answer survives as a unit. Falls back to
+        token-level selection if there are fewer than 3 sentences."""
+        spans = self._sentence_spans(input_ids)
+        if len(spans) < 3:
+            return self.select_with_boundary(scores, n)
+        target_len = min(self.target_length(n), n)
+        first, last = spans[0], spans[-1]
+        kept: set = set(range(first[0], first[1])) | set(range(last[0], last[1]))
+        middle = spans[1:-1]
+        ranked = sorted(middle, key=lambda sp: sum(scores[sp[0]:sp[1]]) / max(1, sp[1] - sp[0]), reverse=True)
+        for sp in ranked:
+            if len(kept) >= target_len:
+                break
+            kept.update(range(sp[0], sp[1]))
+        return sorted(kept)
+
+    def _select_class_proportional(self, word_infos, scores: Sequence[float], n: int) -> List[int]:
+        """E7: allocate the token budget across morphology classes by each
+        class's retention ratio (MorphologyConfig r_*), then keep the
+        top-scoring tokens WITHIN each class -- implementing the class-
+        proportional budgeting the paper described but the code never had.
+        Boundary tokens are always kept."""
+        from .linguistics import WordClass
+
+        k = max(0, min(self.config.keep_boundary_tokens, n // 2))
+        target_len = min(self.target_length(n), n)
+        boundary = set(range(k)) | set(range(max(k, n - k), n))
+        mid = [i for i in range(n) if i not in boundary]
+        budget = max(0, target_len - len(boundary))
+        if budget <= 0 or not mid:
+            return sorted(boundary) if boundary else self.select_with_boundary(scores, n)
+
+        r_map = {
+            WordClass.FUNC: self.morph_config.r_func, WordClass.CONTENT: self.morph_config.r_content,
+            WordClass.REDUP: self.morph_config.r_redup, WordClass.COMPOUND: self.morph_config.r_compound,
+            WordClass.SINO: self.morph_config.r_sino, WordClass.OTHER: self.morph_config.r_other,
+        }
+        by_class: Dict[Any, List[int]] = {}
+        for i in mid:
+            wc = word_infos[i].word_class if i < len(word_infos) else WordClass.OTHER
+            by_class.setdefault(wc, []).append(i)
+
+        # Desired per-class weight = class size * its retention ratio, normalized
+        # to the available middle budget.
+        weights = {wc: len(idxs) * r_map.get(wc, 0.5) for wc, idxs in by_class.items()}
+        total_w = sum(weights.values()) or 1.0
+        kept = set(boundary)
+        remaining = budget
+        # Largest classes first so rounding leftovers land where there's room.
+        for wc in sorted(by_class, key=lambda c: weights[c], reverse=True):
+            idxs = by_class[wc]
+            quota = min(len(idxs), int(round(budget * weights[wc] / total_w)), remaining)
+            if quota <= 0:
+                continue
+            top = sorted(sorted(idxs, key=lambda i: scores[i], reverse=True)[:quota])
+            kept.update(top)
+            remaining -= len(top)
+        # Spend any leftover budget on the globally highest-scoring leftovers.
+        if remaining > 0:
+            leftovers = sorted((i for i in mid if i not in kept), key=lambda i: scores[i], reverse=True)
+            kept.update(leftovers[:remaining])
+        return sorted(kept)
+
 
 # ============================================================================
 # Method registry
 # ============================================================================
 
+def _load_encoder_compressor_cls() -> type:
+    """Lazy import of the wave-2 E6 encoder-classifier compressor so its
+    (heavier) transformers-encoder dependency is only touched when the
+    'encoder' method is actually requested."""
+    from .encoder_compression import EncoderClassifierCompressor
+    return EncoderClassifierCompressor
+
+
+# 'encoder' (wave-2 E6, LLMLingua-2 / PhoBERT-style token classification) is
+# registered lazily -- its class lives in vncompress/encoder_compression.py and
+# is only imported when requested (see _load_encoder_compressor_cls).
 METHODS: Dict[str, type] = {
     'none': NoCompressor,
     'random': RandomCompressor,
@@ -1038,6 +1342,11 @@ METHODS: Dict[str, type] = {
     'lacc': LACCCompressor,
 }
 
+# Methods whose class is resolved lazily (not eagerly importable at module load).
+LAZY_METHODS: Dict[str, Callable[[], type]] = {
+    'encoder': _load_encoder_compressor_cls,
+}
+
 
 def create_compressor(
     method: str, tokenizer, model=None, config: Optional[CompressionConfig] = None, device: str = 'cuda', **kwargs,
@@ -1045,8 +1354,11 @@ def create_compressor(
     """Build a compressor by name. `kwargs` are forwarded to the class --
     for 'lacc' that includes use_perplexity/use_tone/use_morphology/scorer/
     tone_source/... (see LACCCompressor)."""
+    if method in LAZY_METHODS:
+        cls = LAZY_METHODS[method]()
+        return cls(tokenizer, model=model, config=config, device=device, **kwargs)
     if method not in METHODS:
-        raise ValueError(f"Unknown method: {method!r}. Available: {list(METHODS)}")
+        raise ValueError(f"Unknown method: {method!r}. Available: {list(METHODS) + list(LAZY_METHODS)}")
     cls = METHODS[method]
     if method in ('none', 'random'):
         return cls(tokenizer, model=model, config=config)
