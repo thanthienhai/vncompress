@@ -23,18 +23,18 @@ except ImportError:
     pass
 
 try:
-    from vncompress.morphology import merge_policy as _merge_policy
+    from vncompress import linguistics as _linguistics
 
     # get_morphology_analyzer() is a lazily-created module-level singleton
-    # (vncompress/morphology/merge_policy.py). Its default
-    # use_word_segmentation=True path loads underthesea's word segmenter,
-    # which is slow/network-dependent on first use and was observed to
-    # hang or crash the process intermittently in this environment.
-    # Pre-seeding the singleton here -- before any test triggers its lazy
-    # creation -- keeps the whole suite on the fast, deterministic,
-    # dictionary-only classification path. Tests that specifically need a
-    # differently-configured analyzer construct MorphologyAnalyzer directly.
-    _merge_policy._default_morph_analyzer = _merge_policy.MorphologyAnalyzer(
+    # (vncompress/linguistics.py). Its default use_word_segmentation=True
+    # path loads underthesea's word segmenter, which is slow/network-dependent
+    # on first use and was observed to hang or crash the process
+    # intermittently in this environment. Pre-seeding the singleton here --
+    # before any test triggers its lazy creation -- keeps the whole suite on
+    # the fast, deterministic, dictionary-only classification path. Tests
+    # that specifically need a differently-configured analyzer construct
+    # MorphologyAnalyzer directly.
+    _linguistics._default_morph_analyzer = _linguistics.MorphologyAnalyzer(
         use_pos_tagger=False, use_word_segmentation=False
     )
 except ImportError:

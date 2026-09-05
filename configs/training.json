@@ -1,0 +1,7 @@
+{
+  "seed": 42,
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "device": "cuda",
+  "dtype": "float16",
+  "output_dir": "./models/lacc"
+}

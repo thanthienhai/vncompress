@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate or verify vcc_bench_data/CHECKSUMS.json.
+"""Generate or verify data/benchmark/CHECKSUMS.json.
 
 Resolves the "checksum/hash cho dataset artifacts quan trong" item of P1
 issue #8 (dataset provenance): a static hash committed to the repo would
@@ -18,7 +18,7 @@ import json
 import os
 import sys
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'vcc_bench_data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'benchmark')
 MANIFEST_PATH = os.path.join(DATA_DIR, 'CHECKSUMS.json')
 
 

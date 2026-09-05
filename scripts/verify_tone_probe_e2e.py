@@ -4,13 +4,13 @@
 This is the measurement the paper (Sect. 6, limitation #2) lists as pending:
 the Vietnamese SLM tone probe is trained and evaluated in isolation, but its
 effect on end-to-end compression *quality* had never been measured, because
-nothing wired it into the compressor. `compressors/slm_tone_probe.py` closes
-that wiring; this script produces the number.
+nothing wired it into the compressor. `LACCCompressor(tone_source='model')`
+(see vncompress/compression.py) closes that wiring; this script produces the number.
 
 It runs a controlled A/B on VCC-Bench:
 
-  * slm_tone_probe        tone term = trained probe   1 + max softmax(MLP(h_i))
-  * slm_tone_probe_rule   tone term = dictionary heuristic (preservation weight)
+  * lacc_tone_probe   tone term = trained probe   1 + max softmax(MLP(h_i))
+  * lacc_tone_rule    tone term = dictionary heuristic (preservation weight)
 
 Everything else is held fixed -- the SAME fine-tuned SLM (loaded once and shared
 between both arms), the same perplexity signal, the same morphology signal, the
@@ -39,11 +39,12 @@ and recent empirical studies):
 Usage:
   python scripts/verify_tone_probe_e2e.py \
       --generation-model Qwen/Qwen2.5-0.5B-Instruct \
-      --scorer-adapter-dir trained_slm/final \
-      --tone-probe-path   trained_slm/tone_probe.pt \
-      --ratios 2,4 --max-samples 40 --bertscore --output-dir results_tone_probe_e2e
+      --scorer-adapter-dir models/slm/final \
+      --tone-probe-path   models/slm/tone_probe.pt \
+      --ratios 2,4 --max-samples 40 --bertscore --output-dir results/tone_probe_e2e
 
-No training is performed; the SLM adapter + tone probe must already exist.
+No training is performed; the SLM adapter + tone probe must already exist
+(see `train.py --mode slm`).
 """
 import argparse
 import json
@@ -117,8 +118,8 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--generation-model", default="Qwen/Qwen2.5-0.5B-Instruct")
-    ap.add_argument("--scorer-adapter-dir", default="trained_slm/final")
-    ap.add_argument("--tone-probe-path", default="trained_slm/tone_probe.pt")
+    ap.add_argument("--scorer-adapter-dir", default="models/slm/final")
+    ap.add_argument("--tone-probe-path", default="models/slm/tone_probe.pt")
     ap.add_argument("--data-path", default=None)
     ap.add_argument("--ratios", default="2,4")
     ap.add_argument("--max-samples", type=int, default=40)
@@ -130,7 +131,7 @@ def main():
                     help="Load the SLM scorer in 4-bit NF4 to fit a large scorer alongside "
                          "the generation model.")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--output-dir", default="results_tone_probe_e2e")
+    ap.add_argument("--output-dir", default="results/tone_probe_e2e")
     ap.add_argument("--bertscore", action="store_true",
                     help="Also compute multilingual BERTScore (downloads a BERT "
                          "model; slower). Off by default so the script is light.")
@@ -143,26 +144,24 @@ def main():
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from vncompress.compressors import create_compressor
-    from vncompress.compressors.slm_tone_probe import (
-        SLMToneProbeCompressor,
-        SLMToneProbeScorer,
-    )
+    from vncompress.compression import create_compressor, LACCCompressor
     from vncompress.config import ExperimentConfig, save_run_metadata, set_seed
-    from vncompress.evaluation.metrics import (
+    from vncompress.evaluation import (
+        VCCBench,
+        VCCBenchConfig,
         compute_bert_score,
         compute_bleu,
         compute_exact_match,
         compute_needle_recall,
         compute_rouge_l,
         compute_token_f1,
+        paired_bootstrap_delta,
     )
-    from vncompress.evaluation.significance import paired_bootstrap_delta
-    from vncompress.evaluation import VCCBench, VCCBenchConfig
-    from vncompress.tone_aware import get_tone_analyzer
+    from vncompress.linguistics import get_tone_analyzer
+    from vncompress.models import load_scorer
 
     ratios = [float(r) for r in args.ratios.split(",")]
-    arms = ["none", "random", "slm_tone_probe_rule", "slm_tone_probe"]
+    arms = ["none", "random", "lacc_tone_rule", "lacc_tone_probe"]
     os.makedirs(args.output_dir, exist_ok=True)
     save_run_metadata(args.output_dir, ExperimentConfig(
         model=args.generation_model, device=args.device, seed=args.seed,
@@ -180,14 +179,14 @@ def main():
             args.generation_model, trust_remote_code=True, torch_dtype=torch.float16,
         )
         if args.device == "cuda":
-            gen_model = gen_model.to("cuda")  # no device_map, see run_benchmark.py
+            gen_model = gen_model.to("cuda")  # no device_map, see docs/benchmark.md
         gen_model.eval()
     set_seed(args.seed)
 
     # --- one shared SLM scorer for both tone arms (controlled A/B) -------------
     print(f"Loading SLM tone-probe scorer once: {args.scorer_adapter_dir} + {args.tone_probe_path}")
-    shared_scorer = SLMToneProbeScorer.from_pretrained(
-        args.scorer_adapter_dir, args.tone_probe_path, use_adapter=True, device=args.device,
+    shared_scorer = load_scorer(
+        args.scorer_adapter_dir, tone_probe_path=args.tone_probe_path, use_adapter=True, device=args.device,
         dtype=torch.bfloat16 if args.scorer_dtype == "bfloat16" else torch.float32,
         load_4bit=args.scorer_4bit,
     )
@@ -195,8 +194,8 @@ def main():
     def make_arm(method):
         if method in ("none", "random"):
             return create_compressor(method, gen_tokenizer, None, config=None, device=args.device)
-        tone_source = "model" if method == "slm_tone_probe" else "rule"
-        return SLMToneProbeCompressor(
+        tone_source = "model" if method == "lacc_tone_probe" else "rule"
+        return LACCCompressor(
             gen_tokenizer, model=None, config=None, device=args.device,
             scorer=shared_scorer, tone_source=tone_source, name=method,
         )
@@ -207,7 +206,7 @@ def main():
     # --- samples ---------------------------------------------------------------
     default_data = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "vcc_bench_data", "vcc_bench_v1.json",
+        "data", "benchmark", "vcc_bench_v1.json",
     )
     bench = VCCBench.load_from_json(args.data_path or default_data,
                                     VCCBenchConfig(output_dir=args.output_dir))
@@ -318,8 +317,8 @@ def main():
     # --- headline: paired probe - rule with bootstrap CI + significance --------
     def paired_series(metric_key, ratio):
         """Align probe vs rule on the SAME sample ids at this ratio."""
-        rule = {r["sample_id"]: r.get(metric_key) for r in records["slm_tone_probe_rule"][ratio]}
-        probe = {r["sample_id"]: r.get(metric_key) for r in records["slm_tone_probe"][ratio]}
+        rule = {r["sample_id"]: r.get(metric_key) for r in records["lacc_tone_rule"][ratio]}
+        probe = {r["sample_id"]: r.get(metric_key) for r in records["lacc_tone_probe"][ratio]}
         ids = sorted(set(rule) & set(probe))
         return ([probe[i] for i in ids], [rule[i] for i in ids])
 
@@ -378,7 +377,7 @@ def main():
             row += f"{fmt(ret, pct=True)} | {fmt(c['generation_ms'])} |"
             lines.append(row)
 
-    lines.append("\n## Probe contribution: slm_tone_probe − slm_tone_probe_rule (paired)\n")
+    lines.append("\n## Probe contribution: lacc_tone_probe - lacc_tone_rule (paired)\n")
     lines.append("Δ with 95% bootstrap CI; ✓ = CI excludes 0 (significant).\n")
     lines.append("| Ratio | Metric | Δ (probe−rule) | 95% CI | p | win-rate | sig |")
     lines.append("|-------|--------|----------------|--------|---|----------|-----|")
@@ -392,7 +391,7 @@ def main():
     lines.append("\n## Per-task primary quality (task-appropriate metric)\n")
     lines.append("| Task | Metric | Ratio | none | rule | probe | Δ probe−rule |")
     lines.append("|------|--------|-------|------|------|-------|--------------|")
-    tasks_seen = sorted({r["task"] for ratio in ratios for r in records["slm_tone_probe"][ratio]}) \
+    tasks_seen = sorted({r["task"] for ratio in ratios for r in records["lacc_tone_probe"][ratio]}) \
         if not args.no_generation else []
     for task in tasks_seen:
         pm = PRIMARY_METRIC.get(task, DEFAULT_PRIMARY)
@@ -400,7 +399,7 @@ def main():
             def tv(method):
                 cell = per_task.get(method, {}).get(f"ratio_{ratio}", {}).get(task)
                 return cell["primary"] if cell else None
-            n, r, p = tv("none"), tv("slm_tone_probe_rule"), tv("slm_tone_probe")
+            n, r, p = tv("none"), tv("lacc_tone_rule"), tv("lacc_tone_probe")
             d = (p - r) if (p is not None and r is not None) else None
             lines.append(f"| {task} | {pm} | {ratio}x | {fmt(n)} | {fmt(r)} | {fmt(p)} | "
                          f"{('%+.3f' % d) if d is not None else '-'} |")

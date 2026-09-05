@@ -5,7 +5,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'vcc_bench_data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'benchmark')
 
 def main():
     path = os.path.join(DATA_DIR, 'vcc_bench_v1.json')
@@ -72,7 +72,7 @@ def main():
     print(f'  Empty references: {empty_refs}')
 
     print('\n--- Vietnamese Content Verification ---')
-    from vncompress.tone_aware.vietnamese_tones import is_vietnamese
+    from vncompress.linguistics import is_vietnamese
     vi_count = 0
     for s in samples:
         ctx = s.get('context', '')[:1000]

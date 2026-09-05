@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from transformers import AutoTokenizer  # noqa: E402
 
-from vncompress.compressors.no_model import NoModelCombinedCompressor  # noqa: E402
+from vncompress.compression import CompressionConfig, LACCCompressor  # noqa: E402
 
 
 def main() -> int:
@@ -32,8 +32,9 @@ def main() -> int:
     input_ids = tokenizer.encode(text, add_special_tokens=False)
     print(f"Encoded {len(input_ids)} tokens")
 
-    compressor = NoModelCombinedCompressor(tokenizer)
-    result = compressor.compress(input_ids, target_ratio=4.0)
+    # 0-VRAM tier: no model, no scorer -- rule-based tone + morphology only.
+    compressor = LACCCompressor(tokenizer, model=None, config=CompressionConfig(target_ratio=4.0), use_perplexity=False)
+    result = compressor.compress(input_ids)
 
     assert result.compressed_length > 0, "compression produced no tokens"
     assert result.compressed_length <= result.original_length, "compression grew the sequence"

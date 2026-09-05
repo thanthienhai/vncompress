@@ -63,7 +63,7 @@ class ExperimentConfig:
     dtype: str = "float16"        # 'float16' | 'bfloat16' | 'float32'
 
     # Data
-    data_path: Optional[str] = None   # defaults to vcc_bench_data/vcc_bench_v1.json
+    data_path: Optional[str] = None   # defaults to data/benchmark/vcc_bench_v1.json
     split: str = "full"               # VCC-Bench v1 is a single fixed eval split
                                        # (see docs/benchmark.md) -- 'full' is the
                                        # only value scripts currently support;

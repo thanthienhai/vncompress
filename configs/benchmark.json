@@ -1,0 +1,14 @@
+{
+  "seed": 42,
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "device": "cuda",
+  "dtype": "float16",
+  "data_path": "data/benchmark/vcc_bench_v1.json",
+  "split": "full",
+  "methods": ["none", "random", "llmlingua", "lacc"],
+  "compression_ratios": [2.0, 4.0, 8.0],
+  "max_new_tokens": 256,
+  "temperature": 0.0,
+  "do_sample": false,
+  "output_dir": "./results/qwen2.5-7b-vcc-bench-v1"
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired significance test between two evaluate_slm.py runs.
+"""Paired significance test between two `train.py --mode slm --validate` runs.
 
 "LoRA perplexity 110.76 vs base 148.10" is only a claim once you know the
 gap survives resampling. Both runs score the *same* held-out texts, so the
@@ -7,15 +7,15 @@ right frame is paired: resample texts (not tokens), recompute both corpus
 NLLs on the same resampled set, and look at the distribution of the gap.
 
 Refuses to compare runs whose split_fingerprint differs -- every training
-run overwrites trained_slm/final/val_split.json, so a stale dump silently
+run overwrites models/slm/final/val_split.json, so a stale dump silently
 compares different validation sets.
 
 Usage:
-    python evaluate_slm.py --adapter-dir trained_slm/final --no-adapter \
-        --dump-per-sample results_slm/base.json
-    python evaluate_slm.py --adapter-dir trained_slm/final \
-        --tone-probe trained_slm/tone_probe.pt --dump-per-sample results_slm/lora.json
-    python scripts/compare_slm_runs.py results_slm/base.json results_slm/lora.json
+    python train.py --mode slm --validate --adapter-dir models/slm/final --no-adapter \
+        --dump-per-sample results/training/base.json
+    python train.py --mode slm --validate --adapter-dir models/slm/final \
+        --tone-probe models/slm/tone_probe.pt --dump-per-sample results/training/lora.json
+    python scripts/compare_slm_runs.py results/training/base.json results/training/lora.json
 """
 import argparse
 import json
@@ -48,7 +48,7 @@ def main():
             f"Refusing to compare: the two runs scored different validation splits\n"
             f"  {args.baseline}: fingerprint={a['split_fingerprint']} n={a['num_samples']}\n"
             f"  {args.candidate}: fingerprint={b['split_fingerprint']} n={b['num_samples']}\n"
-            f"Re-run both dumps against the same trained_slm/final/val_split.json "
+            f"Re-run both dumps against the same models/slm/final/val_split.json "
             f"(it is overwritten by every training run)."
         )
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Control experiments for the Vietnamese tone probe.
 
-`evaluate_slm.py` reports how well a probe reads tone off the LoRA-adapted
+`train.py --mode slm --validate` reports how well a probe reads tone off the LoRA-adapted
 model's hidden states. On its own that number proves nothing: the label is a
 deterministic function of the token id (verified: 0 of 13,727 token ids in the
 held-out split map to more than one tone), so a zero-training lookup table
@@ -48,11 +48,13 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run_train_slm import Collator, VietnameseToneDataset, load_texts  # noqa: E402
+from vncompress.training import SLMCollator as Collator  # noqa: E402
+from vncompress.training import VietnameseToneDataset  # noqa: E402
+from vncompress.training import load_training_texts as load_texts  # noqa: E402
 
 
 def build_matching_split(corpus_path, tokenizer, max_length, expected_val):
-    """Rebuild train/val exactly as run_train_slm.py did, and verify the val
+    """Rebuild train/val exactly as vncompress.training.run_slm_training() did, and verify the val
     half matches the split saved at training time.
 
     The probe needs the TRAIN half, but val_split.json only stores val. The
@@ -156,8 +158,8 @@ def main():
     ap.add_argument("--mode", choices=["frozen_base", "lora"], required=True)
     ap.add_argument("--control-task", action="store_true",
                     help="Train on random per-token-type labels (probe selectivity control)")
-    ap.add_argument("--adapter-dir", default="./trained_slm/final")
-    ap.add_argument("--corpus", default="vcc_bench_data/training_corpus_v1.json")
+    ap.add_argument("--adapter-dir", default="./models/slm/final")
+    ap.add_argument("--corpus", default="data/benchmark/training_corpus_v1.json")
     ap.add_argument("--max-length", type=int, default=128,
                     help="Must match the value used to train the adapter")
     ap.add_argument("--epochs", type=int, default=1)
@@ -180,7 +182,7 @@ def main():
 
     from peft import PeftConfig, PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from vncompress.tone_aware import PhonologicalConsistencyLoss
+    from vncompress.linguistics import PhonologicalConsistencyLoss
 
     device = torch.device("cuda")
     peft_config = PeftConfig.from_pretrained(args.adapter_dir)

@@ -14,7 +14,7 @@ does not change the checksums/composition of the existing official
 benchmark -- pass it explicitly via `--data-path` to opt in.
 
 Samples are tagged task="long_document_qa" -- the same name the synthetic
-task uses in vcc_bench_v1.json -- because run_benchmark.py's VCCBenchConfig
+task uses in vcc_bench_v1.json -- because benchmark.py's VCCBenchConfig
 has a fixed `tasks` allow-list (no --tasks CLI flag to extend it); a
 different task name would be silently dropped with zero samples evaluated.
 This is safe because exactly one dataset file is loaded per run
@@ -22,13 +22,13 @@ This is safe because exactly one dataset file is loaded per run
 in the same run -- only reused across runs on purpose.
 
 Output schema matches the `samples` list read by
-vncompress.evaluation.metrics.VCCBench.load_from_json():
+vncompress.evaluation.VCCBench.load_from_json():
     {"task", "context", "query", "reference_answer", "char_length", ...metadata}
 
 Usage:
     python scripts/build_viquad_eval.py
     python scripts/build_viquad_eval.py --max-samples 500   # quick iteration subset
-    python run_benchmark.py --data-path vcc_bench_data/vcc_bench_uit_viquad_qa.json --config configs/example_experiment.json
+    python benchmark.py --data-path data/benchmark/vcc_bench_uit_viquad_qa.json --config configs/benchmark.json
 """
 import argparse
 import json
@@ -36,7 +36,7 @@ import os
 import random
 import time
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'vcc_bench_data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'benchmark')
 os.makedirs(DATA_DIR, exist_ok=True)
 
 TASK_NAME = "long_document_qa"  # must match VCCBenchConfig's fixed task allow-list; see module docstring
@@ -128,8 +128,8 @@ def main():
     print(f"File size: {os.path.getsize(args.output) / 1024:.1f} KB")
     print("This file is gitignored (UIT-ViQuAD2.0's license isn't stated on Hugging Face) -- "
           "it stays local unless you've separately confirmed you can redistribute it.")
-    print("\nNext: python run_benchmark.py --data-path "
-          f"{os.path.relpath(args.output)} --config configs/example_experiment.json")
+    print("\nNext: python benchmark.py --data-path "
+          f"{os.path.relpath(args.output)} --config configs/benchmark.json")
 
 
 if __name__ == "__main__":

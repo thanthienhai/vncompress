@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a larger Vietnamese training corpus for the SLM external-scorer +
-tone probe (run_train_slm.py), mixing two Hugging Face sources:
+tone probe (train.py --mode slm), mixing two Hugging Face sources:
 
   - undertheseanlp/UVW-2026 (Vietnamese Wikipedia, cleaned, CC BY-SA 4.0)
     as the main source, filtered by `quality_score`.
@@ -13,9 +13,9 @@ with `huggingface-cli login` (or set HF_TOKEN), otherwise the poetry
 step will fail with a 401/403 -- use --skip-poetry to build
 Wikipedia-only in that case.
 
-Output schema matches vcc_bench_data/wikipedia_vi_raw.json's `paragraphs`
-list, so run_training.load_training_texts() (used by run_train_slm.py)
-reads it with no code changes:
+Output schema matches data/benchmark/wikipedia_vi_raw.json's `paragraphs`
+list, so vncompress.training.load_training_texts() (used by
+train.py --mode slm) reads it with no code changes:
 
     {"metadata": {...}, "paragraphs": [{"text": ..., "char_length": ..., ...}, ...]}
 
@@ -34,10 +34,10 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.fetch_vietnamese_data import segment_paragraphs
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'vcc_bench_data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'benchmark')
 os.makedirs(DATA_DIR, exist_ok=True)
 
-MIN_CHARS = 200  # must match run_training.load_training_texts()'s >200-char filter
+MIN_CHARS = 200  # must match vncompress.training.load_training_texts()'s >200-char filter
 
 
 def fetch_uvw_paragraphs(target_n: int, min_quality: int, seed: int, shuffle_buffer: int) -> list:
@@ -192,7 +192,7 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"Saved to: {args.output}")
     print(f"File size: {os.path.getsize(args.output) / 1024:.1f} KB")
-    print(f"\nNext: python run_train_slm.py --train-data-path {os.path.relpath(args.output)}")
+    print(f"\nNext: python train.py --mode slm --train-data-path {os.path.relpath(args.output)}")
     print("If you plan to `git add` this file (its sources are CC-BY-SA 4.0 + MIT, so it's "
           "safe to commit), also run `python scripts/checksum_datasets.py --write` and commit "
           "the updated CHECKSUMS.json in the SAME commit -- CI verifies checksums and will fail "

@@ -3,13 +3,10 @@ line-length = 120
 exclude = [
     ".venv",
     "results",
-    "results_int4",
-    "results_model",
-    "results_no_model",
-    "trained_models_quick",
-    "trained_slm",
-    "vcc_bench_data",
+    "models",
+    "data",
     "paper",
+    "research",
 ]
 
 [tool.ruff.lint]

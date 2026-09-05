@@ -12,7 +12,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 USER_AGENT = 'VCCBench/1.0 (research project; contact@example.com)'
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'vcc_bench_data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'benchmark')
 os.makedirs(DATA_DIR, exist_ok=True)
 
 WIKI_TOPICS = [
