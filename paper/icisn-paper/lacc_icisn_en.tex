@@ -1,7 +1,9 @@
 % ============================================================================
 % LACC: Language-Aware Context Compression for Vietnamese LLMs
 % ICISN submission — English version (formatted per Springer/ICISN guidelines:
-% English only, full paper <= 10 pages, target <= 6 pages)
+% English only, full paper <= 10 pages)
+% Updated 2026-09-05 to report Wave 1 measured results
+% (see results/report/wave_1/2026-09-05_lacc-technical-report.md).
 % ============================================================================
 \documentclass[runningheads]{llncs}
 
@@ -46,24 +48,26 @@ Hanoi University of Industry, Hanoi, Vietnam\\
 \maketitle
 
 \begin{abstract}
-Context-compression methods for large language models (LLMs) — LLMLingua, SnapKV, H2O, StreamingLLM — are \emph{language-agnostic}: every token is treated identically regardless of the language it belongs to. For Vietnamese, an isolating, six-tone language in which 30--40\% of tokens are function words, this causes tonal information loss under compression, wasted budget on low-information function words, and token inflation. We propose \method{LACC} (\emph{Language-Aware Context Compression}), which blends a tone-contrast signal computed from a six-tone phonological distance matrix, a five-class morphology signal with class-specific compression budgets, and a perplexity signal into one token-importance score, running at three hardware tiers from 0~GB VRAM to a full INT4 7B pipeline. The perplexity signal comes from an off-the-shelf small LM or from a Vietnamese-native small LM we train with a new auxiliary \emph{Phonological Consistency Loss} (jointly optimized with LoRA), whose classifier doubles as an inference-time tone probe. We report the current, verifiable state of two companion efforts: \method{VCC-Bench}, a 243-sample, five-task Vietnamese compression benchmark with a documented provenance and reproducibility protocol, and a from-scratch training/evaluation report for this LoRA-tuned SLM. Scaling its training corpus from 393 to $\sim$22{,}200 paragraphs across three runs raised held-out tone accuracy on tone-marked tokens from 16.6\% to 92.9\% and improved validation perplexity by 25.2\% over the frozen base model. A preliminary pilot on \method{VCC-Bench} shows \method{LACC}'s rule-based tone signal nearly doubling the average Tone Preservation Rate over uncompressed/random baselines at 2$\times$ compression (0.96 vs.\ 0.51--0.52). We report these results alongside the engineering fixes and open issues that qualify them, including a Vietnamese-diacritic-blindness bug found in our ROUGE-L implementation, so our claims match exactly what has, and has not yet, been measured.
+Context-compression methods for large language models (LLMs) --- LLMLingua, SnapKV, H2O, StreamingLLM --- are \emph{language-agnostic}: every token is scored identically regardless of the language it belongs to. Vietnamese is an isolating, six-tone language in which 30--40\% of tokens are function words, so it is natural to ask whether language-specific signals improve compression. We propose \method{LACC} (\emph{Language-Aware Context Compression}), which blends a tone-contrast signal from a six-tone phonological distance matrix, a five-class morphology signal with class-specific budgets, and a perplexity signal into one token-importance score; the perplexity signal can come from a Vietnamese-native small LM we train with a new \emph{Phonological Consistency Loss} (jointly optimized with LoRA) whose classifier doubles as an inference-time tone probe. We test this hypothesis rigorously on \method{VCC-Bench} v2 (614 samples, five tasks, 2K--32K-token contexts), with two independent generators and paired-bootstrap confidence intervals. The central claim does not hold. Preserving tone (Tone Preservation Rate up to 0.96) does \emph{not} improve downstream answers; on information-location tasks tone-aware compression scores \emph{below random}, and a calibration sweep drives the tone weight to zero. LLMLingua and SnapKV, both using a small perplexity/attention scorer, outperform every \method{LACC} variant by a wide margin. Three things survive: (i) morphology-class budgeting beats random by 65--182\% on Vietnamese QA at 0~GB VRAM; (ii) \method{VCC-Bench} itself, a provenance-documented benchmark that exposes the failure; and (iii) the \emph{training method} --- LoRA + Phonological Consistency Loss cuts validation perplexity 34--39\% across four scorer scales (0.6B--8B) and adds $+0.0625$ tone macro-F1 \emph{specifically} (vs.\ $-0.0147$ on a token-identity control), so tone structure is genuinely learned; it is simply not what makes compression better. A controlled A/B (same SLM, only the tone signal swapped) confirms the paradox: a learned probe preserves tone \emph{worse} than a dictionary heuristic ($\Delta$TPR $-0.246$) yet produces \emph{better} answers ($\Delta$token-F1 $+0.086$, 95\% CI $[+0.028,+0.146]$). We report the negative result, the surviving contributions, and the measurement fixes --- including a ROUGE-L Vietnamese-diacritic bug --- that made the finding trustworthy.
 
-\keywords{Context compression \and Large language models \and Vietnamese NLP \and Tone preservation \and Low-resource languages \and LoRA fine-tuning.}
+\keywords{Context compression \and Large language models \and Vietnamese NLP \and Tone preservation \and Low-resource languages \and LoRA fine-tuning \and Negative results.}
 \end{abstract}
 
 
 \section{Introduction}
 
-Large language models increasingly process long contexts — legal documents, multi-turn dialogue, multi-step agent traces — but the $O(n^2)$ cost of self-attention makes this expensive. Context compression addresses this along three lines: \emph{prompt compression} (LLMLingua~\cite{jiang2023llmlingua}, Selective Context~\cite{li2023selective}), which drops low-perplexity tokens; \emph{KV-cache compression} (SnapKV~\cite{li2024snapkv}, H2O~\cite{zhang2023h2o}, StreamingLLM~\cite{xiao2024streamingllm}), which evicts cache entries by attention score; and \emph{latent-space compression} (Gist Tokens~\cite{mu2023gist}, ICAE~\cite{ge2024icae}), which learns dedicated memory tokens.
+Large language models increasingly process long contexts --- legal documents, multi-turn dialogue, multi-step agent traces --- but the $O(n^2)$ cost of self-attention makes this expensive. Context compression addresses this along three lines: \emph{prompt compression} (LLMLingua~\cite{jiang2023llmlingua}, Selective Context~\cite{li2023selective}), which drops low-perplexity tokens; \emph{KV-cache compression} (SnapKV~\cite{li2024snapkv}, H2O~\cite{zhang2023h2o}, StreamingLLM~\cite{xiao2024streamingllm}), which evicts cache entries by attention score; and \emph{latent-space compression} (Gist Tokens~\cite{mu2023gist}, ICAE~\cite{ge2024icae}), which learns dedicated memory tokens.
 
-All three families are \emph{language-blind}. For Vietnamese — an isolating language with six contrastive tones and roughly 30--40\% function-word tokens — this produces three concrete problems: \textbf{(P1) tonal information loss}, since dropping a tone-marked token or corrupting its diacritic can change meaning entirely (\viet{má} ``mother'' $\to$ \viet{ma} ``ghost''); \textbf{(P2) function-word budget waste}, since low-information function words (\viet{đã}, \viet{của}, \viet{và}, \ldots) are scored the same as content words; and \textbf{(P3) token inflation}, since the same content needs 1.5--2.0$\times$ more tokens in Vietnamese than in English~\cite{lee2026equity,deng2026language}, shrinking the effective context window.
+All three families are \emph{language-blind}. For Vietnamese --- an isolating language with six contrastive tones and roughly 30--40\% function-word tokens --- one can hypothesize three concrete problems: \textbf{(P1) tonal information loss}, since dropping a tone-marked token or corrupting its diacritic can change meaning entirely (\viet{má} ``mother'' $\to$ \viet{ma} ``ghost''); \textbf{(P2) function-word budget waste}, since low-information function words (\viet{đã}, \viet{của}, \viet{và}, \ldots) are scored the same as content words; and \textbf{(P3) token inflation}, since the same content needs 1.5--2.0$\times$ more tokens in Vietnamese than in English~\cite{lee2026equity,deng2026language}. This paper puts these hypotheses to a controlled test rather than assuming them.
 
-\textbf{Contributions.} (1) \method{LACC}, a language-aware token-scoring framework combining tone-contrast, morphology-class, and perplexity signals into one importance score, spanning three hardware tiers (0~GB, $\sim$0.3--1~GB, full INT4 7B). (2) \emph{Phonological Consistency Loss}, a training objective jointly optimized with LoRA fine-tuning so a small LM's hidden states directly encode Vietnamese tone; the resulting classifier doubles as an inference-time \emph{tone probe}, closing the loop between training and scoring for the model-based path (a genuine training-method contribution, distinct from the dictionary-based signals above). (3) \method{VCC-Bench}, the first Vietnamese context-compression benchmark, released with a documented provenance/checksum/reproducibility protocol. (4) A from-scratch training and evaluation report for the LoRA-plus-tone-loss model, covering three training runs, the dataset-scale problem that motivated them, and the engineering issues — including a critical ROUGE-L Vietnamese-diacritic bug — that currently bound what we can claim about end-to-end compression quality. We separate what is \emph{designed} (Sect.~3), what is \emph{measured} (Sect.~5), and what remains \emph{open} (Sect.~6), so that a paper about faithfulness to Vietnamese tone does not overstate results not yet validated under a corrected pipeline.
+\textbf{Findings.} Our headline result is a \emph{negative} one, established across three independent lines of evidence and a controlled A/B. \textbf{P1 is refuted}: tone preservation is not a proxy for quality --- it is inversely related to it. Keeping 93.2\% of tone-marked tokens still deletes the sentence that carries the answer; on every information-location task, tone-aware compression scores below random dropout; and a 30-branch calibration sweep places the optimal tone weight at exactly zero. \textbf{P2 is confirmed}: morphology-class budgeting beats random by 65--182\% on Vietnamese QA at 0~GB VRAM. \textbf{P3 is untested} here. Crucially, the \emph{training method works and is tone-specific} even though tone does not help compression: this is a real, separable contribution.
+
+\textbf{Contributions.} (1) \method{LACC}, a language-aware token-scoring framework blending tone-contrast, morphology-class, and perplexity signals across three hardware tiers (0~GB to full INT4 7B) --- which we find, by ablation, is \emph{outperformed by its own single perplexity signal}, with the blend's optimal tone weight calibrated to zero. (2) \emph{Phonological Consistency Loss}, a training objective jointly optimized with LoRA so a small LM's hidden states encode Vietnamese tone; a $2{\times}2$ probe-control study shows the LoRA/tone objective adds $+0.0625$ macro-F1 on the real tone task versus $-0.0147$ on a token-identity control, ruling out mere memorization. (3) \method{VCC-Bench} v2, a 614-sample, five-task Vietnamese context-compression benchmark with documented provenance, checksums, and a reference-length invariant enforced in CI --- the strongest surviving contribution, and the instrument that made the negative result measurable. (4) A full training/evaluation report: a four-scale scorer ladder (0.6B--8B) with bootstrap CIs, plus a downstream evaluation across five tasks, three compression ratios, and two generators. We separate what is \emph{designed} (Sect.~3), what is \emph{measured} (Sect.~5), and what remains \emph{open} (Sect.~6).
 
 
 \section{Related Work}
 
-LLMLingua~\cite{jiang2023llmlingua} scores tokens by perplexity under a small reference LM with a budget controller, achieving up to 20$\times$ compression; Selective Context~\cite{li2023selective} scores by cosine similarity to the query. SnapKV~\cite{li2024snapkv} selects KV-cache positions from attention over a trailing observation window; H2O~\cite{zhang2023h2o} keeps cumulative-attention ``heavy hitters''; StreamingLLM~\cite{xiao2024streamingllm} exploits attention sinks. Gist Tokens~\cite{mu2023gist} and ICAE~\cite{ge2024icae} instead train the model to compress a prompt into learned memory tokens. None of these incorporates a language-specific signal. Vietnamese is an isolating, tonal language with six phonologically contrastive tones~\cite{nguyen1997vietnamese}. Tokenizer-fairness studies still find 1.5--2.0$\times$ token inflation for Vietnamese relative to English even under the fairest tokenizers~\cite{lee2026equity}, and low-resource languages incur a ``double penalty'' of higher inference cost and lower accuracy~\cite{deng2026language}. Pretrained Vietnamese LMs such as PhoBERT~\cite{nguyen2020phobert} show the value of language-specific modeling for Vietnamese NLP generally, but, to our knowledge, no published method incorporates tone or morphology signals into token-importance scoring for context compression, in Vietnamese or any other tonal, low-resource language.
+LLMLingua~\cite{jiang2023llmlingua} scores tokens by perplexity under a small reference LM with a budget controller, achieving up to 20$\times$ compression; Selective Context~\cite{li2023selective} scores by cosine similarity to the query. SnapKV~\cite{li2024snapkv} selects KV-cache positions from attention over a trailing observation window; H2O~\cite{zhang2023h2o} keeps cumulative-attention ``heavy hitters''; StreamingLLM~\cite{xiao2024streamingllm} exploits attention sinks. Gist Tokens~\cite{mu2023gist} and ICAE~\cite{ge2024icae} instead train the model to compress a prompt into learned memory tokens. None incorporates a language-specific signal. Vietnamese is an isolating, tonal language with six phonologically contrastive tones~\cite{nguyen1997vietnamese}. Tokenizer-fairness studies still find 1.5--2.0$\times$ token inflation for Vietnamese relative to English even under the fairest tokenizers~\cite{lee2026equity}, and low-resource languages incur a ``double penalty'' of higher inference cost and lower accuracy~\cite{deng2026language}. Pretrained Vietnamese LMs such as PhoBERT~\cite{nguyen2020phobert} show the value of language-specific modeling for Vietnamese NLP, but to our knowledge no published method incorporates tone or morphology signals into token-importance scoring for context compression --- so whether such signals help is an open, and until now untested, question.
 
 
 \section{Proposed Method: LACC}
@@ -73,114 +77,248 @@ LLMLingua~\cite{jiang2023llmlingua} scores tokens by perplexity under a small re
 \score{t} = w_{\text{ppl}} \tilde{\score{}}_{\text{ppl}}(t) + w_{\text{tone}} \tilde{\score{}}_{\text{tone}}(t) + w_{\text{morph}} \tilde{\score{}}_{\text{morph}}(t),
 \label{eq:combined}
 \end{equation}
-where each $\tilde{\score{}}(\cdot)\!\in\![0,1]$ and the weights sum to 1 ($w_{\text{ppl}}\!=\!0$, $w_{\text{tone}}\!=\!w_{\text{morph}}\!=\!0.5$ when no external model is used). The top $B=\max(\lfloor n/R\rfloor-2k,0)$ interior tokens by $\score{t}$ are kept, plus $k{=}2$ boundary tokens each side, in original order.
+where each $\tilde{\score{}}(\cdot)\!\in\![0,1]$ and the weights sum to 1. The top $B=\max(\lfloor n/R\rfloor-2k,0)$ interior tokens by $\score{t}$ are kept, plus $k{=}2$ boundary tokens each side, in original order. We stress that these weights are the object of study, not a fixed prior: a calibration sweep (Sect.~5.4) places the optimum at $w_{\text{tone}}{=}0$.
 
-\textbf{Tone-aware scoring.} For a decoded token $t$, let $\rho(t)$ be its fraction of characters carrying a non-\tone{ngang} tone and $\nu(t)$ the number of distinct such tones present. The preservation weight is $\weight{tone}(t) = 1.0+\alpha\rho(t)(1+\beta\nu(t)/6)$, with $\alpha{=}0.5$, $\beta{=}0.3$ (range $[1.0,1.65]$). A $6\times6$ phonological contrast matrix $D_{\text{tone}}(a,b)\in[0,0.9]$ scores how perceptually distinct two tones are; for the $\pm2$-token neighborhood $N(t)$, the contrast factor is
+\textbf{Tone-aware scoring.} For a decoded token $t$, let $\rho(t)$ be its fraction of characters carrying a non-\tone{ngang} tone and $\nu(t)$ the number of distinct such tones present. The preservation weight is $\weight{tone}(t) = 1.0+\alpha\rho(t)(1+\beta\nu(t)/6)$, with defaults $\alpha{=}0.5$, $\beta{=}0.3$. A $6\times6$ phonological contrast matrix $D_{\text{tone}}(a,b)\in[0,0.9]$ scores how perceptually distinct two tones are; for the $\pm2$-token neighborhood $N(t)$, the contrast factor is
 \begin{equation}
 f_{\text{contrast}}(t) = 1+\gamma\cdot\tfrac{1}{|N(t)|}\textstyle\sum_{n\in N(t)} D_{\text{tone}}(\text{tone}(t),\text{tone}(n)), \quad \gamma{=}0.4,
 \end{equation}
 and $\score{}_{\text{tone}}(t)=\weight{tone}(t)\times f_{\text{contrast}}(t)$. E.g., \token{má} (\tone{sắc}) next to \token{ma} (\tone{ngang}) and \token{mà} (\tone{huyền}) scores $\approx2.01$, roughly double the $\approx1.0$ of a tone-neutral function word.
 
-\textbf{Morphology-aware scoring.} Each token is dictionary-assigned to one of five classes — \textsc{func} (function word, $\sim$35\%), \textsc{content} ($\sim$50\%), \textsc{redup} (reduplicative, $\sim$5\%), \textsc{compound} ($\sim$8\%), \textsc{sino} (Sino-Vietnamese, $\sim$2\%) — via a closed dictionary ($\sim$200 function words, $\sim$60 Sino-Vietnamese morphemes) for $O(1)$ lookup. Each class has a preservation multiplier ($0.40,1.20,0.60,1.50,1.50$, respectively) and a retention ratio $r_c$ ($0.30/0.85/0.50/0.95$ for \textsc{func}/\textsc{content}/\textsc{redup}/\textsc{compound}) used to allocate the compression budget proportionally, $B_c = B\cdot|T_c|r_c/\sum_{c'}|T_{c'}|r_{c'}$. Detected reduplicative pairs $(t_L,t_R)$ have $t_L$'s score $\times1.5$ and $t_R$'s reset to $0.1$.
+\textbf{Morphology-aware scoring.} Each token is dictionary-assigned to one of five classes --- \textsc{func} (function word), \textsc{content}, \textsc{redup} (reduplicative), \textsc{compound}, \textsc{sino} (Sino-Vietnamese) --- via a closed dictionary ($\sim$200 function words, $\sim$60 Sino-Vietnamese morphemes) for $O(1)$ lookup. Each class has a preservation multiplier ($0.40,1.20,0.60,1.50,1.50$). This is the one signal that measurably helps (Sect.~5.3).
 
-\textbf{External perplexity scoring.} When a GPU is available, a small off-the-shelf causal LM (135M--1.5B parameters, e.g.\ SmolLM2-135M or Qwen2.5-0.5B, $\sim$0.3--1.0~GB in INT4) scores tokens by surprisal, $\score{}_{\text{ppl}}(t_i)=-\log P(t_i\mid t_{<i})$, over a 512-token sliding window — the LLMLingua~\cite{jiang2023llmlingua} principle at $\sim$50$\times$ smaller model size. This scorer requires no training of our own; it is a drop-in generic model.
+\textbf{External perplexity scoring.} When a GPU is available, a small causal LM scores tokens by surprisal, $\score{}_{\text{ppl}}(t_i)=-\log P(t_i\mid t_{<i})$, over a sliding window --- the LLMLingua~\cite{jiang2023llmlingua} principle. This scorer needs no training of our own.
 
-\textbf{Proposed training method: Phonological Consistency Loss.} Rather than relying only on the generic scorer above, we propose training a Vietnamese-native small LM whose hidden states are made to \emph{directly encode tone}, by adding an auxiliary objective to standard LoRA fine-tuning,
+\textbf{Proposed training method: Phonological Consistency Loss.} We also train a Vietnamese-native small LM whose hidden states \emph{directly encode tone}, by adding an auxiliary objective to LoRA fine-tuning,
 \begin{equation}
 \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{LM}} + \lambda_{\text{tone}}\,\mathcal{L}_{\text{tone}}, \qquad
 \mathcal{L}_{\text{tone}} = \frac1N\sum_{i=1}^{N} \text{CE}\big(\text{MLP}(h_i),\, y_i^{\text{tone}}\big),
 \label{eq:phon}
 \end{equation}
-where $h_i$ is the hidden state at \emph{compressed} token position $i$, $y_i^{\text{tone}}\in\{0,\ldots,6\}$ its ground-truth tone class (\tone{ngang} plus 5 marked tones), and $\text{MLP}$ a 3-layer classifier (Linear$\to$GELU$\to$LayerNorm$\to$Linear) trained \emph{jointly} with the LoRA adapter, not fitted post-hoc. At inference, this same classifier is reused directly as a \emph{tone probe}: the model-based tone score for token $t_i$ is $\score{}_{\text{tone-model}}(t_i) = 1.0 + \max_k \text{softmax}(\text{MLP}(h_i))_k$, so tokens the model is confident about tonally are scored as more important to retain. This closes the loop between training and inference — the same objective that teaches the model to preserve tone also produces the token-scoring signal — unlike the dictionary-based tone score above, which needs no training at all. Section~5 reports this model's held-out tone-classification accuracy and perplexity across three training runs; the trained tone probe has not yet replaced the generic scorer above inside the end-to-end \method{LACC} pipeline (Sect.~6).
+where $h_i$ is the last-layer hidden state at token position $i$, $y_i^{\text{tone}}\in\{0,\ldots,6\}$ its tone class (\tone{ngang}, \tone{huyền}, \tone{sắc}, \tone{hỏi}, \tone{ngã}, \tone{nặng}, unknown), and $\text{MLP}$ a linear classifier trained \emph{jointly} with the LoRA adapter. At inference the same classifier is reused as a \emph{tone probe}: $\score{}_{\text{tone-model}}(t_i) = 1.0 + \max_k \text{softmax}(\text{MLP}(h_i))_k$. This is a genuine training-method contribution (Sect.~5.1--5.2), distinct from the dictionary tone score.
 
-\textbf{Complexity.} Tone and morphology scoring run $O(n)$ on CPU, 0~VRAM; either perplexity scorer runs $O(n\cdot d^2)$ on GPU; normalization and top-$B$ selection run $O(n\log n)$. The no-model tier needs \textbf{0~GB VRAM}; the lightweight tier needs only $\sim$0.3--1.0~GB beyond the generation model itself.
+\textbf{Evaluation architecture: three models, three roles.} Downstream measurement fixes a division of labor. A \emph{scorer} (Qwen3-4B + LoRA, our trained model) assigns per-token importance but never generates text. A \emph{generator} (Qwen2.5-7B-Instruct, off-the-shelf, never trained) reads the compressed context and answers; a second generator (Qwen3-8B, reasoning disabled) checks that conclusions are not an artifact of one decoder. Baselines LLMLingua and SnapKV use an off-the-shelf Qwen2.5-0.5B scorer, and reference answers for the model-written tasks were produced by Qwen2.5-14B-Instruct. Only the compression stage changes between arms; the generator is fixed. \emph{Because the task is to save cost, it is notable that our 4B scorer loads $\sim$8~GB of weights merely to rank tokens, and still loses to the 0.5B baseline scorer} (Sect.~5.3).
 
 
 \section{VCC-Bench and Evaluation Protocol}
 
-\method{VCC-Bench} v1 (snapshot \texttt{2026-07-06}) currently contains \textbf{243 samples across five tasks}: long-document QA (160, legal/journalistic text, 2K--32K tokens), multi-turn conversation (48), cross-lingual compression (18), needle-in-haystack (9), and agent tool-calling (8) — content drawn from Vietnamese Wikipedia (CC~BY-SA~4.0), embedded Vietnamese legal texts (public domain), and synthetic task templates, each file SHA-256-checksummed for drift detection. This is smaller and more skewed toward long-document QA than our original five-task target (500/300/400/250/200); growing the under-represented tasks is future work. A shared \texttt{ExperimentConfig} fixes seed \texttt{42} (Python/NumPy/PyTorch), a single fixed \texttt{"full"} split, canonical ratios $\{2\times,4\times,8\times\}$, and greedy decoding, and snapshots \texttt{config.json}/\texttt{environment.json} (git commit, dependency versions) per run for traceability.
+\method{VCC-Bench} v2 contains \textbf{614 samples across five tasks}: long-document QA (300; UIT-ViQuAD2.0 human-written answer spans; median context 21{,}660 characters), needle-in-haystack (120; constructed exactly; median 45{,}696 characters), summarization (120; references written by Qwen2.5-14B-Instruct), cross-lingual (66), and agent tool-calling (8). By reference type: 300 human-written spans, 180 model-written, 120 constructed-exact, 14 hand-written templates. Every file is SHA-256-checksummed, and a shared \texttt{ExperimentConfig} fixes seed 42, canonical ratios $\{2\times,4\times,8\times\}$, and greedy decoding, snapshotting git commit and dependency versions per run. Of the 120 needle samples, 60 embed a diacritic-stripped decoy (e.g.\ \viet{BAO MAT} beside the correct \viet{BẢO MẬT}) to isolate whether a compressor that loses tone marks misleads the model.
 
-\textbf{A metric bug worth reporting.} \texttt{compute\_rouge\_l} instantiated \texttt{RougeScorer} without a tokenizer; its default tokenizer strips every character outside \texttt{[a-z0-9]}, which includes \emph{every} Vietnamese tone-marked vowel (U+1EA0--U+1EF9). Consequently \viet{bàn}, \viet{bán}, \viet{bạn} — three different words — all reduce to \texttt{['b','n']}, so ROUGE-L scores a wrong answer 1.0 whenever it differs from the reference only by tone. Since ROUGE-L is 40\% of the aggregate quality score, this silently made all prior quality-metric results blind to the exact phenomenon this paper is about. We fixed it (2026-08-20) with a tone-preserving \texttt{VietnameseRougeTokenizer}, analogous to LongBench's~\cite{bai2023longbench} jieba-based Chinese scoring. \textbf{Any result computed before this fix is invalid and must be re-run}, which is why full quality-metric \method{VCC-Bench} numbers are not yet part of this paper (Sect.~6).
+\textbf{Why v2 replaced v1.} v1 (243 samples) \emph{could not measure anything}: in 208/243 samples (160/160 QA) the \texttt{reference\_answer} was literally the \texttt{context}, so the benchmark was scoring ``reproduce the input,'' and its median context was only $\sim$350 tokens --- no task was genuinely long. v2 raises contexts to 2K--32K tokens, replaces QA answers with human-written spans, expands the needle task into a $4\text{ lengths}\times5\text{ depths}\times6\text{ variants}$ grid, and \textbf{enforces a reference-length invariant in CI} so this defect cannot silently return.
+
+\textbf{A metric bug worth reporting.} \texttt{compute\_rouge\_l} instantiated \texttt{RougeScorer} without a tokenizer; the default tokenizer strips every character outside \texttt{[a-z0-9]}, which includes \emph{every} Vietnamese tone-marked vowel (U+1EA0--U+1EF9). Consequently \viet{bàn}, \viet{bán}, \viet{bạn} --- three different words --- all reduce to \texttt{['b','n']}, so ROUGE-L scored a tone-wrong answer 1.0. Since ROUGE-L was 40\% of the aggregate quality score, this had silently made prior quality metrics blind to the exact phenomenon this paper studies. We fixed it with a tone-preserving \texttt{VietnameseRougeTokenizer}, analogous to LongBench's~\cite{bai2023longbench} jieba-based Chinese scoring. All results below are computed after this fix; the appendix lists six further defects (e.g.\ chat-template omission, a 9.4~GB log-softmax allocation in LLMLingua, a raw-string \texttt{exact\_match} that was always zero yet weighted 40\%) repaired before any quality number was trusted.
 
 
-\section{Training and Evaluation Report to Date}
+\section{Results}
 \label{sec:report}
 
-We fine-tune \texttt{chronopt-research/vietnamese-gpt2-base} (125.6M parameters) with LoRA~\cite{hu2021lora} ($r{=}8$, $\alpha{=}16$; 1.18M trainable parameters, 0.94\%), minimizing causal-LM loss plus $\lambda_{\text{tone}}{=}0.1$ times the Phonological Consistency Loss, on one NVIDIA GTX~1060 (6~GB), batch size 1, sequence length 128, gradient accumulation 8, FP16.
+\subsection{Training works: the scorer ladder}
 
-\textbf{Run~1 (why the corpus had to grow).} With only the original 393-paragraph corpus (3 epochs, default), evaluated on 40 held-out texts, tone accuracy on tone-marked tokens was 16.6--19.6\% — indistinguishable from the $\sim$20\% chance level for 5 non-\tone{ngang} classes (perplexity 51.57). We treat Run~1 as a diagnostic, not a result: 393 paragraphs is too small a corpus to learn tone beyond chance.
-
-\textbf{Runs 2--3 (corpus scale-up).} We built a larger corpus (UVW-2026, CC-BY-SA~4.0, + a Vietnamese poetry collection, MIT) with a fixed 90/10 split (seed 42). Run~2 used the default 5{,}000-UVW-2026/556-poetry mix (5{,}556 texts); Run~3 scaled UVW-2026 tenfold ($\sim$22{,}200 texts total), reducing epochs 3$\to$2 to bound training time. Tables~\ref{tab:slm_train}--\ref{tab:slm_eval} report configuration and held-out evaluation, each on that run's own saved validation split.
+We fine-tune four Qwen3 bases (0.6B--8B) with LoRA~\cite{hu2021lora} ($r{=}8$, $\alpha{=}16$, dropout 0.05, seven target modules; 0.27--0.84\% trainable) plus the Phonological Consistency Loss ($\lambda_{\text{tone}}{=}0.1$), bf16, sequence length 1024, effective batch 32, 1{,}200 optimizer steps, seed 42, on a 6$\times$H100 cluster. All four use the \emph{same} held-out split (14{,}970 texts, 2{,}712{,}768 tone-scored tokens) drawn from a 149{,}693-paragraph Vietnamese Wikipedia corpus (UVW-2026, CC~BY-SA~4.0; 90/10 split, seed 42), so Table~\ref{tab:ladder} is a comparable scaling curve, not four unrelated runs.
 
 \begin{table}[H]
 \centering
-\caption{SLM training configuration, Runs 2--3 (base model: \texttt{vietnamese-gpt2-base}, 125.6M).}
-\label{tab:slm_train}
-\begin{tabular}{lcc}
+\caption{Scorer ladder: LoRA + Phonological Consistency Loss vs.\ frozen base, on one shared held-out split. Perplexity ratio (LoRA/base) with paired-bootstrap 95\% CI (2{,}000 resamples, seed 42). Tone metrics are on tone-marked tokens; majority baseline 55.0\%, chance for 5 non-\tone{ngang} classes $\approx$20\%.}
+\label{tab:ladder}
+\begin{tabular}{lccccccc}
 \toprule
-\textbf{Parameter} & \textbf{Run 2} & \textbf{Run 3} \\
+\textbf{Base} & \textbf{PPL base} & \textbf{PPL LoRA} & \textbf{ratio} & \textbf{95\% CI} & \textbf{$\Delta$} & \textbf{Tone acc} & \textbf{Macro-F1} \\
 \midrule
-Corpus (UVW-2026 / poetry, 90/10 split) & 5{,}000 / 556 & 20{,}000 / $\sim$2{,}200 \\
-Train / validation texts & $\sim$5{,}000 / 555 & $\sim$20{,}000 / 2{,}218 \\
-Epochs (batch 1, len 128, accum.\ 8) & 3 & 2 \\
+Qwen3-0.6B & 26.00 & 16.28 & 0.6259 & [0.624, 0.628] & $-37.4\%$ & 0.8638 & 0.8626 \\
+Qwen3-1.7B & 17.85 & 11.07 & 0.6198 & [0.618, 0.622] & $-38.0\%$ & 0.9410 & 0.9401 \\
+Qwen3-4B   & 14.95 & 9.15  & 0.6116 & [0.610, 0.614] & $-38.8\%$ & \textbf{0.9629} & \textbf{0.9587} \\
+Qwen3-8B   & 11.71 & 7.75  & 0.6616 & [0.660, 0.663] & $-33.8\%$ & \textbf{0.9789} & \textbf{0.9757} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+LoRA delivers a 34--39\% perplexity reduction at every scale, and tone macro-F1 rises with model size, far above chance and the majority baseline; \tone{tone\_loss} falls from 0.22 to 0.007--0.024. The probe's errors are not uniform: they concentrate on the \tone{hỏi}$\leftrightarrow$\tone{ngã} pair (merged in Central/Southern dialects) and \tone{sắc}$\leftrightarrow$\tone{nặng} (both high/glottalized), and \tone{ngã} --- the rarest class (2.7\% support) --- is hardest, with recall improving most from scaling (0.908 at 4B $\to$ 0.946 at 8B). The model recovers a genuine phonological phenomenon, not a lookup table.
+
+\subsection{The training gain is tone-specific (probe control)}
+
+To separate ``learned tone'' from ``memorized token identity,'' we run a $2{\times}2$ study on Qwen3-4B ($\{$LoRA, frozen base$\}\times\{$real task, control task$\}$), where the control task assigns a random-but-consistent tone label per token \emph{type}, solvable by identity memorization alone (Table~\ref{tab:probe}).
+
 \begin{table}[H]
 \centering
-\caption{SLM held-out evaluation (base vs.\ LoRA compared only within the same run's split).}
-\label{tab:slm_eval}
+\caption{Probe control (Qwen3-4B): macro-F1 on tone-marked tokens, 14{,}970 held-out texts.}
+\label{tab:probe}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Representation} & \textbf{Real task} & \textbf{Control task} & \textbf{Selectivity} \\
+\midrule
+Frozen base & 0.8601 & 0.7530 & $+0.1071$ \\
+$+$ LoRA ($\lambda_{\text{tone}}{=}0.1$) & \textbf{0.9226} & 0.7383 & \textbf{$+0.1843$} \\
+\textit{LoRA adds} & \textbf{$+0.0625$} & \textbf{$-0.0147$} & $+0.0772$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+LoRA adds structure that is specifically about tone (it \emph{raises} the real task and \emph{lowers} the control task). But two caveats bound the claim. The frozen base already reaches 0.8601 before any tone training, and the control reaches 0.7530 --- so most of what the probe reads is token identity. And, fundamentally, the tone label is a \emph{deterministic function of the token id}: a trivial lookup predictor scores 100\%. The probe therefore measures ``how much tone information survives in the hidden state,'' not ``can the model infer tone''; and we are still missing the $\lambda_{\text{tone}}{=}0$ cell needed to fully separate the tone loss from ordinary Vietnamese domain adaptation (Sect.~6).
+
+\subsection{Downstream: the hypothesis fails}
+
+Table~\ref{tab:downstream} is the core measurement --- headline metric per task (QA: token-F1; Needle: recall; Cross-lingual: ROUGE-L; Agent: token-F1), generator Qwen2.5-7B-Instruct.
+
+\begin{table}[H]
+\centering
+\caption{Downstream quality on \method{VCC-Bench} (generator Qwen2.5-7B-Instruct). Best compression method per column in \textbf{bold}. $^{*}$ The \texttt{none} row averages over 92 needle samples that fit the window; 28/120 overflow the 32K engine window (only the uncompressed arm), so its needle value is on an easier subset --- method-vs-method comparison is unaffected.}
+\label{tab:downstream}
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Metric} & \textbf{R2 Base} & \textbf{R2 LoRA} & \textbf{R3 Base} & \textbf{R3 LoRA} \\
+\textbf{Method} & \textbf{QA} & \textbf{Needle} & \textbf{Cross-ling.} & \textbf{Agent} \\
 \midrule
-Perplexity $\downarrow$ & 159.81 & 124.26 & 148.10 & 110.76 \\
-$\Delta$ vs.\ base (same split) & \multicolumn{2}{c}{$-22.2\%$} & \multicolumn{2}{c}{$-25.2\%$} \\
-Tone acc., tone-marked tok.\ $\uparrow$ & -- & \textbf{82.24\%} & -- & \textbf{92.94\%} \\
-Majority-class baseline & -- & 44.93\% & -- & 46.15\% \\
+\multicolumn{5}{l}{\emph{2$\times$ compression}} \\
+No compression & 0.634 & 0.993$^{*}$ & 0.390 & 0.260 \\
+LLMLingua & \textbf{0.442} & \textbf{0.742} & \textbf{0.326} & 0.262 \\
+SnapKV & 0.371 & 0.573 & 0.297 & 0.251 \\
+LACC-Morph & 0.277 & 0.296 & 0.249 & \textbf{0.280} \\
+LACC-Combined & 0.212 & 0.051 & 0.270 & 0.130 \\
+LACC-Tone & 0.122 & 0.023 & 0.292 & 0.194 \\
+Random dropout & 0.168 & 0.119 & 0.210 & 0.230 \\
+\midrule
+\multicolumn{5}{l}{\emph{4$\times$ compression}} \\
+No compression & 0.635 & 0.993$^{*}$ & 0.389 & 0.256 \\
+LLMLingua & \textbf{0.259} & \textbf{0.403} & 0.230 & 0.223 \\
+SnapKV & 0.222 & 0.353 & \textbf{0.237} & 0.104 \\
+LACC-Morph & 0.124 & 0.071 & 0.192 & 0.144 \\
+LACC-Combined & 0.105 & 0.018 & 0.154 & 0.141 \\
+LACC-Tone & 0.027 & 0.000 & 0.186 & 0.149 \\
+Random dropout & 0.044 & 0.007 & 0.162 & 0.097 \\
+\midrule
+\multicolumn{5}{l}{\emph{8$\times$ compression}} \\
+No compression & 0.635 & 0.993$^{*}$ & 0.389 & 0.256 \\
+LLMLingua & 0.145 & 0.199 & \textbf{0.157} & \textbf{0.233} \\
+SnapKV & \textbf{0.161} & \textbf{0.250} & 0.153 & 0.217 \\
+LACC-Morph & 0.080 & 0.046 & 0.114 & 0.117 \\
+LACC-Combined & 0.063 & 0.010 & 0.112 & 0.182 \\
+LACC-Tone & 0.014 & 0.000 & 0.119 & 0.157 \\
+Random dropout & 0.026 & 0.000 & 0.109 & 0.136 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Tone accuracy on tone-marked tokens rises monotonically with corpus scale — 16.6--19.6\% (Run~1, 393 docs) $\to$ 82.24\% (Run~2, 5{,}556 docs) $\to$ 92.94\% (Run~3, $\sim$22{,}200 docs) — well above both chance ($\sim$20\%) and the majority-class baseline ($\sim$45--46\%), and LoRA delivers a reproducible perplexity gain over frozen-base, confirmed independently on two splits ($-22.2\%$, $-25.2\%$). Caveats: \texttt{trained\_slm/final} is overwritten between runs, so Run~2 and Run~3 use \emph{different} validation splits — only within-run base-vs-LoRA comparisons are valid, and the base-perplexity difference (159.81 vs.\ 148.10) reflects a different split, not a changed (frozen) base model; the corpus builder concatenates short poems to pass a length filter, which can inflate absolute perplexity independent of model quality; and Run~3's optimizer-step count and peak VRAM were not logged, an instrumentation gap for the next run.
-
-\textbf{Preliminary pilot on VCC-Bench.} Separately, an earlier three-tier pilot (2026-07-07, predating both the unified config above and the ROUGE-L fix) sanity-checked tone preservation end-to-end on a small subsample (3--5 samples/task, ratios $\{2\times,4\times\}$ only), reporting Tone Preservation Rate (TPR) and realized compression ratio (CR) but not ROUGE-L/BLEU. Table~\ref{tab:pilot} averages TPR across all five tasks; rule-based numbers were consistent (within noise) across the no-model, lightweight (+Qwen2.5-0.5B FP16), and full/INT4 tiers, so only one representative value is shown per method.
+Three facts stand out. First, \textbf{LLMLingua and SnapKV beat every \method{LACC} variant} on the retrieval and QA tasks at every ratio. Second, \textbf{LACC-Tone is at or below random} on QA and needle everywhere --- it reaches recall 0.000 on needle at 4$\times$ and 8$\times$. Third, the surviving positive is \textbf{LACC-Morph}, which beats random substantially (Table~\ref{tab:morph}); it even leads all methods on the 8-sample agent task, though that $n$ supports no conclusion. Tone's one genuine win is cross-lingual at 2$\times$ (0.292, best \method{LACC} variant) --- the single task family where the surface string \emph{is} the output, so preserving diacritics is part of the task rather than a cost.
 
 \begin{table}[H]
 \centering
-\caption{Pilot: mean TPR across 5 VCC-Bench tasks (2026-07-07; small subsample).}
-\label{tab:pilot}
-\begin{tabular}{lcc}
+\caption{Morphology-class budgeting vs.\ random dropout (generator Qwen2.5-7B-Instruct). The sign is preserved on the second generator (Qwen3-8B): QA $+29/+37/+56\%$, needle $+119/+327/+516\%$, agent negative at all ratios.}
+\label{tab:morph}
+\begin{tabular}{llccc}
 \toprule
-\textbf{Method} & \textbf{TPR @ 2$\times$} & \textbf{TPR @ 4$\times$} \\
+\textbf{Ratio} & \textbf{Task} & \textbf{Morph} & \textbf{Random} & \textbf{Gain} \\
 \midrule
-No compression / random baseline & 0.51--0.52 & 0.29 \\
-Morphology-only (no-model tier) & 0.474 & 0.249 \\
-External perplexity only (lightweight tier) & 0.545 & 0.316 \\
-Model-based tone (full/INT4 tier)$^{*}$ & 0.609 & 0.394 \\
-\textbf{Rule-based tone (\method{LACC})} & \textbf{0.960--0.963} & \textbf{0.538--0.541} \\
-\textbf{Rule-based combined (tone+morph)} & \textbf{0.768--0.772} & \textbf{0.533--0.541} \\
+2$\times$ & QA     & 0.277 & 0.168 & \textbf{$+65\%$} \\
+2$\times$ & Needle & 0.296 & 0.119 & \textbf{$+150\%$} \\
+4$\times$ & QA     & 0.124 & 0.044 & \textbf{$+182\%$} \\
+4$\times$ & Needle & 0.071 & 0.007 & $+924\%$ \\
+8$\times$ & QA     & 0.080 & 0.026 & $+211\%$ \\
+8$\times$ & Agent  & 0.117 & 0.136 & $-14\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-{\small $^{*}$Realized CR fell short of target (1.81$\times$/3.43$\times$), driven entirely by the needle-in-haystack task, where the sliding-window scorer under-compressed very long ($\ge$32K-token) contexts in this pilot — an open engineering issue, not a general property of model-based scoring.}
 
-Rule-based tone alone nearly doubles average TPR over uncompressed/random baselines at 2$\times$ (0.96 vs.\ 0.51--0.52) and at 4$\times$ (0.54 vs.\ 0.29), at zero extra VRAM; morphology alone does not help TPR (it optimizes semantic content, not phonology), which is why \emph{combined} sits below tone-only under Eq.~\ref{eq:combined}'s default equal weighting.
+\subsection{Ablation and calibration: the blend hurts, tone weight goes to zero}
 
-\textbf{Engineering milestones.} Alongside these results: a CI pipeline (lint $\to$ tests $\to$ CPU smoke test $\to$ dataset checksum) gates every push/PR, CPU-only; the unified \texttt{ExperimentConfig} and config/environment snapshotting (Sect.~4); a single canonical Tone Preservation Rate implementation replacing the coarser before/after proxy used by the July pilot; full dataset provenance and checksums; the ROUGE-L fix (Sect.~4); a larger training-corpus builder and a real downstream QA task from UIT-ViQuAD2.0, both implemented but not yet reported with numbers; and a tone-probe control study (frozen-base vs.\ LoRA) to isolate how much tone signal LoRA actually adds, not yet run to completion.
+Separating the blend into its signals at 4$\times$ (Table~\ref{tab:ablation}) shows the combined score loses to the perplexity signal \emph{alone} on every task except the 8-sample agent task. A 30-branch calibration sweep on the dev split places the optimum at $w_{\text{tone}}{=}0$, $\alpha{=}0.25$, $\gamma{=}0.2$: the highest quality (0.134) occurs exactly at $w_{\text{tone}}{=}0$, while the highest Tone Preservation Rate (0.493) coincides with the \emph{lowest} quality (0.050). The metric this paper proposed to optimize is driven to zero weight by the paper's own sweep.
+
+\begin{table}[H]
+\centering
+\caption{Signal ablation at 4$\times$ (generator Qwen2.5-7B-Instruct).}
+\label{tab:ablation}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{QA} & \textbf{Needle} & \textbf{Cross-ling.} & \textbf{Agent} \\
+\midrule
+LACC-Combined & 0.118 & 0.214 & 0.145 & \textbf{0.244} \\
+$w_{\text{ppl}}$ only & \textbf{0.253} & \textbf{0.494} & 0.226 & 0.236 \\
+$w_{\text{tone}}$ only & 0.113 & 0.010 & 0.189 & 0.163 \\
+$w_{\text{morph}}$ only & 0.184 & 0.216 & \textbf{0.226} & 0.177 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The controlled A/B: learned-vs-rule tone signal}
+
+The sharpest evidence holds the SLM fixed (Qwen3-4B) and changes \emph{only} the source of the tone signal --- the trained probe vs.\ the dictionary rule --- over 120 samples with paired bootstrap (Table~\ref{tab:ab}).
+
+\begin{table}[H]
+\centering
+\caption{Controlled A/B: trained probe $-$ dictionary rule, same SLM, paired bootstrap.}
+\label{tab:ab}
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Ratio} & \textbf{Metric} & \textbf{$\Delta$ (probe$-$rule)} & \textbf{95\% CI} & \textbf{$p$} & \textbf{win-rate} & \textbf{sig.} \\
+\midrule
+2$\times$ & TPR      & $-0.246$ & [$-0.251,-0.241$] & 0.000 & 0\% & \textbf{yes} \\
+2$\times$ & token-F1 & $+0.086$ & [$+0.028,+0.146$] & 0.003 & 76\% & \textbf{yes} \\
+2$\times$ & ROUGE-L  & $+0.082$ & [$+0.024,+0.142$] & 0.004 & 75\% & \textbf{yes} \\
+4$\times$ & TPR      & $-0.136$ & [$-0.140,-0.133$] & 0.000 & 0\% & \textbf{yes} \\
+4$\times$ & token-F1 & $+0.016$ & [$-0.026,+0.060$] & 0.459 & 86\% & $\cdot$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The learned probe preserves tone \emph{worse} than the heuristic (every TPR delta negative and significant, 0\% win-rate) yet produces \emph{better} answers at 2$\times$ (both quality deltas significant, CIs excluding zero). At 4$\times$ the quality effect is small and no longer significant despite an 86\% win-rate --- consistent in sign, high in variance. This is the cleanest statement of the paradox: the component that maximizes tone preservation is the component that costs quality.
+
+\subsection{Cost}
+
+At 4$\times$ (benchmark-mean), realized compression, latency, and VRAM are in Table~\ref{tab:cost}. \method{LACC}'s tiers run at 0~GB VRAM, but the current sliding-window configuration (window 512, stride 256) is self-defeating: on needle at 32K the trained tone-probe arm takes up to 18.4~s per sample, and compression costs more time than the generator saves by reading the full context. LACC-Morph's latency is dominated by a pure-Python word segmenter, so it is not yet a fair efficiency measurement, and no cost advantage is claimed.
+
+\begin{table}[H]
+\centering
+\caption{Cost at 4$\times$ (benchmark-mean).}
+\label{tab:cost}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Realized CR} & \textbf{Latency} & \textbf{VRAM} \\
+\midrule
+No compression & 1.00$\times$ & 2.4~ms & --- \\
+Random dropout & 4.00$\times$ & 3.5~ms & 0~GB \\
+LLMLingua & 4.70$\times$ & 73.8~ms & $\sim$1~GB \\
+SnapKV & 4.00$\times$ & 503.8~ms & $\sim$1~GB \\
+LACC-Tone & 4.00$\times$ & 105.5~ms & \textbf{0~GB} \\
+LACC-Morph & 4.02$\times$ & 234.6~ms & \textbf{0~GB} \\
+LACC-Combined & 4.00$\times$ & 179.2~ms & \textbf{0~GB} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 
 \section{Discussion, Limitations, and Future Work}
 
-The pilot (Table~\ref{tab:pilot}) is a concrete illustration of P1: language-agnostic compression drops tone-marked tokens at essentially the random-selection rate (TPR $\approx$0.51--0.52), while tone-aware scoring preserves them at $\approx$0.96. For P2, class-proportional budgeting keeps only 30\% of a class's function-word tokens vs.\ 85\% of content-word tokens — on a 1{,}000-token document (350/500/150 function/content/other) compressed to 250 tokens, a language-blind method keeps $\sim$87 function words where \method{LACC} keeps $\sim$35, redirecting $\sim$52 tokens to content; this is a budget-arithmetic argument, not yet a measured end-to-end VCC-Bench effect. The architecture is designed to generalize (the tone matrix to other tonal languages, e.g.\ Mandarin/Thai; the morphology classifier to other isolating languages), but this is untested outside Vietnamese.
+\textbf{Why P1 fails.} A single sample makes it concrete. On \texttt{viquad\_qa\_0002} at 2$\times$, LACC-Tone keeps 93.2\% of tone-marked tokens --- almost exactly its objective --- yet deletes the sentence containing the answer and responds ``Không đủ thông tin'' (token-F1 0.000), while LLMLingua answers correctly. Across 300 QA samples, 53 follow this pattern (uncompressed $>$0.9, LLMLingua $>$0.5, tone-aware $\to$ 0). ``Keeping the tone'' and ``keeping the information needed'' are different objectives, and Wave 1 optimized the first. Two signals filed under one ``language-aware'' banner behave oppositely: morphology (which down-weights function words) helps at 0~GB, while tone-contrast hurts on every information-location task. The premise was half right, and right on the half nobody bet on.
 
-Key limitations, most pressing first: (1) full quality-metric \method{VCC-Bench} evaluation (243 samples $\times\{2,4,8\}\times$, ROUGE-L/BLEU/EM) has not been re-run since the ROUGE-L fix, so it is reported as pending, not fabricated; (2) the Vietnamese-native SLM scorer is trained and probed but not yet substituted into the live \method{LACC} pipeline, so it has no measured end-to-end quality effect yet; (3) the pilot (Table~\ref{tab:pilot}) is small-scale, dated, and used a coarser TPR proxy than the canonical metric; (4) the model-based scorer under-compressed long contexts in the pilot (an open bug); (5) tone/morphology signals depend on closed dictionaries and misclassify novel or borrowed words; (6) \method{VCC-Bench}'s 243 samples are skewed toward long-document QA, and needle-in-haystack (9) and agent tool-calling (8) need to grow; (7) the algorithm requires the full context before compressing, with no streaming variant yet. Near-term priorities: re-run the full \method{VCC-Bench} evaluation and ablation study under the corrected pipeline; wire the LoRA-tuned SLM tone probe into the live compressor and measure its effect on compression quality; complete the tone-probe control study; grow under-represented tasks; and fix the model-based scorer's long-context compression shortfall.
+\textbf{Reconciliation with the original claims.} Table~\ref{tab:reconcile} maps the initial hypotheses and contributions to what was measured.
+
+\begin{table}[H]
+\centering
+\caption{Original claims vs.\ Wave 1 results.}
+\label{tab:reconcile}
+\begin{tabular}{p{0.12\linewidth}p{0.44\linewidth}p{0.36\linewidth}}
+\toprule
+\textbf{Claim} & \textbf{Stated} & \textbf{Result} \\
+\midrule
+P1 & Tonal information loss is a compression problem & \textbf{Refuted.} TPR inversely related to quality \\
+P2 & Function-word budget waste & \textbf{Confirmed.} Morph beats random 65--182\% \\
+P3 & Token inflation (1.5--2.0$\times$) & \textbf{Untested} in Wave 1 \\
+C1 & LACC blends three signals & \textbf{Blend loses} to single perplexity signal; calibration sets $w_{\text{tone}}{=}0$ \\
+C2 & Phonological Consistency Loss & \textbf{Learns real, tone-specific structure}, but the $\lambda{=}0$ control is missing \\
+C3 & VCC-Bench & \textbf{Strongest surviving contribution} \\
+C4 & Train/eval report & \textbf{Completed} across four scales, with CIs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Broader lessons.} (i) A better scorer is not a better compressor: our fine-tuned 4B scorer reaches QA 0.239 at 2$\times$ where LLMLingua's 0.5B scorer reaches 0.442 --- the leverage is in the token-selection algorithm (windowed perplexity, iterative budgeting), not scorer size or quality. (ii) Rankings are generator-invariant: two generators give the same ordering, so the conclusions are not a single-decoder artifact. (iii) Vietnamese long-context compression is only usable at 2$\times$; at 4$\times$ the best method retains 0.259 QA-F1 vs.\ 0.635 uncompressed, and no method escapes this wall. (iv) Measurement discipline, not method, produced the result: the reference-length invariant and separate failure counting both caught the v1 defect and the \texttt{none}-needle caveat; the old benchmark \emph{could not} have detected anything, because 86\% of its samples scored input reconstruction.
+
+\textbf{Limitations.} (1) The $\lambda_{\text{tone}}{=}0$ control is not yet run, so we cannot fully attribute the $+0.0625$ probe gain to the tone loss rather than Vietnamese domain adaptation --- and since \tone{tone\_loss} falls to $\sim$0.020 by step 300, the tone term contributes $\sim$0.09\% of total loss for the last $\sim$75\% of training, so much of ``tone-aware training'' is domain adaptation. (2) $\lambda_{\text{tone}}$ was never swept (fixed 0.1 across all four scales). (3) The probe's auxiliary task is trivially solvable by token-id lookup (control reaches 0.7530). (4) Train/eval length mismatch: training at sequence length 1024, evaluation at 2K--32K. (5) The uncompressed needle baseline is on an easier 92-sample subset (28/120 overflow the 32K window). (6) Agent tool-calling has only 8 samples. (7) The trained-probe branch on the full 614-sample benchmark was cut off mid-run, so that method's headline exists only for the 120-sample A/B. Tone/morphology signals also depend on closed dictionaries and misclassify novel or borrowed words.
+
+\textbf{Future work.} The two strongest signals live in different methods --- perplexity (LLMLingua) and morphology --- and have never been measured together; a perplexity scorer with class-proportional budgeting is the obvious next method. Query-conditioning (question-aware/contrastive perplexity) directly targets the ``lost answer sentence'' failure and is absent from all arms here. If the tone direction is kept, it should be scoped to surface tasks (translation, transliteration, verbatim quotation, proper-noun generation) --- the only place tone does not finish last.
 
 
 \section{Conclusion}
 
-We presented \method{LACC}, a language-aware context-compression framework combining tone-contrast, morphology-class, and optional external-perplexity signals to protect Vietnamese-specific information under compression, from 0~GB VRAM to full INT4 7B generation. We reported, in full, the current state of two supporting efforts: \method{VCC-Bench}, a 243-sample, five-task, provenance-documented Vietnamese compression benchmark; and a training/evaluation report for a Vietnamese tone-aware SLM scorer, where scaling the training corpus $\sim$56$\times$ (393$\to$22{,}200 documents) took tone-marked-token accuracy from chance (16.6\%) to 92.9\%, with a reproducible 22--25\% perplexity gain over frozen-base. We also discovered and fixed a ROUGE-L bug that had made all prior quality evaluations blind to Vietnamese tone marks — a finding we consider as important to report as any positive result. The rule-based tone signal alone nearly doubles average Tone Preservation Rate over uncompressed/random baselines in a preliminary pilot (0.96 vs.\ 0.51--0.52 at 2$\times$). The next steps are a corrected full-scale \method{VCC-Bench} evaluation and wiring the trained SLM scorer into the live compression pipeline.
+We proposed \method{LACC}, a language-aware context-compression framework, and subjected its central premise --- that Vietnamese tone preservation improves compression --- to a controlled test on \method{VCC-Bench} v2 (614 samples, two generators, bootstrap CIs). The premise does not hold: tone preservation is inversely related to answer quality, tone-aware compression falls below random on information-location tasks, calibration drives the tone weight to zero, and LLMLingua/SnapKV outperform every \method{LACC} variant. What survives is worth reporting in its own right --- morphology-class budgeting (beating random by 65--182\% at 0~GB VRAM), \method{VCC-Bench} as a provenance-documented Vietnamese compression benchmark, and a training method that provably learns tone-specific structure (34--39\% perplexity reduction across four scales; $+0.0625$ macro-F1 on the real task vs.\ $-0.0147$ on a control) even though that structure is not what improves compression. A controlled A/B makes the paradox precise: a learned probe preserves tone worse than a heuristic yet answers better. We also found and fixed a ROUGE-L Vietnamese-diacritic bug that had made prior quality evaluation blind to tone --- a finding we consider as important to report as any positive result. The next steps are to combine perplexity with morphology budgeting, add query-conditioned scoring, and complete the missing $\lambda_{\text{tone}}{=}0$ control.
 
 
 \begin{credits}

@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Báo cáo kỹ thuật LACC wave 1: bài toán, dataset, model đã train, kết quả, và đối chiếu contribution gốc với những gì thực sự đo được.">
+<style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>
+<title>Tone Was the Wrong Signal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --ground:#F4F6F8;
+    --surface:#FFFFFF;
+    --surface-2:#EDF1F4;
+    --ink:#131820;
+    --ink-2:#3E4A5A;
+    --ink-3:#6B7787;
+    --rule:#DCE2E8;
+    --rule-strong:#C3CCD6;
+    --accent:#1F5673;
+    --accent-soft:#E3EDF2;
+    --no:#9E3B33;
+    --no-soft:#F6E6E4;
+    --yes:#3B6B4C;
+    --yes-soft:#E5EFE7;
+    --open:#7A8290;
+    --open-soft:#E9ECEF;
+    --warn:#8A6220;
+    --warn-soft:#F6EDDD;
+    --shadow:0 1px 2px rgba(19,24,32,.05),0 8px 24px -16px rgba(19,24,32,.18);
+    --sans:"Be Vietnam Pro",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+    --serif:"Newsreader",ui-serif,Georgia,"Times New Roman",serif;
+    --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#101419;
+      --surface:#171C23;
+      --surface-2:#1E242C;
+      --ink:#E6EAEF;
+      --ink-2:#B3BCC7;
+      --ink-3:#8A94A1;
+      --rule:#2A323C;
+      --rule-strong:#3A4450;
+      --accent:#69A9C6;
+      --accent-soft:#17303C;
+      --no:#D98B81;
+      --no-soft:#37211E;
+      --yes:#87B394;
+      --yes-soft:#1D2C22;
+      --open:#98A2AE;
+      --open-soft:#242A31;
+      --warn:#CBA268;
+      --warn-soft:#2E2718;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#101419;
+    --surface:#171C23;
+    --surface-2:#1E242C;
+    --ink:#E6EAEF;
+    --ink-2:#B3BCC7;
+    --ink-3:#8A94A1;
+    --rule:#2A323C;
+    --rule-strong:#3A4450;
+    --accent:#69A9C6;
+    --accent-soft:#17303C;
+    --no:#D98B81;
+    --no-soft:#37211E;
+    --yes:#87B394;
+    --yes-soft:#1D2C22;
+    --open:#98A2AE;
+    --open-soft:#242A31;
+    --warn:#CBA268;
+    --warn-soft:#2E2718;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.7);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--ground);
+    color:var(--ink);
+    font-family:var(--serif);
+    font-size:17.5px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px 96px}
+
+  /* ---------- masthead ---------- */
+  header.mast{
+    padding:64px 0 36px;
+    border-bottom:1px solid var(--rule-strong);
+    margin-bottom:40px;
+  }
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:11.5px;
+    font-weight:600;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--accent);
+    display:flex;flex-wrap:wrap;gap:8px 18px;
+    margin-bottom:22px;
+  }
+  h1{
+    font-family:var(--sans);
+    font-weight:800;
+    font-size:clamp(2.1rem,5.4vw,3.5rem);
+    line-height:1.04;
+    letter-spacing:-.028em;
+    text-wrap:balance;
+    margin:0 0 18px;
+    max-width:22ch;
+  }
+  .standfirst{
+    font-size:clamp(1.05rem,2.1vw,1.28rem);
+    line-height:1.5;
+    color:var(--ink-2);
+    max-width:60ch;
+    margin:0;
+  }
+  .standfirst strong{color:var(--ink);font-weight:600}
+  .metaline{
+    display:flex;flex-wrap:wrap;gap:6px 22px;
+    margin-top:26px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--ink-3);
+  }
+  .metaline span b{color:var(--ink-2);font-weight:500}
+
+  /* ---------- verdict strip ---------- */
+  .verdicts{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+    gap:1px;
+    background:var(--rule);
+    border:1px solid var(--rule);
+    border-radius:3px;
+    overflow:hidden;
+    margin:36px 0 8px;
+  }
+  .vcard{background:var(--surface);padding:14px 15px 15px;display:flex;flex-direction:column;gap:7px}
+  .vcard .vid{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;color:var(--ink-3)}
+  .vcard .vlabel{font-family:var(--sans);font-size:13.5px;font-weight:600;line-height:1.28;color:var(--ink-2)}
+  .pill{
+    align-self:flex-start;
+    font-family:var(--mono);font-size:10.5px;font-weight:600;
+    letter-spacing:.08em;text-transform:uppercase;
+    padding:3px 8px;border-radius:2px;
+  }
+  .s-no{background:var(--no-soft);color:var(--no)}
+  .s-yes{background:var(--yes-soft);color:var(--yes)}
+  .s-open{background:var(--open-soft);color:var(--open)}
+  .s-warn{background:var(--warn-soft);color:var(--warn)}
+  .vnote{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin:0 0 0 2px}
+
+  /* ---------- layout ---------- */
+  .cols{display:grid;grid-template-columns:1fr;gap:0}
+  @media (min-width:1000px){
+    .cols{grid-template-columns:216px minmax(0,1fr);gap:56px;align-items:start}
+    nav.toc{position:sticky;top:28px;max-height:calc(100vh - 56px);overflow-y:auto}
+  }
+  nav.toc{padding:8px 0 24px}
+  nav.toc .tochead{
+    font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--ink-3);padding-bottom:10px;
+    border-bottom:1px solid var(--rule);margin-bottom:10px;
+  }
+  nav.toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+  nav.toc a{
+    display:flex;gap:9px;
+    font-family:var(--sans);font-size:12.5px;line-height:1.35;
+    color:var(--ink-3);text-decoration:none;
+    padding:5px 8px 5px 7px;border-radius:2px;
+    border-left:2px solid transparent;
+  }
+  nav.toc a .n{font-family:var(--mono);font-size:11px;color:var(--rule-strong);flex:none;padding-top:1px}
+  nav.toc a:hover{color:var(--ink);background:var(--surface-2)}
+  nav.toc a.on{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+  nav.toc a.on .n{color:var(--accent)}
+  nav.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+  /* ---------- prose ---------- */
+  main{min-width:0}
+  section{padding:14px 0 42px;scroll-margin-top:24px}
+  section + section{border-top:1px solid var(--rule)}
+  h2{
+    font-family:var(--sans);font-weight:700;
+    font-size:clamp(1.32rem,2.6vw,1.72rem);
+    letter-spacing:-.018em;line-height:1.16;
+    text-wrap:balance;margin:26px 0 16px;
+    display:flex;gap:14px;align-items:baseline;
+  }
+  h2 .n{
+    font-family:var(--mono);font-size:.68em;font-weight:500;
+    color:var(--accent);flex:none;
+  }
+  h3{
+    font-family:var(--sans);font-weight:700;font-size:1.02rem;
+    letter-spacing:-.005em;margin:30px 0 10px;color:var(--ink);
+  }
+  h4{
+    font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--ink-3);margin:26px 0 10px;
+  }
+  p{max-width:66ch;margin:0 0 14px}
+  ul,ol.list{max-width:66ch;margin:0 0 16px;padding-left:22px}
+  ul li,ol.list li{margin-bottom:9px}
+  ol.list{padding-left:24px}
+  strong{font-weight:600}
+  em{font-style:italic}
+  a{color:var(--accent)}
+  a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  code{
+    font-family:var(--mono);font-size:.855em;
+    background:var(--surface-2);color:var(--ink-2);
+    padding:.1em .34em;border-radius:2px;
+    word-break:break-word;
+  }
+  .lead{font-size:1.06rem;color:var(--ink-2);max-width:62ch}
+
+  /* ---------- tables ---------- */
+  .tw{overflow-x:auto;margin:0 0 20px;border:1px solid var(--rule);border-radius:3px;background:var(--surface)}
+  table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:13.5px;line-height:1.4}
+  caption{
+    text-align:left;font-family:var(--mono);font-size:11px;font-weight:600;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+    padding:12px 14px 0;
+  }
+  th,td{
+    padding:8px 14px;text-align:left;
+    border-bottom:1px solid var(--rule);
+    vertical-align:top;
+  }
+  thead th{
+    font-family:var(--mono);font-size:10.5px;font-weight:600;
+    letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
+    background:var(--surface-2);white-space:nowrap;
+    border-bottom:1px solid var(--rule-strong);
+  }
+  tbody tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+  tbody tr.rule-top td{border-top:1px solid var(--rule-strong)}
+  .win{color:var(--accent);font-weight:600}
+  .dim{color:var(--ink-3)}
+  .neg{color:var(--no)}
+  .pos{color:var(--yes)}
+  tr.hi td{background:var(--accent-soft)}
+  tr.base td{color:var(--ink-3);font-style:italic}
+  td .tag{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+
+  /* ---------- devices ---------- */
+  pre{
+    font-family:var(--mono);font-size:12.5px;line-height:1.5;
+    background:var(--surface);color:var(--ink-2);
+    border:1px solid var(--rule);border-radius:3px;
+    padding:16px 18px;margin:0 0 20px;
+    overflow-x:auto;
+  }
+  pre b{color:var(--accent);font-weight:600}
+  .callout{
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-left:3px solid var(--accent);
+    border-radius:0 3px 3px 0;
+    padding:16px 20px;margin:0 0 22px;
+    box-shadow:var(--shadow);
+  }
+  .callout.warn{border-left-color:var(--no)}
+  .callout p:last-child{margin-bottom:0}
+  .callout h4{margin-top:0}
+  .kicker{
+    font-family:var(--sans);font-weight:700;font-size:1.02rem;
+    color:var(--ink);margin:0 0 8px;
+  }
+  .figure{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:1px;background:var(--rule);border:1px solid var(--rule);
+    border-radius:3px;overflow:hidden;margin:4px 0 22px;
+  }
+  .stat{background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:5px}
+  .stat .v{font-family:var(--mono);font-size:1.85rem;font-weight:600;letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+  .stat .k{font-family:var(--sans);font-size:12px;font-weight:600;color:var(--ink-2);line-height:1.3}
+  .stat .s{font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.35}
+  .stat.acc .v{color:var(--accent)}
+  .stat.bad .v{color:var(--no)}
+  .stat.good .v{color:var(--yes)}
+  .fnote{font-size:14px;color:var(--ink-3);max-width:66ch;margin:0 0 16px}
+  .fnote code{font-size:.9em}
+  footer{
+    margin-top:44px;padding-top:26px;border-top:1px solid var(--rule-strong);
+    font-family:var(--mono);font-size:11.5px;color:var(--ink-3);
+    display:flex;flex-wrap:wrap;gap:6px 26px;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="eyebrow">
+    <span>Báo cáo kỹ thuật</span><span>LACC · Wave 1</span><span>2026-09-05</span>
+  </div>
+  <h1>Tone was the wrong signal</h1>
+  <p class="standfirst">Nén tone-aware giữ được <strong>93.2%</strong> token có dấu thanh và lấy lại <strong>2.3%</strong> needle. Một scorer perplexity không biết gì về thanh điệu lấy lại <strong>74.2%</strong>. Giả thuyết trung tâm của paper không đứng được — nhưng phương pháp huấn luyện thì hoạt động, và nửa hình thái học thì đúng.</p>
+  <div class="metaline">
+    <span><b>Phạm vi</b> wave 1, 6×H100, 2026-09-04</span>
+    <span><b>Raw</b> results_cluster/ · 299 file · 28 MB</span>
+    <span><b>Benchmark</b> VCC-Bench v2 · 614 mẫu</span>
+    <span><b>Tests</b> 311 pass</span>
+  </div>
+
+  <div class="verdicts">
+    <div class="vcard"><div class="vid">P1</div><span class="pill s-no">Bác bỏ</span><div class="vlabel">Mất thông tin thanh điệu là vấn đề của nén</div></div>
+    <div class="vcard"><div class="vid">P2</div><span class="pill s-yes">Xác nhận</span><div class="vlabel">Lãng phí budget cho hư từ là vấn đề</div></div>
+    <div class="vcard"><div class="vid">P3</div><span class="pill s-open">Chưa đo</span><div class="vlabel">Token inflation của tiếng Việt</div></div>
+    <div class="vcard"><div class="vid">C1</div><span class="pill s-warn">Nửa vời</span><div class="vlabel">Framework LACC blend ba tín hiệu</div></div>
+    <div class="vcard"><div class="vid">C2</div><span class="pill s-warn">Nửa vời</span><div class="vlabel">Phonological Consistency Loss</div></div>
+    <div class="vcard"><div class="vid">C3</div><span class="pill s-yes">Xác nhận</span><div class="vlabel">VCC-Bench, benchmark tiếng Việt</div></div>
+    <div class="vcard"><div class="vid">C4</div><span class="pill s-yes">Xác nhận</span><div class="vlabel">Báo cáo train &amp; eval của SLM</div></div>
+  </div>
+  <p class="vnote">P = vấn đề nền paper đặt ra · C = contribution paper tuyên bố · chi tiết ở §11</p>
+</header>
+
+<div class="cols">
+
+<nav class="toc" aria-label="Mục lục">
+  <div class="tochead">Mục lục</div>
+  <ol>
+    <li><a href="#s1"><span class="n">01</span>Kết luận</a></li>
+    <li><a href="#s2"><span class="n">02</span>Bài toán</a></li>
+    <li><a href="#s3"><span class="n">03</span>Dataset</a></li>
+    <li><a href="#s4"><span class="n">04</span>Kiến trúc phép đo</a></li>
+    <li><a href="#s5"><span class="n">05</span>Model đã train</a></li>
+    <li><a href="#s6"><span class="n">06</span>Cơ chế scorer</a></li>
+    <li><a href="#s7"><span class="n">07</span>Kết quả nội tại</a></li>
+    <li><a href="#s8"><span class="n">08</span>Kết quả downstream</a></li>
+    <li><a href="#s9"><span class="n">09</span>Một mẫu minh họa</a></li>
+    <li><a href="#s10"><span class="n">10</span>Insight</a></li>
+    <li><a href="#s11"><span class="n">11</span>Đối chiếu contribution</a></li>
+    <li><a href="#s12"><span class="n">12</span>Vấn đề còn lại</a></li>
+    <li><a href="#s13"><span class="n">13</span>Việc tiếp theo</a></li>
+    <li><a href="#s14"><span class="n">14</span>Tài sản &amp; tái lập</a></li>
+    <li><a href="#sap"><span class="n">A</span>Bảy defect đã sửa</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="s1">
+  <h2><span class="n">01</span>Kết luận trong một đoạn</h2>
+  <p class="lead">Giả thuyết trung tâm của paper không đứng được. Nén tone-aware giữ được 93.2% token có dấu thanh nhưng chỉ lấy lại 2.3% needle ở 2×, trong khi một scorer perplexity hoàn toàn không biết gì về thanh điệu lấy lại 74.2%. Trên QA trích xuất, tone-aware còn thấp hơn cả random dropout.</p>
+  <p>Ba đường độc lập cùng chỉ một hướng, và sắc nhất là A/B có kiểm soát: giữ nguyên SLM, chỉ đổi nguồn tín hiệu thanh điệu, probe học được giữ tone <strong>kém hơn</strong> (ΔTPR −0.246, CI [−0.251, −0.241]) và trả lời <strong>tốt hơn</strong> (Δtoken-F1 +0.086, CI [+0.028, +0.146], win-rate 76%). Phần đứng được là nửa hình thái học: phân bổ budget theo tỉ lệ lớp từ thắng random 65–182% trên QA tiếng Việt ở 0 GB VRAM — nhưng LLMLingua và SnapKV, cả hai dùng một scoring model nhỏ, thắng mọi biến thể LACC với khoảng cách lớn.</p>
+  <p>Riêng biệt và không mâu thuẫn: <strong>phương pháp huấn luyện thì hoạt động.</strong> Probe control 2×2 cho thấy LoRA + phonological consistency loss thêm +0.0625 macro-F1 trên task thanh điệu thật và −0.0147 trên control task token-identity, tức gain là đặc hiệu cho tone. Cấu trúc thanh điệu là thật và học được; nó chỉ không phải thứ làm cho việc nén tốt lên.</p>
+  <div class="figure">
+    <div class="stat bad"><div class="v">2.3%</div><div class="k">Needle recall, LACC-Tone @2×</div><div class="s">TPR cùng cell: 0.960</div></div>
+    <div class="stat good"><div class="v">74.2%</div><div class="k">Needle recall, LLMLingua @2×</div><div class="s">scorer 0.5B, tone-blind</div></div>
+    <div class="stat acc"><div class="v">+182%</div><div class="k">Morph vs random, QA @4×</div><div class="s">0 GB VRAM</div></div>
+    <div class="stat acc"><div class="v">−38.8%</div><div class="k">Perplexity, Qwen3-4B + LoRA</div><div class="s">CI [0.6098, 0.6136]</div></div>
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>Bài toán</h2>
+  <p>Nén <strong>context</strong>, không nén model.</p>
+  <p>Có một tài liệu dài và một câu hỏi. Đưa cả tài liệu vào LLM thì đắt — chi phí self-attention là O(n²). Ý tưởng: bỏ bớt token trong tài liệu <em>trước khi</em> đưa vào LLM, sao cho LLM vẫn trả lời đúng.</p>
+  <p>Ví dụ thật, mẫu <code>viquad_qa_0002</code>:</p>
+<pre>Context : 28,854 ký tự về lịch sử bang Texas
+Câu hỏi : "Quốc gia đầu tiên của châu Âu đã tuyên bố chủ quyền
+           đối với Texas là gì?"
+Đáp án  : "Tây Ban Nha"</pre>
+  <p>Nén 2× = bỏ một nửa số token. Bài toán là <strong>bỏ token nào</strong>. Bỏ đúng câu chứa "Tây Ban Nha" là mất đường trả lời.</p>
+  <p>Giả thuyết riêng của paper: với tiếng Việt, nên chọn token dựa vào đặc trưng ngôn ngữ tiếng Việt — dấu thanh và loại từ — thay vì dùng phương pháp chung cho mọi ngôn ngữ. Cơ sở: <em>bàn / bán / bạn / bản</em> là bốn từ khác nghĩa chỉ nhờ dấu.</p>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>Dataset — có hai dataset khác nhau</h2>
+  <p>Đây là chỗ dễ lẫn nhất trong repo.</p>
+
+  <h3>3.1 Corpus để TRAIN</h3>
+  <p><code>vcc_bench_data/training_corpus_v1.json</code> — 149,693 đoạn văn Wikipedia tiếng Việt (UVW-2026, CC BY-SA 4.0). <strong>Văn bản thô, không nhãn, không câu hỏi.</strong> Split 90/10 deterministic (seed 42) → 134,723 train / <strong>14,970 val</strong>. Trung bình ~181 token/đoạn, tổng ~27M token.</p>
+  <p class="fnote">Corpus thơ tiếng Việt (MIT, gated) không lấy được vì thiếu <code>HF_TOKEN</code>, nên corpus là Wikipedia-only.</p>
+
+  <h3>3.2 Benchmark để ĐO</h3>
+  <p><code>vcc_bench_data/vcc_bench_v2.json</code> — 614 mẫu, mỗi mẫu là <code>(context, query, reference_answer)</code>. <strong>Không dùng để train.</strong></p>
+  <div class="tw"><table>
+    <thead><tr><th>Task</th><th class="num">n</th><th class="num">Context (median)</th><th class="num">Reference (median)</th><th>Nguồn reference</th></tr></thead>
+    <tbody>
+      <tr><td><code>long_document_qa</code></td><td class="num">300</td><td class="num">21,660 kt</td><td class="num">28 kt</td><td>người viết (UIT-ViQuAD2.0)</td></tr>
+      <tr><td><code>needle_in_haystack</code></td><td class="num">120</td><td class="num">45,696 kt</td><td class="num">14 kt</td><td>dựng chính xác</td></tr>
+      <tr><td><code>summarization</code></td><td class="num">120</td><td class="num">12,371 kt</td><td class="num">441 kt</td><td>model viết (Qwen2.5-14B)</td></tr>
+      <tr><td><code>cross_lingual</code></td><td class="num">66</td><td class="num">2,778 kt</td><td class="num">2,767 kt</td><td>template tay + model</td></tr>
+      <tr><td><code>agent_tool_calling</code></td><td class="num">8</td><td class="num">567 kt</td><td class="num">137 kt</td><td>template tay</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">Phân bố <code>reference_type</code>: 300 <code>human_written_span</code>, 180 <code>model_written</code>, 120 <code>constructed_exact</code>, 14 <code>hand_written_template</code>.</p>
+  <p>Mẫu needle điển hình: nhét <code>"Mã kích hoạt của hệ thống là BẢO MẬT bảy ba hai."</code> vào giữa 16,919 ký tự về Hà Nội rồi hỏi lại mã đó. <strong>60/120 mẫu kèm decoy mất dấu</strong> (<code>"BAO MAT bảy ba hai"</code>) để kiểm tra riêng: nếu compressor làm mất dấu thì model có nhầm sang decoy không.</p>
+
+  <h3>3.3 v2 sửa gì so với v1</h3>
+  <p>v1 có 243 mẫu và <strong>không đo được gì</strong>: <code>reference_answer</code> chính là <code>context</code> ở 208/243 mẫu (160/160 mẫu QA), tức benchmark đang chấm điểm "tái tạo input" chứ không phải "làm được task". Median context v1 chỉ ~350 token — không task nào thực sự dài. v2 nâng context lên 2K–32K token, thay QA bằng span người viết, mở needle từ 9 mẫu ad-hoc thành grid 4 độ dài × 5 độ sâu × 6 biến thể, và cưỡng chế <strong>invariant độ dài reference trong CI</strong> để defect này không quay lại.</p>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>Kiến trúc phép đo — ba model, ba vai</h2>
+<pre>context 28,854 ký tự
+        │
+        ▼
+┌─────────────────────────────────────────────────┐
+│ <b>① SCORER = Qwen3-4B + LoRA</b>  (model TA TRAIN)    │  cho điểm từng token:
+│    - perplexity : token này khó đoán không?     │  "quan trọng cỡ nào?"
+│    - tone probe : hidden state mã hóa dấu gì?   │  → KHÔNG sinh chữ nào
+│    - morphology : từ này thuộc lớp nào?         │
+└─────────────────────────────────────────────────┘
+        │  giữ B token điểm cao nhất, bỏ phần còn lại
+        ▼
+context đã nén (≈14,000 ký tự)
+        │  + gói vào chat template cùng câu hỏi
+        ▼
+┌─────────────────────────────────────────────────┐
+│ <b>② GENERATOR = Qwen2.5-7B-Instruct</b>               │  đọc context đã nén,
+│    off-the-shelf, KHÔNG train                   │  sinh câu trả lời
+└─────────────────────────────────────────────────┘
+        │
+        ▼
+   "Tây Ban Nha"  ──so với── reference_answer  →  token-F1</pre>
+  <p>Vai thứ ba nằm ngoài luồng: <strong>Qwen2.5-14B-Instruct</strong> đã viết sẵn <code>reference_answer</code> cho 180/614 mẫu (summarization + phần cross-lingual).</p>
+  <p><strong>Generator là con LLM thật sự trả lời câu hỏi.</strong> Nó cố định. Chỉ đổi cách nén rồi xem generator trả lời tốt hay kém hơn — đó là toàn bộ phép đo. Generator được chạy hai lần với hai model (Qwen2.5-7B-Instruct và Qwen3-8B, tắt reasoning) để chắc kết luận không phụ thuộc một con generator.</p>
+
+  <h4>Đánh giá lựa chọn model</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Vai</th><th>Model</th><th>Nhận xét</th></tr></thead>
+    <tbody>
+      <tr><td>Scorer</td><td>Qwen3-4B + LoRA</td><td><span class="pill s-warn">Nghi vấn</span> Quá to cho vai này, và vẫn thua scorer 0.5B</td></tr>
+      <tr><td>Generator</td><td>Qwen2.5-7B-Instruct</td><td><span class="pill s-yes">Hợp lý</span> tiếng Việt tốt, chạy được 32K context</td></tr>
+      <tr><td>Generator #2</td><td>Qwen3-8B</td><td><span class="pill s-yes">Hợp lý</span> đúng cách làm robustness check</td></tr>
+      <tr><td>Scorer baseline</td><td>Qwen2.5-0.5B-Instruct</td><td><span class="pill s-yes">Hợp lý</span> đúng theo paper LLMLingua gốc</td></tr>
+      <tr><td>Viết reference</td><td>Qwen2.5-14B-Instruct</td><td><span class="pill s-warn">Nghi vấn</span> chưa review tay 10%; chỉ so sánh tương đối được</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn">
+    <p class="kicker">Nghịch lý chi phí</p>
+    <p>Cả bài toán tồn tại để <em>tiết kiệm</em> chi phí, mà scorer 4B phải nạp 8 GB weights chỉ để chấm điểm token — trong khi baseline dùng scorer 0.5B off-the-shelf lại đạt QA F1 0.442 so với 0.239 của ta.</p>
+  </div>
+</section>
+
+<section id="s5">
+  <h2><span class="n">05</span>Model đã train</h2>
+
+  <h3>5.1 Nhóm A — bốn model chính</h3>
+  <p>Tất cả là LoRA + tone probe trên Qwen3:</p>
+  <div class="tw"><table>
+    <thead><tr><th>Checkpoint</th><th>Base</th><th class="num">Trainable</th><th class="num">%</th><th class="num">batch×accum</th><th class="num">Peak VRAM</th></tr></thead>
+    <tbody>
+      <tr><td><code>trained_qwen3_0.6b</code></td><td>Qwen3-0.6B</td><td class="num">5,046,272</td><td class="num">0.84%</td><td class="num">8×4</td><td class="num">36.8 GB</td></tr>
+      <tr><td><code>trained_qwen3_1.7b</code></td><td>Qwen3-1.7B</td><td class="num">8,716,288</td><td class="num">0.50%</td><td class="num">8×4</td><td class="num">50.3 GB</td></tr>
+      <tr class="hi"><td><code>trained_qwen3_4b</code></td><td>Qwen3-4B</td><td class="num">16,515,072</td><td class="num">0.41%</td><td class="num">4×8</td><td class="num">16.8 GB</td></tr>
+      <tr><td><code>trained_qwen3_8b</code></td><td>Qwen3-8B</td><td class="num">21,823,488</td><td class="num">0.27%</td><td class="num">4×8</td><td class="num">25.1 GB</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">Dòng tô là checkpoint duy nhất từng được dùng downstream — xem §12.14.</p>
+  <p>Recipe <strong>giống hệt ở cả bốn rung</strong>: LoRA r=8, α=16, dropout 0.05, 7 target module (<code>q,k,v,o,gate,up,down_proj</code>), bf16, seq 1024, effective batch 32, 1,200 optimizer step, λ_tone=0.1, seed 42. Val split <strong>giống nhau</strong> ở cả bốn rung (fingerprint <code>fab97400ef3480e4</code>, 14,970 text, 2,712,768 token được chấm).</p>
+  <p>Loss: <code>L_total = L_LM + 0.1 × L_tone</code>, trong đó <code>L_tone</code> là cross-entropy của head tuyến tính đoán 7 lớp thanh điệu từ hidden state cuối (0 ngang, 1 huyền, 2 sắc, 3 hỏi, 4 ngã, 5 nặng, 6 unknown).</p>
+
+  <h3>5.2 Nhóm B — bốn run probe-only (control study), trên Qwen3-4B</h3>
+  <p><code>{lora, frozen_base} × {task thật, control task}</code>. Base đóng băng, chỉ train probe. 134,723 train / 14,970 val. Control task gán nhãn thanh điệu ngẫu nhiên cho mỗi <em>loại</em> token, giữ nhất quán giữa train và val — nên một probe chỉ ghi nhớ token identity vẫn giải được.</p>
+
+  <h3>5.3 Nhóm C — legacy, đã bị thay thế</h3>
+  <ul>
+    <li><code>trained_slm/</code> → <code>chronopt-research/vietnamese-gpt2-base</code> (125.6M), r=8, target <code>c_attn/c_proj/c_fc</code> — tone acc ~92.9% (Runs 1–3)</li>
+    <li><code>trained_models_quick/</code> → <code>Qwen2.5-0.5B-Instruct</code>, r=16 α=32 — run smoke</li>
+  </ul>
+  <p>Cả hai đo dưới benchmark <strong>trước khi sửa 7 defect</strong> → không dùng cho paper.</p>
+
+  <h3>5.4 Không train gì</h3>
+  <p>Generator (<code>Qwen2.5-7B-Instruct</code>, <code>Qwen3-8B</code>), scorer của LLMLingua/SnapKV (<code>Qwen2.5-0.5B-Instruct</code>), và model viết reference (<code>Qwen2.5-14B-Instruct</code>) đều là off-the-shelf.</p>
+</section>
+
+<section id="s6">
+  <h2><span class="n">06</span>Cơ chế scorer: chấm từng token, chạy theo cửa sổ</h2>
+  <p>Hai chuyện khác nhau:</p>
+  <ul>
+    <li><strong>Đầu ra</strong>: một điểm cho <strong>mỗi token</strong> — vector độ dài <code>n</code>. Đúng là per-token.</li>
+    <li><strong>Cách tính</strong>: model <strong>không</strong> chạy n lần. Nó chạy theo <strong>cửa sổ trượt 512 token</strong>, mỗi cửa sổ một forward pass, từ đó lấy ra 512 điểm cùng lúc.</li>
+  </ul>
+  <p>Cả hai tín hiệu lấy từ <strong>cùng một forward pass</strong> (<code>vncompress/compressors/slm_tone_probe.py:229</code>):</p>
+<pre>out = self.model(tensor, output_hidden_states=True)
+<b># ① perplexity ← out.logits            : -log P(t_i | context)
+# ② tone       ← out.hidden_states[-1]  → probe(h_i) → 7 lớp thanh điệu</b></pre>
+  <p>Mỗi cửa sổ chỉ nhận điểm cho phần đuôi không chồng lấn của nó, nên token nào cũng có left-context thật. Sau đó điểm token (tokenizer Qwen3-4B) → điểm <strong>ký tự</strong> → điểm token của generator (tokenizer Qwen2.5-7B) — phải đi qua ký tự vì scorer và generator tokenize khác nhau.</p>
+
+  <h3>6.1 Số lượt forward</h3>
+  <p>Mặc định <code>window_size=512, stride=256</code> (chồng lấn 50%), chạy <strong>tuần tự, batch=1</strong>:</p>
+  <div class="tw"><table>
+    <thead><tr><th class="num">Context (token)</th><th class="num">Số forward</th><th class="num">Vị trí token xử lý</th><th class="num">Bội số</th></tr></thead>
+    <tbody>
+      <tr><td class="num">2,000</td><td class="num">7</td><td class="num">3,584</td><td class="num">1.79×</td></tr>
+      <tr><td class="num">4,000</td><td class="num">15</td><td class="num">7,680</td><td class="num">1.92×</td></tr>
+      <tr class="hi"><td class="num">12,000</td><td class="num">46</td><td class="num">23,552</td><td class="num">1.96×</td></tr>
+      <tr><td class="num">16,000</td><td class="num">62</td><td class="num">31,744</td><td class="num">1.98×</td></tr>
+      <tr><td class="num">32,000</td><td class="num">124</td><td class="num">63,488</td><td class="num">1.98×</td></tr>
+    </tbody>
+  </table></div>
+  <p>Vì overlap 50%, mỗi token bị đưa qua model ~2 lần — chỉ một lần được dùng.</p>
+
+  <h3>6.2 So với LLMLingua</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Arm</th><th>Model</th><th>Cửa sổ</th><th class="num">Lượt @12k</th><th class="num">Latency (QA 2×, median)</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td>LLMLingua</td><td>Qwen2.5-<strong>0.5B</strong></td><td>2048, overlap 256</td><td class="num">7</td><td class="num win">59 ms</td></tr>
+      <tr><td><code>slm_scorer_base</code></td><td>Qwen3-4B (base)</td><td>512, stride 256</td><td class="num">46</td><td class="num">922 ms</td></tr>
+      <tr><td><code>slm_scorer</code></td><td>Qwen3-4B + LoRA</td><td>512, stride 256</td><td class="num">46</td><td class="num">1,343 ms</td></tr>
+      <tr><td><code>slm_tone_probe_rule</code></td><td>Qwen3-4B + probe</td><td>512, stride 256</td><td class="num">46</td><td class="num neg">3,237 ms</td></tr>
+    </tbody>
+  </table></div>
+  <p>Ba yếu tố cộng lại: model to hơn 8×, số lượt nhiều hơn 6.6×, cộng một vòng lặp Python gán từng scalar (<code>for k in range(512)</code> × 46 cửa sổ × 2 tín hiệu ≈ 47,000 phép gán/mẫu) → <strong>55× chậm hơn</strong> trên QA, <strong>113×</strong> trên needle (6,675 ms vs 59 ms). Trên needle 32K, <code>slm_tone_probe_rule</code> mất tới <strong>18.4 giây một mẫu</strong>.</p>
+  <div class="callout warn">
+    <p class="kicker">Đây là cấu hình tự làm hại mình</p>
+    <p>Nâng window lên 2048 và giảm overlap xuống 256 (đúng như LLMLingua) sẽ giảm 46 → 7 lượt, gần như miễn phí, chưa cần đổi thuật toán. Ở trạng thái hiện tại: nén xong tốn 3.2 giây, còn generator đọc context đầy đủ chỉ mất ~0.8 giây — tức việc nén đang <em>đắt hơn</em> việc nó tiết kiệm.</p>
+  </div>
+  <p class="fnote">Latency của các biến thể không dùng model (cùng cell QA 2×, median): <code>tone_aware</code> 77 ms, <code>combined</code> 113 ms, <code>morphology_aware</code> 195 ms.</p>
+</section>
+
+<section id="s7">
+  <h2><span class="n">07</span>Kết quả nội tại — train có chạy không</h2>
+
+  <h3>7.1 Thang scorer</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Rung</th><th class="num">PPL base</th><th class="num">PPL LoRA</th><th class="num">ratio</th><th class="num">95% CI của ratio</th><th class="num">Δ</th><th class="num">Tone acc (marked)</th><th class="num">Macro-F1 (marked)</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen3-0.6B</td><td class="num">26.00</td><td class="num">16.28</td><td class="num">0.6259</td><td class="num">[0.6239, 0.6280]</td><td class="num">−37.4%</td><td class="num">0.8638</td><td class="num">0.8626</td></tr>
+      <tr><td>Qwen3-1.7B</td><td class="num">17.85</td><td class="num">11.07</td><td class="num">0.6198</td><td class="num">[0.6177, 0.6218]</td><td class="num">−38.0%</td><td class="num">0.9410</td><td class="num">0.9401</td></tr>
+      <tr class="hi"><td>Qwen3-4B</td><td class="num">14.95</td><td class="num">9.15</td><td class="num">0.6116</td><td class="num">[0.6098, 0.6136]</td><td class="num win">−38.8%</td><td class="num">0.9629</td><td class="num">0.9587</td></tr>
+      <tr><td>Qwen3-8B</td><td class="num">11.71</td><td class="num win">7.75</td><td class="num">0.6616</td><td class="num">[0.6597, 0.6633]</td><td class="num">−33.8%</td><td class="num win">0.9789</td><td class="num win">0.9757</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">Majority baseline 55.0%; chance cho 5 lớp non-<em>ngang</em> ~20%.</p>
+  <p>CI là paired bootstrap trên per-sample <code>nll_sums</code> (2,000 resample, seed 42), tính khi soạn báo cáo này. Rung 1.7B ra [0.6177, 0.6218], <strong>khớp</strong> con số [0.6178, 0.6218] paper đang trích → phương pháp tái lập được, và ba rung còn lại giờ cũng có CI (trước đó không file nào lưu).</p>
+  <p>Vì cả bốn rung dùng <strong>cùng val split và cùng số token được chấm</strong>, thang này là một scaling curve so sánh được ngang rung — không chỉ bốn so sánh nội bộ như caption bảng hiện tại đang nói.</p>
+  <p class="fnote">Loss: <code>lm_loss</code> 3.20→2.61 (0.6B), 2.94→2.18 (1.7B), 3.29→2.15 (4B), 2.72→2.40 (8B); <code>tone_loss</code> 0.22→0.007–0.024 ở mọi rung.</p>
+
+  <h3>7.2 Cấu trúc lỗi của probe</h3>
+  <p>Confusion matrix 7×7, chỉ 4B và 8B có lưu:</p>
+  <div class="tw"><table>
+    <thead><tr><th>Lớp</th><th class="num">Support</th><th class="num">Recall 4B</th><th class="num">Recall 8B</th><th>Nhầm nhiều nhất</th></tr></thead>
+    <tbody>
+      <tr><td>ngang</td><td class="num">55.0%</td><td class="num">0.996</td><td class="num">0.997</td><td class="dim">—</td></tr>
+      <tr><td>huyền</td><td class="num">11.1%</td><td class="num">0.981</td><td class="num">0.989</td><td>→ ngang 1.1%</td></tr>
+      <tr><td>sắc</td><td class="num">13.8%</td><td class="num">0.961</td><td class="num">0.979</td><td>→ <strong>nặng</strong> 1.8%</td></tr>
+      <tr><td>hỏi</td><td class="num">6.3%</td><td class="num">0.950</td><td class="num">0.965</td><td>→ <strong>ngã</strong> ⇄</td></tr>
+      <tr class="hi"><td><strong>ngã</strong></td><td class="num">2.7%</td><td class="num neg">0.908</td><td class="num">0.946</td><td>→ <strong>hỏi 3.0%</strong>, sắc 2.6%</td></tr>
+      <tr><td>nặng</td><td class="num">11.1%</td><td class="num">0.968</td><td class="num">0.985</td><td>→ sắc 2.1%</td></tr>
+      <tr><td class="dim">unknown</td><td class="num dim">0%</td><td class="num dim">—</td><td class="num dim">—</td><td class="dim">lớp chết, không bao giờ kích hoạt</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout">
+    <p class="kicker">Model học âm vị, không nhớ bảng tra</p>
+    <p>Lỗi không phân bố đều — nó tập trung đúng vào cặp <strong>hỏi ⇄ ngã</strong> (cặp bị nhập trong tiếng Việt miền Nam/Trung) và cặp <strong>sắc ⇄ nặng</strong> (cùng đặc trưng thanh cao/tắc thanh hầu). <em>Ngã</em> là lớp khó nhất và cũng thưa nhất; scale 4B→8B mua được nhiều nhất đúng ở đó (+0.038 recall).</p>
+  </div>
+
+  <h3>7.3 Probe control 2×2 (Qwen3-4B)</h3>
+  <p>Macro-F1 trên token có dấu, 14,970 held-out text:</p>
+  <div class="tw"><table>
+    <thead><tr><th>Biểu diễn</th><th class="num">Task thật</th><th class="num">Control task</th><th class="num">Selectivity</th></tr></thead>
+    <tbody>
+      <tr><td>Frozen base</td><td class="num">0.8601</td><td class="num">0.7530</td><td class="num">+0.1071</td></tr>
+      <tr><td>+ LoRA (λ_tone=0.1)</td><td class="num win">0.9226</td><td class="num">0.7383</td><td class="num win">+0.1843</td></tr>
+      <tr class="rule-top"><td><em>LoRA thêm vào</em></td><td class="num pos">+0.0625</td><td class="num neg">−0.0147</td><td class="num">+0.0772</td></tr>
+    </tbody>
+  </table></div>
+  <p>Đọc đủ ba số: LoRA thêm cấu trúc <strong>đúng về tone</strong> (tăng task thật, giảm control task, gần gấp đôi selectivity). Nhưng base đóng băng đã đạt 0.8601 <em>trước</em> mọi huấn luyện tone, và control task đã đạt 0.7530 → phần lớn thứ probe đọc là token identity. Con số 0.9587 trích một mình là nói quá.</p>
+  <div class="callout warn">
+    <p class="kicker">Caveat cốt lõi</p>
+    <p>Nhãn thanh điệu là <strong>hàm tất định của token id</strong>. Một predictor không cần train, chỉ tra token id rồi chạy tone analyzer, đạt <strong>100%</strong>. Nên probe không đo "model có đoán được thanh điệu không" — nó đo "thông tin thanh điệu còn sót lại bao nhiêu trong hidden state".</p>
+  </div>
+</section>
+
+<section id="s8">
+  <h2><span class="n">08</span>Kết quả downstream — đem ra dùng thật</h2>
+
+  <h3>8.1 Bảng chất lượng chính</h3>
+  <p class="fnote">Generator Qwen2.5-7B-Instruct. Mỗi cột là metric headline của task đó: QA = token-F1, Needle = recall, Cross-lingual = ROUGE-L, Agent = token-F1.</p>
+  <div class="tw"><table>
+    <caption>2× compression</caption>
+    <thead><tr><th>Method</th><th class="num">Long-doc QA</th><th class="num">Needle</th><th class="num">Cross-lingual</th><th class="num">Agent tools</th></tr></thead>
+    <tbody>
+      <tr class="base"><td>Không nén</td><td class="num">0.634</td><td class="num">0.993*</td><td class="num">0.390</td><td class="num">0.260</td></tr>
+      <tr><td><strong>LLMLingua</strong></td><td class="num win">0.442</td><td class="num win">0.742</td><td class="num win">0.326</td><td class="num">0.262</td></tr>
+      <tr><td>SnapKV</td><td class="num">0.371</td><td class="num">0.573</td><td class="num">0.297</td><td class="num">0.251</td></tr>
+      <tr><td>LACC-Morph</td><td class="num">0.277</td><td class="num">0.296</td><td class="num">0.249</td><td class="num win">0.280</td></tr>
+      <tr><td>LACC-Combined</td><td class="num">0.212</td><td class="num">0.051</td><td class="num">0.270</td><td class="num">0.130</td></tr>
+      <tr><td>LACC-Tone</td><td class="num">0.122</td><td class="num neg">0.023</td><td class="num">0.292</td><td class="num">0.194</td></tr>
+      <tr><td>Random dropout</td><td class="num">0.168</td><td class="num">0.119</td><td class="num">0.210</td><td class="num">0.230</td></tr>
+    </tbody>
+  </table></div>
+  <div class="tw"><table>
+    <caption>4× compression</caption>
+    <thead><tr><th>Method</th><th class="num">Long-doc QA</th><th class="num">Needle</th><th class="num">Cross-lingual</th><th class="num">Agent tools</th></tr></thead>
+    <tbody>
+      <tr class="base"><td>Không nén</td><td class="num">0.635</td><td class="num">0.993*</td><td class="num">0.389</td><td class="num">0.256</td></tr>
+      <tr><td><strong>LLMLingua</strong></td><td class="num win">0.259</td><td class="num win">0.403</td><td class="num">0.230</td><td class="num win">0.223</td></tr>
+      <tr><td>SnapKV</td><td class="num">0.222</td><td class="num">0.353</td><td class="num win">0.237</td><td class="num">0.104</td></tr>
+      <tr><td>LACC-Morph</td><td class="num">0.124</td><td class="num">0.071</td><td class="num">0.192</td><td class="num">0.144</td></tr>
+      <tr><td>LACC-Combined</td><td class="num">0.105</td><td class="num">0.018</td><td class="num">0.154</td><td class="num">0.141</td></tr>
+      <tr><td>LACC-Tone</td><td class="num">0.027</td><td class="num neg">0.000</td><td class="num">0.186</td><td class="num">0.149</td></tr>
+      <tr><td>Random dropout</td><td class="num">0.044</td><td class="num">0.007</td><td class="num">0.162</td><td class="num">0.097</td></tr>
+    </tbody>
+  </table></div>
+  <div class="tw"><table>
+    <caption>8× compression</caption>
+    <thead><tr><th>Method</th><th class="num">Long-doc QA</th><th class="num">Needle</th><th class="num">Cross-lingual</th><th class="num">Agent tools</th></tr></thead>
+    <tbody>
+      <tr class="base"><td>Không nén</td><td class="num">0.635</td><td class="num">0.993*</td><td class="num">0.389</td><td class="num">0.256</td></tr>
+      <tr><td>LLMLingua</td><td class="num">0.145</td><td class="num">0.199</td><td class="num win">0.157</td><td class="num win">0.233</td></tr>
+      <tr><td><strong>SnapKV</strong></td><td class="num win">0.161</td><td class="num win">0.250</td><td class="num">0.153</td><td class="num">0.217</td></tr>
+      <tr><td>LACC-Morph</td><td class="num">0.080</td><td class="num">0.046</td><td class="num">0.114</td><td class="num">0.117</td></tr>
+      <tr><td>LACC-Combined</td><td class="num">0.063</td><td class="num">0.010</td><td class="num">0.112</td><td class="num">0.182</td></tr>
+      <tr><td>LACC-Tone</td><td class="num">0.014</td><td class="num neg">0.000</td><td class="num">0.119</td><td class="num">0.157</td></tr>
+      <tr><td>Random dropout</td><td class="num">0.026</td><td class="num">0.000</td><td class="num">0.109</td><td class="num">0.136</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">* Arm <code>none</code> fail 28/120 mẫu needle ở cả ba ratio (context 32K + chat wrapper + 256 token sinh ra vượt cửa sổ 32,768 của engine). Mọi method nén fail 0. Nên 0.993 là trung bình trên 92 mẫu vừa cửa sổ — <strong>một subset dễ hơn</strong>. So sánh method-với-method không bị ảnh hưởng; chỉ dòng baseline không so trực tiếp được trên task này.</p>
+
+  <h3>8.2 Morphology vs random — nửa đứng được</h3>
+  <div class="tw"><table>
+    <thead><tr><th class="num">Ratio</th><th>Task</th><th class="num">Morph</th><th class="num">Random</th><th class="num">Gain</th></tr></thead>
+    <tbody>
+      <tr><td class="num">2×</td><td>QA</td><td class="num">0.277</td><td class="num">0.168</td><td class="num pos">+65%</td></tr>
+      <tr><td class="num">2×</td><td>Needle</td><td class="num">0.296</td><td class="num">0.119</td><td class="num pos">+150%</td></tr>
+      <tr><td class="num">4×</td><td>QA</td><td class="num">0.124</td><td class="num">0.044</td><td class="num pos">+182%</td></tr>
+      <tr><td class="num">4×</td><td>Needle</td><td class="num">0.071</td><td class="num">0.007</td><td class="num pos">+924%</td></tr>
+      <tr><td class="num">8×</td><td>QA</td><td class="num">0.080</td><td class="num">0.026</td><td class="num pos">+211%</td></tr>
+      <tr><td class="num">8×</td><td>Agent</td><td class="num">0.117</td><td class="num">0.136</td><td class="num neg">−14%</td></tr>
+    </tbody>
+  </table></div>
+  <p>Trên generator thứ hai (Qwen3-8B) hướng giữ nguyên: QA +29/+37/+56%, needle +119/+327/+516%, agent âm ở cả ba ratio. <strong>Xếp hạng bất biến theo generator</strong> — kết luận không phải artifact của một bộ sinh.</p>
+
+  <h3>8.3 Ablation — tách riêng từng tín hiệu (4×)</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Method</th><th class="num">Long-doc QA</th><th class="num">Needle</th><th class="num">Cross-lingual</th><th class="num">Agent tools</th></tr></thead>
+    <tbody>
+      <tr><td>LACC-Combined</td><td class="num">0.118</td><td class="num">0.214</td><td class="num">0.145</td><td class="num win">0.244</td></tr>
+      <tr class="hi"><td><strong>w_ppl only</strong></td><td class="num win">0.253</td><td class="num win">0.494</td><td class="num">0.226</td><td class="num">0.236</td></tr>
+      <tr><td>w_tone only</td><td class="num">0.113</td><td class="num neg">0.010</td><td class="num">0.189</td><td class="num">0.163</td></tr>
+      <tr><td>w_morph only</td><td class="num">0.184</td><td class="num">0.216</td><td class="num win">0.226</td><td class="num">0.177</td></tr>
+    </tbody>
+  </table></div>
+  <p>Blend thua tín hiệu perplexity đơn lẻ trên mọi task trừ agent (n=8, không đỡ được kết luận nào).</p>
+
+  <h3>8.4 TPR và đánh đổi</h3>
+  <div class="tw"><table>
+    <caption>Tone Preservation Rate, trung bình toàn benchmark</caption>
+    <thead><tr><th>Method</th><th class="num">2×</th><th class="num">4×</th><th class="num">8×</th></tr></thead>
+    <tbody>
+      <tr><td>LACC-Tone</td><td class="num">0.960</td><td class="num">0.566</td><td class="num">0.289</td></tr>
+      <tr><td>LACC-Combined</td><td class="num">0.777</td><td class="num">0.503</td><td class="num">0.256</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn">
+    <p class="kicker">Metric của paper bị chính sweep của paper đặt về 0</p>
+    <p>Calibration 30 nhánh trên dev split đặt optimum tại <strong><code>tone_weight = 0.0</code></strong>, alpha 0.25, gamma 0.2. Trong sweep sensitivity, quality cao nhất (0.134) đúng ở điểm <code>tone_weight=0</code>; TPR cao nhất (0.493) thì quality thấp nhất (0.050).</p>
+  </div>
+
+  <h3>8.5 A/B có kiểm soát: probe vs rule</h3>
+  <p class="fnote">Giữ nguyên SLM (Qwen3-4B), chỉ đổi nguồn tín hiệu thanh điệu. 120 mẫu, paired bootstrap.</p>
+  <div class="tw"><table>
+    <thead><tr><th class="num">Ratio</th><th>Metric</th><th class="num">Δ (probe − rule)</th><th class="num">95% CI</th><th class="num">p</th><th class="num">win-rate</th><th class="num">sig</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td class="num">2×</td><td>TPR</td><td class="num neg">−0.246</td><td class="num">[−0.251, −0.241]</td><td class="num">0.000</td><td class="num">0%</td><td class="num">✓</td></tr>
+      <tr class="hi"><td class="num">2×</td><td>token-F1</td><td class="num pos">+0.086</td><td class="num">[+0.028, +0.146]</td><td class="num">0.003</td><td class="num">76%</td><td class="num">✓</td></tr>
+      <tr><td class="num">2×</td><td>ROUGE-L</td><td class="num pos">+0.082</td><td class="num">[+0.024, +0.142]</td><td class="num">0.004</td><td class="num">75%</td><td class="num">✓</td></tr>
+      <tr><td class="num">4×</td><td>TPR</td><td class="num neg">−0.136</td><td class="num">[−0.140, −0.133]</td><td class="num">0.000</td><td class="num">0%</td><td class="num">✓</td></tr>
+      <tr><td class="num">4×</td><td>token-F1</td><td class="num">+0.016</td><td class="num">[−0.026, +0.060]</td><td class="num">0.459</td><td class="num">86%</td><td class="num dim">·</td></tr>
+    </tbody>
+  </table></div>
+  <p>Ở 4× hiệu ứng chất lượng nhỏ và không còn significant, dù win-rate 86% — nhất quán về dấu nhưng phương sai lớn.</p>
+
+  <h3>8.6 Các arm dùng SLM trên full benchmark (2×)</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Arm</th><th class="num">QA</th><th class="num">Needle</th><th class="num">Cross-ling</th><th class="num">Agent</th></tr></thead>
+    <tbody>
+      <tr><td><code>slm_scorer</code> (4B đã train)</td><td class="num">0.239</td><td class="num win">0.395</td><td class="num">0.237</td><td class="num">0.283</td></tr>
+      <tr><td><code>slm_scorer_base</code> (4B base)</td><td class="num">0.238</td><td class="num">0.303</td><td class="num">0.248</td><td class="num">0.290</td></tr>
+      <tr><td><code>slm_tone_probe_rule</code></td><td class="num">0.234</td><td class="num">0.354</td><td class="num">0.246</td><td class="num win">0.296</td></tr>
+      <tr class="hi"><td><em>LLMLingua (scorer 0.5B)</em></td><td class="num win">0.442</td><td class="num win">0.742</td><td class="num win">0.326</td><td class="num">0.262</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">Ở 4×: <code>slm_scorer</code> 0.062 / 0.038 / 0.149 / 0.188 so với <code>slm_scorer_base</code> 0.071 / 0.028 / 0.153 / 0.179.</p>
+  <p>Đọc ra: train scorer <strong>gần như không đổi gì trên QA</strong> (0.239 vs 0.238), ở 4× còn kém hơn base. Lợi ích duy nhất có thật là <strong>needle: 0.395 vs 0.303 (+30%)</strong> — retrieval, không phải QA.</p>
+
+  <h3>8.7 Chi phí (4×, trung bình toàn benchmark)</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Method</th><th class="num">Realized CR</th><th class="num">Latency</th><th class="num">VRAM</th></tr></thead>
+    <tbody>
+      <tr class="base"><td>Không nén</td><td class="num">1.00×</td><td class="num">2.4 ms</td><td class="num">—</td></tr>
+      <tr><td>Random dropout</td><td class="num">4.00×</td><td class="num">3.5 ms</td><td class="num">0 GB</td></tr>
+      <tr><td>LLMLingua</td><td class="num">4.70×</td><td class="num win">73.8 ms</td><td class="num">~1 GB (0.5B)</td></tr>
+      <tr><td>SnapKV</td><td class="num">4.00×</td><td class="num neg">503.8 ms</td><td class="num">~1 GB</td></tr>
+      <tr><td>LACC-Tone</td><td class="num">4.00×</td><td class="num">105.5 ms</td><td class="num win">0 GB</td></tr>
+      <tr><td>LACC-Morph</td><td class="num">4.02×</td><td class="num">234.6 ms</td><td class="num win">0 GB</td></tr>
+      <tr><td>LACC-Combined</td><td class="num">4.00×</td><td class="num">179.2 ms</td><td class="num win">0 GB</td></tr>
+    </tbody>
+  </table></div>
+  <p class="fnote">Latency của LACC-Morph bị chi phối bởi word segmenter pure-Python → <strong>không phải phép đo hiệu năng công bằng</strong>, chưa claim được lợi thế chi phí.</p>
+</section>
+
+<section id="s9">
+  <h2><span class="n">09</span>Một mẫu gói cả kết luận</h2>
+  <p>Mẫu <code>viquad_qa_0002</code>, nén 2×. Câu hỏi: <em>"Quốc gia đầu tiên của châu Âu đã tuyên bố chủ quyền đối với Texas là gì?"</em> — đáp án <em>"Tây Ban Nha"</em>.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Method</th><th class="num">Nén</th><th class="num">TPR</th><th>Trả lời</th><th class="num">token-F1</th></tr></thead>
+    <tbody>
+      <tr class="base"><td>Không nén</td><td class="num">1.00×</td><td class="num">—</td><td>"Tây Ban Nha"</td><td class="num">1.000</td></tr>
+      <tr><td>LLMLingua (scorer 0.5B)</td><td class="num">2.41×</td><td class="num">—</td><td>"Tây Ban Nha"</td><td class="num win">1.000</td></tr>
+      <tr><td>LACC-Morph</td><td class="num">2.00×</td><td class="num">—</td><td>"Hoa Kỳ"</td><td class="num neg">0.000</td></tr>
+      <tr class="hi"><td><strong>LACC-Tone</strong></td><td class="num">2.00×</td><td class="num win">0.932</td><td><strong>"Không đủ thông tin."</strong></td><td class="num neg">0.000</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn">
+    <p class="kicker">Đọc dòng cuối cho kỹ</p>
+    <p>Nó <strong>giữ được 93.2% token có dấu thanh</strong> — gần hoàn hảo đúng cái mục tiêu paper đặt ra — <strong>và vẫn xóa mất câu chứa đáp án.</strong> Trên 300 mẫu QA có <strong>53 mẫu</strong> cùng dạng: không-nén đúng &gt;0.9, LLMLingua đúng &gt;0.5, tone-aware về 0.</p>
+    <p>"Giữ được dấu thanh" và "giữ được thông tin cần thiết" là hai chuyện khác nhau, và wave 1 đã tối ưu chuyện thứ nhất.</p>
+  </div>
+</section>
+
+<section id="s10">
+  <h2><span class="n">10</span>Insight</h2>
+  <ol class="list">
+    <li><strong>Hai tín hiệu bị gộp dưới một cái tên nhưng hành xử trái ngược.</strong> Morphology thắng random 65–182% trên QA ở 0 GB VRAM. Tone-contrast — thành phần được kỳ vọng gánh cả paper — giữ dấu gần hoàn hảo và thấp hơn cả random trên mọi task định vị thông tin. Tiền đề "language-aware" đúng một nửa, và đúng ở nửa không ai đặt cược.</li>
+    <li><strong>TPR không phải proxy cho chất lượng — nó nghịch biến.</strong> Chính sweep của paper đặt trọng số tối ưu của metric mà paper đề xuất về 0.</li>
+    <li><strong>A/B có kiểm soát tách "học được" khỏi "hữu ích".</strong> Probe học từ LoRA giữ tone kém hơn heuristic tra từ điển nhưng trả lời tốt hơn, cả hai delta đều có CI loại trừ 0. Phonological consistency loss dạy model một thứ thật, nhưng thứ đó không phải "bảo toàn thanh điệu" — và thành phần tối đa hóa TPR chính là thành phần trả giá bằng chất lượng.</li>
+    <li><strong>Phương pháp huấn luyện hoạt động, và đặc hiệu cho tone.</strong> +0.0625 trên task thật vs −0.0147 trên control loại trừ giả thuyết "probe chỉ đọc token identity". Cộng PPL giảm 34–39% đồng đều ở cả bốn rung → pipeline train là đóng góp độc lập, dùng được kể cả khi bỏ hẳn claim về nén.</li>
+    <li><strong>Scorer tốt hơn ≠ nén tốt hơn.</strong> Scorer Qwen3-4B đã fine-tune cho QA 2× = 0.239, trong khi LLMLingua với scorer 0.5B = 0.442. Lợi ích nằm ở <em>thuật toán chọn token</em> (perplexity theo cửa sổ, phân bổ budget lặp), không ở kích thước hay chất lượng scorer. Đây là insight đắt nhất của wave: đã đầu tư vào nhánh không quyết định kết quả.</li>
+    <li><strong>Cấu trúc lỗi của probe khôi phục hiện tượng ngôn ngữ học thật.</strong> Lỗi tập trung ở cặp hỏi⇄ngã và sắc⇄nặng — đúng các cặp bị nhập trong phương ngữ tiếng Việt. Model học âm vị, không nhớ bảng tra.</li>
+    <li><strong>Có đúng một vùng tone thắng: task mà bề mặt chữ <em>là</em> output.</strong> Trên cross-lingual 2×, tone_aware (0.292) là biến thể LACC tốt nhất, trên cả morph (0.249). Giữ dấu ở đây là phần của task, không phải chi phí.</li>
+    <li><strong>Xếp hạng bất biến theo generator.</strong> Hai generator khác nhau cho cùng thứ tự.</li>
+    <li><strong>Nén tiếng Việt long-context chỉ dùng được ở 2×.</strong> Ở 4× method tốt nhất còn 0.259 QA F1 so với 0.635 không nén (−59%); ở 8× còn 0.145. Không method nào thoát khỏi vách này.</li>
+    <li><strong>Kỷ luật đo lường tạo ra kết quả, không phải method.</strong> Invariant độ dài reference và cơ chế đếm failure riêng biệt vừa phát hiện defect v1, vừa bắt được caveat <code>none</code>-needle. Benchmark cũ <em>không thể</em> phát hiện gì vì 86% mẫu chấm điểm tái tạo input.</li>
+  </ol>
+</section>
+
+<section id="s11">
+  <h2><span class="n">11</span>Đối chiếu contribution gốc với kết quả</h2>
+  <p>Paper mở đầu bằng một tiền đề: mọi phương pháp nén hiện có (LLMLingua, SnapKV, H2O, StreamingLLM, Gist, ICAE) đều <strong>language-blind</strong>. Từ đó suy ra ba vấn đề và tuyên bố bốn contribution.</p>
+
+  <h4>Ba vấn đề nền</h4>
+  <div class="tw"><table>
+    <thead><tr><th>ID</th><th>Tuyên bố gốc</th><th>Kết quả</th></tr></thead>
+    <tbody>
+      <tr><td><strong>P1</strong><br><span class="pill s-no">Bác bỏ</span></td><td>Mất thông tin thanh điệu — bỏ token có dấu là đổi nghĩa (<em>má</em> → <em>ma</em>)</td><td><strong>Tiền đề sai.</strong> Giữ 93.2% dấu vẫn trả lời sai; TPR nghịch biến với quality. Vấn đề không phải "mất dấu" mà là "mất câu chứa đáp án", và dấu thanh không cho biết câu nào chứa đáp án</td></tr>
+      <tr><td><strong>P2</strong><br><span class="pill s-yes">Xác nhận</span></td><td>Lãng phí budget cho hư từ — 30–40% token là hư từ, bị chấm ngang thực từ</td><td><strong>Đúng.</strong> Morphology thắng random 65–182% trên QA ở 0 GB VRAM</td></tr>
+      <tr><td><strong>P3</strong><br><span class="pill s-open">Chưa đo</span></td><td>Token inflation — tiếng Việt cần 1.5–2.0× token so với tiếng Anh</td><td>Là citation từ paper khác; không thí nghiệm nào trong wave 1 kiểm chứng hay khai thác</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>Bốn contribution</h4>
+  <div class="tw"><table>
+    <thead><tr><th>ID</th><th>Tuyên bố gốc</th><th>Kết quả</th></tr></thead>
+    <tbody>
+      <tr><td><strong>C1</strong><br><span class="pill s-warn">Nửa vời</span></td><td>LACC — framework blend tone-contrast + morphology + perplexity thành một điểm importance, 3 tier hardware (0 GB → INT4 7B)</td><td><strong>Blend thua từng tín hiệu riêng.</strong> Ablation 4×: ppl-only 0.253 &gt; morph-only 0.184 &gt; combined 0.118. Calibration đặt w_tone = 0</td></tr>
+      <tr><td><strong>C2</strong><br><span class="pill s-warn">Nửa vời</span></td><td><em>Phonological Consistency Loss</em> — objective train cùng LoRA để hidden state mã hóa thanh điệu; classifier dùng luôn làm tone probe ("a genuine training-method contribution")</td><td><strong>Nửa đúng, nửa tự phản.</strong> Probe học thật và đặc hiệu, nhưng thiếu ô control λ_tone=0 nên chưa tách được công của λ_tone khỏi công của fine-tune tiếng Việt. Và trong A/B, probe học được thắng <em>chính vì giữ dấu ít hơn</em> heuristic</td></tr>
+      <tr><td><strong>C3</strong><br><span class="pill s-yes">Xác nhận</span></td><td>VCC-Bench — benchmark nén context tiếng Việt đầu tiên, kèm provenance/checksum/reproducibility</td><td><strong>Đóng góp mạnh nhất còn lại.</strong> v1 243 mẫu → v2 614 mẫu, QA người viết, needle grid có 60 cặp tối thiểu thanh điệu, invariant trong CI</td></tr>
+      <tr><td><strong>C4</strong><br><span class="pill s-yes">Xác nhận</span></td><td>Báo cáo train/eval từ đầu cho model LoRA + tone loss</td><td><strong>Hoàn thành và mạnh hơn:</strong> 4 rung 0.6B–8B, cùng split, có CI</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="s12">
+  <h2><span class="n">12</span>Vấn đề còn lại</h2>
+  <p class="fnote">Xếp theo mức độ chặn submission.</p>
+
+  <h3>Chặn paper</h3>
+  <div class="callout warn">
+    <p class="kicker">1. Abstract và Introduction vẫn bảo vệ luận điểm mà Results đã bác bỏ</p>
+    <p>Abstract <strong>chưa sửa một chữ</strong> so với <code>HEAD</code>:</p>
+  </div>
+  <div class="tw"><table>
+    <thead><tr><th>Abstract đang viết</th><th>Thực tế sau wave 1</th></tr></thead>
+    <tbody>
+      <tr><td>"~22,200 paragraphs"</td><td>149,693 paragraphs</td></tr>
+      <tr><td>"tone accuracy 16.6% → <strong>92.9%</strong>"</td><td>0.9629 (4B) — 92.9% là số của model GPT-2 cũ</td></tr>
+      <tr><td>"perplexity improved <strong>25.2%</strong>"</td><td>−38.8% (4B)</td></tr>
+      <tr><td>"<strong>243-sample</strong> benchmark"</td><td>614 mẫu (v2)</td></tr>
+      <tr><td>"tone signal <strong>nearly doubling</strong> TPR (0.96 vs 0.51–0.52)" — trình bày như kết quả dương</td><td>TPR cao = quality thấp; w_tone tối ưu = 0</td></tr>
+    </tbody>
+  </table></div>
+  <ol class="list" start="2">
+    <li><strong>Bảng scorer ladder trong paper thiếu 2 rung.</strong> <code>paper/tables/slm_ladder.tex</code> (sinh ra) có đủ 4 rung; Table trong <code>lacc_icisn_en.tex</code> chỉ có 0.6B và 1.7B, <strong>in đậm 1.7B như tốt nhất</strong> — trong khi 4B và 8B đều hơn. Nguyên nhân: 8 bảng được copy inline thay vì <code>\input{paper/tables/…}</code>, nên <code>make_paper_tables.py</code> chạy lại không lan vào paper.</li>
+    <li><strong>Kiểm định thống kê cho các bảng chính.</strong> Chỉ hai so sánh có CI: PPL (4 rung) và A/B probe-vs-rule. Bảng benchmark chính, ablation, so sánh SLM scorer đều là mean chưa bootstrap. <code>vncompress/evaluation/significance.py</code> đã có, per-cell dump có per-sample values → việc scripting, không cần GPU.</li>
+  </ol>
+
+  <h3>Chặn kết luận khoa học</h3>
+  <ol class="list" start="4">
+    <li><strong>Thiếu ô control λ_tone=0.</strong> Probe control so <code>frozen base</code> vs <code>base + LoRA(λ=0.1)</code> → +0.0625. Ô thiếu là <code>base + LoRA(λ=0)</code>. Chưa ai tách được +0.0625 đó là do λ_tone hay chỉ do fine-tune LM trên tiếng Việt. <strong>Một run ~45 phút GPU, và nó quyết định một trong hai kết quả dương của paper.</strong></li>
+    <li><strong>λ_tone chưa từng được sweep.</strong> Cả bốn rung dùng đúng λ=0.1. Và <code>tone_loss</code> rơi xuống 0.020 ở step 300 → nhân λ=0.1, tone term chỉ còn đóng góp <strong>0.09% tổng loss</strong> từ step 300 trở đi. Nghĩa là ~75% quá trình train thực chất chỉ còn train LM loss trên Wikipedia tiếng Việt. Cái gọi là "tone-aware training" chủ yếu là domain adaptation.</li>
+    <li><strong>Nhiệm vụ phụ vốn quá dễ.</strong> Nhãn thanh điệu là hàm tất định của token id; một predictor tra token id đạt 100%. Control task (nhãn ngẫu nhiên theo loại token) đã đạt 0.7530 — 3/4 điểm là ghi nhớ token identity.</li>
+    <li><strong>Lệch train/eval về độ dài.</strong> Train ở seq 1024, eval trên context 2K–32K token. Scorer chưa bao giờ thấy context dài lúc train.</li>
+    <li><strong>Baseline <code>none</code> đo trên subset dễ hơn ở needle.</strong> Fail 28/120. Sửa: <code>--max-model-len</code> 40K cho cell baseline, hoặc cap budget dài nhất ở 24K.</li>
+    <li><strong>Agent tool-calling chỉ 8 mẫu</strong> — không đỡ được kết luận nào, kể cả cái thú vị (morph <em>trên</em> uncompressed). Cần ≥60.</li>
+  </ol>
+
+  <h3>Chặn release</h3>
+  <ol class="list" start="10">
+    <li><strong>Chưa review tay 10% reference do model viết.</strong> Sheet 18 mẫu đã sinh (<code>vcc_bench_data/reference_review_sheet.md</code>), chưa ai đọc.</li>
+    <li><strong>License UIT-ViQuAD2.0 chưa xác nhận</strong> → quyết định VCC-Bench v2 có được release cùng paper không. QA split hiện eval-only, không redistribute.</li>
+    <li><strong>Claim hiệu năng chưa đo được.</strong> Morph 0 GB nhưng 234.6 ms vs LLMLingua 72.1 ms, gần hết thời gian ở segmenter pure-Python.</li>
+  </ol>
+
+  <h3>Vận hành</h3>
+  <ol class="list" start="13">
+    <li><strong>Run <code>bench_slm</code> bị cắt giữa nhánh cuối.</strong> Log dừng ở <code>slm_tone_probe / long_document_qa / 2.0x</code>; chỉ 3/4 nhánh có per-cell dump và <strong>không có <code>vcc_bench_results.json</code></strong>. Method headline (probe đã train) không có dòng nào trên 614 mẫu — chỉ có A/B 120 mẫu.</li>
+    <li><strong>Ba trong bốn model đã train chưa từng dùng downstream.</strong> Grep toàn bộ <code>results_cluster/</code>: 0.6B, 1.7B, 8B chỉ xuất hiện trong log train + 2 file eval của chính chúng. Kể cả 8B — model có PPL tốt nhất (7.75) và tone F1 tốt nhất (0.9757).</li>
+    <li><strong>Toàn bộ wave 1 chưa commit</strong> — 17 file modified + 22 untracked (gồm <code>results_cluster/</code>, <code>paper/tables/</code>, <code>k8s/</code>, <code>vcc_bench_v2.json</code>, <code>HANDOFF.md</code>). LoRA weights (373 MB) chỉ ở NFS backup và node <code>dn24z</code> sẽ bị reimage. Trong repo chỉ còn <code>adapter_config.json</code> + <code>tone_probe_meta.json</code>.</li>
+    <li><strong>Corpus thơ tiếng Việt bị gate</strong> (thiếu <code>HF_TOKEN</code>) → corpus train Wikipedia-only.</li>
+  </ol>
+</section>
+
+<section id="s13">
+  <h2><span class="n">13</span>Việc tiếp theo, theo thứ tự</h2>
+
+  <h4>Không cần GPU, làm ngay</h4>
+  <ol class="list">
+    <li>Commit wave 1 trước khi node <code>dn24z</code> bị reimage (§12.15).</li>
+    <li>Sửa abstract + introduction cho khớp Results (§12.1) — đây là lỗi dễ bị reviewer bắt nhất.</li>
+    <li>Đổi 8 bảng inline thành <code>\input{paper/tables/…}</code> và regenerate (§12.2).</li>
+    <li>Paired bootstrap trên per-cell dumps cho các bảng chính (§12.3).</li>
+  </ol>
+
+  <h4>GPU, rẻ, quyết định kết luận</h4>
+  <ol class="list" start="5">
+    <li>Run <code>LoRA(λ_tone=0)</code> + probe control để tách công của λ_tone (§12.4). ~45 phút.</li>
+    <li>Chạy lại window 2048 / overlap 256 cho các arm SLM (§6.2) — giảm 46 → 7 lượt forward, có thể đổi hoàn toàn bức tranh chi phí.</li>
+    <li>Hoàn thành nhánh <code>slm_tone_probe</code> trên full benchmark (§12.13).</li>
+  </ol>
+
+  <div class="callout">
+    <p class="kicker">Thí nghiệm mà số liệu đang chỉ vào</p>
+    <p>Hai tín hiệu mạnh nhất nằm ở hai method khác nhau — perplexity (LLMLingua 0.442) và morphology (Morph 0.277) — và <strong>chưa ai đo chúng cùng nhau</strong>. Perplexity scorer + phân bổ budget theo tỉ lệ lớp từ là method hiển nhiên tiếp theo, và là thay đổi nhỏ trong <code>CombinedCompressor</code>.</p>
+  </div>
+  <p><strong>Nếu giữ hướng tone:</strong> scope về task bề mặt (dịch, chuyển tự, trích dẫn nguyên văn, sinh danh từ riêng) — nơi duy nhất tone không đứng cuối.</p>
+  <p><strong>Không nên:</strong> chạy lại benchmark để lấy số LACC đẹp hơn. Phép đo đã đúng; method là như vậy.</p>
+</section>
+
+<section id="s14">
+  <h2><span class="n">14</span>Tài sản và cách tái lập</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Nội dung</th><th>Vị trí</th></tr></thead>
+    <tbody>
+      <tr><td>Raw results (28 MB, 299 file)</td><td><code>results_cluster/</code> — xem <code>README.md</code> trong đó</td></tr>
+      <tr><td>Summary máy đọc được</td><td><code>results_cluster/collected.json</code></td></tr>
+      <tr><td>Bảng LaTeX</td><td><code>paper/tables/</code> (8 file, regenerate bằng <code>scripts/make_paper_tables.py</code>)</td></tr>
+      <tr><td>Báo cáo</td><td><code>docs/reports/*.html</code>, <code>docs/reports/*.md</code></td></tr>
+      <tr><td>Backup NFS</td><td><code>/mnt/hps/anhm-paper/vncompress-wave1-2026-09-04/</code> — 587 MB, 515 file, md5-verified, gồm LoRA weights</td></tr>
+      <tr><td>Tooling cluster</td><td><code>k8s/</code> — xem <code>README.md</code> trong đó</td></tr>
+    </tbody>
+  </table></div>
+<pre># đọc số từ raw results
+python3 scripts/collect_experiment_results.py --root results_cluster
+python3 scripts/make_paper_tables.py --root results_cluster --out paper/tables
+
+# tái lập wave
+./k8s/lab.sh up            # 6 runner
+./k8s/waves.sh wave2       # SLM eval + sweep chính
+./k8s/waves.sh wave3       # ablation, calibration, A/B, probe control
+./k8s/backup_to_hps.sh     # copy sang NFS, rồi `verify`
+./k8s/lab.sh down</pre>
+  <p>Đọc <code>k8s/README.md</code> trước — nó ghi năm thứ đã tốn thời gian lần đầu: storage class mặc định không attach được trong namespace này; CPU (không phải GPU) là bottleneck scheduling; <code>pgrep -f</code> match cả chính process đang đợi; <code>pgrep</code> không thấy được pod khác; và process kết thúc chưa có nghĩa là GPU đã rảnh.</p>
+  <p><strong>Tests:</strong> 311 pass, CPU-only, ~4 s (210 test function trên 19 file). Ba suite canh các fix của wave này: <code>tests/test_prompting_and_scoring.py</code> (chat template, task-aware scoring, strip reasoning block, regression dict-return), <code>tests/test_llmlingua_windowing.py</code> (điểm có windowing phải bằng không windowing), và hai test invariant độ dài reference trong <code>tests/test_dataset_provenance.py</code>.</p>
+</section>
+
+<section id="sap">
+  <h2><span class="n">A</span>Phụ lục — bảy defect đã sửa ở Phase 0</h2>
+  <p>Trước khi sửa, mọi số chất lượng đều vô nghĩa:</p>
+  <ol class="list">
+    <li><code>reference_answer</code> chính là <code>context</code> ở 208/243 mẫu v1 (160/160 mẫu QA)</li>
+    <li>Prompt sinh văn bản là nối thô token id, không có chat template</li>
+    <li>vLLM 0.28 bỏ <code>prompt_token_ids=</code></li>
+    <li>transformers 5 đổi <code>apply_chat_template</code> sang trả về dict — âm thầm cho ra một list <em>string</em> làm "token ids"</li>
+    <li>LLMLingua tính <code>log_softmax</code> trên toàn chuỗi (9.4 GB cho một tensor)</li>
+    <li>SnapKV đòi attention S×S đầy đủ và ghim 512 token bất chấp target ratio</li>
+    <li><code>exact_match</code> là so khớp chuỗi thô, luôn bằng 0, nhưng chiếm 40% trọng số xếp hạng</li>
+  </ol>
+</section>
+
+<footer>
+  <span>LACC · wave 1 · 6×H100 · 2026-09-04</span>
+  <span>Báo cáo soạn 2026-09-05</span>
+  <span>Nguồn số: results_cluster/</span>
+</footer>
+
+</main>
+</div>
+</div>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+  var map = {};
+  links.forEach(function(a){
+    var el = document.querySelector(a.getAttribute('href'));
+    if (el) map[el.id] = a;
+  });
+  var sections = Object.keys(map).map(function(id){ return document.getElementById(id); });
+  if (!('IntersectionObserver' in window) || !sections.length) return;
+  var current = null;
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (!e.isIntersecting) return;
+      if (current) current.classList.remove('on');
+      current = map[e.target.id];
+      if (current) current.classList.add('on');
+    });
+  }, { rootMargin: '-10% 0px -75% 0px', threshold: 0 });
+  sections.forEach(function(s){ io.observe(s); });
+})();
+</script>
+</body>
+</html>
