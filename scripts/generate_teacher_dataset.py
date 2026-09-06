@@ -38,12 +38,15 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vncompress.dataset import KIND_BENCHMARK, KIND_CORPUS, normalize_file, processed_path  # noqa: E402
 from vncompress.teacher import (  # noqa: E402
+    TeacherCallError,
     TeacherConfig,
     TeacherConfigError,
     TeacherOutputError,
@@ -87,6 +90,100 @@ def _query_key(record_id, query):
     return f'{record_id}|{hashlib.blake2b(query.encode("utf-8"), digest_size=6).hexdigest()}'
 
 
+class ResultWriter:
+    """Serializes writes from every worker to the output and failure logs.
+
+    Rows are flushed as they complete rather than buffered to the end: a run
+    over the full corpus takes hours, and a crash at hour six must not throw
+    away everything -- the resume path reads back exactly what was flushed.
+    """
+
+    def __init__(self, out, failures_path, stage):
+        self.out = out
+        self.failures_path = failures_path
+        self.stage = stage
+        self.lock = threading.Lock()
+        self.n_written = 0
+        self.n_failed = 0
+
+    def row(self, obj):
+        line = json.dumps(obj, ensure_ascii=False) + '\n'
+        with self.lock:
+            self.out.write(line)
+            self.out.flush()
+            self.n_written += 1
+
+    def failure(self, key, record_id, error, attempts=None, detail=None):
+        """Record an exhausted call so it can be traced and replayed later.
+
+        Never silently dropped: a hole in a 20k-row dataset is invisible unless
+        something writes down that it happened.
+        """
+        entry = {
+            'key': key, 'record_id': record_id, 'stage': self.stage,
+            'error': str(error), 'error_type': type(error).__name__,
+            'attempts': attempts, 'detail': detail,
+            'failed_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        }
+        line = json.dumps(entry, ensure_ascii=False) + '\n'
+        with self.lock:
+            with open(self.failures_path, 'a', encoding='utf-8') as f:
+                f.write(line)
+            self.n_failed += 1
+
+
+def _failure_info(exc):
+    if isinstance(exc, TeacherCallError):
+        return exc.attempts, exc.to_dict()
+    return None, None
+
+
+def run_tasks(tasks, worker, writer, workers, label):
+    """Map `worker` over `tasks`, in parallel when asked.
+
+    Threads, not processes: every task is one blocking HTTPS request, so the
+    GIL is released for essentially the whole task. Sequential execution over
+    the full corpus is ~26h for the query stage alone, which is why this exists.
+    """
+    total = len(tasks)
+    if not total:
+        return
+    started = time.time()
+    done = 0
+
+    def report():
+        elapsed = time.time() - started
+        rate = done / elapsed if elapsed > 0 else 0
+        remaining = (total - done) / rate if rate > 0 else 0
+        print(f'  {done}/{total} {label} | {rate:.2f}/s | ok={writer.n_written} '
+              f'fail={writer.n_failed} | còn ~{remaining / 60:.0f} phút', flush=True)
+
+    def guarded(task):
+        try:
+            worker(task)
+        except (TeacherOutputError, TeacherCallError, RuntimeError) as exc:
+            attempts, detail = _failure_info(exc)
+            writer.failure(getattr(task, 'key', None) or str(task)[:80],
+                           getattr(task, 'record_id', None), exc, attempts, detail)
+
+    step = max(1, min(50, total // 20 or 1))
+    if workers <= 1:
+        for task in tasks:
+            guarded(task)
+            done += 1
+            if done % step == 0 or done == total:
+                report()
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(guarded, task) for task in tasks]
+        for future in as_completed(futures):
+            future.result()  # guarded() never raises; re-raise a real bug loudly
+            done += 1
+            if done % step == 0 or done == total:
+                report()
+
+
 def _call_with_retry(client, messages, max_attempts, temperature=None):
     """§14: retry when the output is invalid, rather than dropping the sample."""
     last = None
@@ -104,8 +201,16 @@ def _call_with_retry(client, messages, max_attempts, temperature=None):
     raise TeacherOutputError(f'invalid JSON after {max_attempts} attempts: {last}')
 
 
-def stage_queries(args, client, records, out, done):
-    n_written = n_skipped = n_failed = n_answered = 0
+class QueryTask:
+    __slots__ = ('key', 'record_id', 'record')
+
+    def __init__(self, record):
+        self.key = self.record_id = record.id
+        self.record = record
+
+
+def stage_queries(args, client, records, writer, done):
+    tasks, n_skipped, n_answered = [], 0, 0
     for record in records:
         if record.id in done:
             n_skipped += 1
@@ -116,31 +221,27 @@ def stage_queries(args, client, records, out, done):
         if record.query and not args.include_answered:
             n_answered += 1
             continue
-        messages = build_query_messages(record.context, args.n_queries)
-        try:
-            payload, raw = _call_with_retry(client, messages, args.json_retries)
-        except (TeacherOutputError, RuntimeError) as exc:
-            n_failed += 1
-            print(f'  [FAIL] {record.id}: {exc}')
-            continue
+        tasks.append(QueryTask(record))
+
+    def worker(task):
+        messages = build_query_messages(task.record.context, args.n_queries)
+        payload, _raw = _call_with_retry(client, messages, args.json_retries)
         queries = payload.get('queries') if isinstance(payload, dict) else None
-        out.write(json.dumps({
-            'key': record.id,
+        writer.row({
+            'key': task.key,
             'stage': STAGE_QUERIES,
-            'record_id': record.id,
-            'doc_id': record.doc_id,
-            'source': record.source,
+            'record_id': task.record.id,
+            'doc_id': task.record.doc_id,
+            'source': task.record.source,
             'queries': queries if isinstance(queries, list) else [],
             'teacher': {**args.provenance, 'generated_at': time.strftime('%Y-%m-%dT%H:%M:%S')},
-        }, ensure_ascii=False) + '\n')
-        out.flush()
-        n_written += 1
-        if n_written % 20 == 0:
-            print(f'  ... {n_written} records')
+        })
+
     if n_answered:
         print(f'  {n_answered} record(s) already had a query and were skipped '
               f'(pass --include-answered to synthesize anyway)')
-    return n_written, n_skipped, n_failed
+    run_tasks(tasks, worker, writer, args.workers, 'records')
+    return n_skipped
 
 
 def _queries_for(record, synthesized):
@@ -151,7 +252,18 @@ def _queries_for(record, synthesized):
     return [q.get('query', '') for q in synthesized.get(record.id, []) if q.get('query')]
 
 
-def stage_compression(args, client, records, out, done):
+class CompressionTask:
+    __slots__ = ('key', 'record_id', 'record', 'query', 'ratio')
+
+    def __init__(self, key, record, query, ratio):
+        self.key = key
+        self.record_id = record.id
+        self.record = record
+        self.query = query
+        self.ratio = ratio
+
+
+def stage_compression(args, client, records, writer, done):
     synthesized = {}
     queries_path = os.path.join(args.teacher_dir, OUTPUT_NAME[STAGE_QUERIES])
     if os.path.exists(queries_path):
@@ -165,9 +277,11 @@ def stage_compression(args, client, records, out, done):
         print(f'  [WARN] {queries_path} not found -- corpus paragraphs have no query and will be '
               f'skipped. Run --stage queries first.')
 
-    n_written = n_skipped = n_failed = n_noquery = 0
+    tasks, n_skipped, n_noquery = [], 0, 0
     for record in records:
         queries = _queries_for(record, synthesized)
+        if args.max_queries_per_record > 0:
+            queries = queries[:args.max_queries_per_record]
         if not queries:
             n_noquery += 1
             continue
@@ -177,40 +291,35 @@ def stage_compression(args, client, records, out, done):
                 if key in done:
                     n_skipped += 1
                     continue
-                messages = build_compression_messages(record.context, query, ratio)
-                try:
-                    payload, raw = _call_with_retry(client, messages, args.json_retries)
-                except (TeacherOutputError, RuntimeError) as exc:
-                    n_failed += 1
-                    print(f'  [FAIL] {key}: {exc}')
-                    continue
-                if not isinstance(payload, dict):
-                    n_failed += 1
-                    continue
-                compressed = (payload.get('compressed_text') or '').strip()
-                out.write(json.dumps({
-                    'key': key,
-                    'stage': STAGE_COMPRESSION,
-                    'record_id': record.id,
-                    'doc_id': record.doc_id,
-                    'source': record.source,
-                    'task': record.task,
-                    'query': query,
-                    'compression_ratio': ratio,
-                    'target_tokens': target_tokens(record.context, ratio),
-                    'realized_tokens': count_words(compressed),
-                    'context_tokens': count_words(record.context),
-                    'token_unit': 'whitespace',
-                    'teacher_output': payload,
-                    'teacher': {**args.provenance, 'generated_at': time.strftime('%Y-%m-%dT%H:%M:%S')},
-                }, ensure_ascii=False) + '\n')
-                out.flush()
-                n_written += 1
-                if n_written % 20 == 0:
-                    print(f'  ... {n_written} instances')
+                tasks.append(CompressionTask(key, record, query, ratio))
+
+    def worker(task):
+        messages = build_compression_messages(task.record.context, task.query, task.ratio)
+        payload, _raw = _call_with_retry(client, messages, args.json_retries)
+        if not isinstance(payload, dict):
+            raise TeacherOutputError('expected a JSON object')
+        compressed = (payload.get('compressed_text') or '').strip()
+        writer.row({
+            'key': task.key,
+            'stage': STAGE_COMPRESSION,
+            'record_id': task.record.id,
+            'doc_id': task.record.doc_id,
+            'source': task.record.source,
+            'task': task.record.task,
+            'query': task.query,
+            'compression_ratio': task.ratio,
+            'target_tokens': target_tokens(task.record.context, task.ratio),
+            'realized_tokens': count_words(compressed),
+            'context_tokens': count_words(task.record.context),
+            'token_unit': 'whitespace',
+            'teacher_output': payload,
+            'teacher': {**args.provenance, 'generated_at': time.strftime('%Y-%m-%dT%H:%M:%S')},
+        })
+
     if n_noquery:
         print(f'  {n_noquery} record(s) had no query available and were skipped')
-    return n_written, n_skipped, n_failed
+    run_tasks(tasks, worker, writer, args.workers, 'instances')
+    return n_skipped
 
 
 def main():
@@ -228,6 +337,13 @@ def main():
                     help='--stage queries: also synthesize for records that already carry a query. '
                          'Off by default -- it spends tokens re-deriving an existing field.')
     ap.add_argument('--limit', type=int, default=0, help='Cap input records (0 = all). Use for trials.')
+    ap.add_argument('--workers', type=int, default=1,
+                    help='Concurrent in-flight requests. Each task is one blocking HTTPS call, so '
+                         'this is close to a linear speedup until the endpoint rate-limits. '
+                         'Sequential (1) over the full corpus is ~26h for --stage queries alone.')
+    ap.add_argument('--max-queries-per-record', type=int, default=0,
+                    help='--stage compression: cap queries used per record (0 = all). The instance '
+                         'count is records x queries x ratios, so this is the main cost dial.')
     ap.add_argument('--json-retries', type=int, default=2,
                     help='Attempts to get valid JSON out of one prompt (§14).')
     ap.add_argument('--temperature', type=float, default=None, help='Override the .env temperature.')
@@ -265,7 +381,13 @@ def main():
         records = records[:args.limit]
 
     os.makedirs(args.teacher_dir, exist_ok=True)
-    out_path = os.path.join(args.teacher_dir, OUTPUT_NAME[args.stage])
+    # Stub output must never share a file with real output: the rows look
+    # structurally identical, and a --dry-run appended into the real dataset is
+    # silent contamination that only shows up as inexplicably bad supervision.
+    name = OUTPUT_NAME[args.stage]
+    if args.dry_run:
+        name = name.replace('.jsonl', '.dryrun.jsonl')
+    out_path = os.path.join(args.teacher_dir, name)
     done = _done_keys(out_path)
     client = build_client(config, PROMPT_VERSION, dry_run=args.dry_run, use_cache=not args.no_cache)
     args.provenance = {**config.provenance(PROMPT_VERSION), 'stage': args.stage,
@@ -275,26 +397,36 @@ def main():
     print(f'Teacher    : {config.model} @ {config.base_url}'
           + ('  [DRY RUN -- no requests are sent]' if args.dry_run else ''))
     print(f'Input      : {os.path.relpath(path, REPO)} -> {len(records)} records')
+    print(f'Concurrency: {args.workers} worker(s) | retry {config.max_attempts} lần, '
+          f'cách nhau {config.retry_delay:g}s')
     print(f'Output     : {os.path.relpath(out_path, REPO)}'
           + (f' (resuming, {len(done)} already done)' if done else ''))
     if args.stage == STAGE_COMPRESSION:
         print(f'Ratios     : {", ".join(f"{r:g}x" for r in args.ratios)}')
     print()
 
+    failures_path = os.path.join(
+        args.teacher_dir, f'failures_{args.stage}{".dryrun" if args.dry_run else ""}.jsonl')
     started = time.time()
     with open(out_path, 'a', encoding='utf-8') as out:
+        writer = ResultWriter(out, failures_path, args.stage)
         runner = stage_queries if args.stage == STAGE_QUERIES else stage_compression
-        n_written, n_skipped, n_failed = runner(args, client, records, out, done)
+        n_skipped = runner(args, client, records, writer, done)
 
-    print(f'\nWrote {n_written} row(s) to {os.path.relpath(out_path, REPO)} '
-          f'in {time.time() - started:.1f}s')
+    elapsed = time.time() - started
+    print(f'\nWrote {writer.n_written} row(s) to {os.path.relpath(out_path, REPO)} '
+          f'in {elapsed / 60:.1f} min')
     if n_skipped:
         print(f'  skipped (already generated): {n_skipped}')
-    if n_failed:
-        print(f'  failed: {n_failed}')
     hits = getattr(client, 'n_hits', None)
     if hits is not None:
         print(f'  cache: {hits} hit(s), {client.n_misses} miss(es)')
+    if writer.n_failed:
+        print(f'  FAILED after {config.max_attempts} attempt(s): {writer.n_failed} '
+              f'-> {os.path.relpath(failures_path, REPO)}')
+        print('  Trace them: python scripts/inspect_failures.py --stage ' + args.stage)
+        print('  Replay them: re-run this exact command -- failed rows were never written to the '
+              'output, so the resume check picks them up again.')
     print('\nNext: python scripts/filter_dataset.py --stage ' + args.stage)
     return 0
 

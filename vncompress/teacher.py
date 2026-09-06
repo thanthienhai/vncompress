@@ -14,7 +14,16 @@ Design constraints taken straight from §14:
   pipeline. Every response is cached on disk keyed by
   (model, prompt version, messages, parameters), so a re-run after a crash or
   a prompt tweak to a *different* stage costs nothing.
-- **Retried.** Rate limits and 5xx are expected on a shared endpoint.
+- **Retried on a fixed delay.** A failed call waits `retry_delay` seconds (30
+  by default) and is sent again, up to `max_attempts` (3) in total. A fixed
+  wait rather than exponential backoff is deliberate: the dominant failure on a
+  shared endpoint is a transient rate limit or restart, and a long, predictable
+  pause is both gentler on the endpoint and easier to reason about when
+  hundreds of workers are in flight.
+- **Every exhausted call is recorded, never silently dropped.** After the last
+  attempt the caller writes the failure to `data/teacher/failures_<stage>.jsonl`
+  with the record id, the error and the attempt count, so a run can be traced
+  and the failures replayed later instead of leaving a hole nobody notices.
 - **Runnable offline.** `DryRunTeacherClient` walks the entire flow --
   prompts, parsing, verification, merge, split -- without spending a token, so
   the pipeline can be developed and tested before it is ever pointed at a
@@ -33,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -104,7 +114,10 @@ class TeacherConfig:
     temperature: float = 0.1
     max_tokens: int = 4096
     timeout: int = 120
-    max_retries: int = 4
+    #: Total attempts per call, including the first. 3 = initial + 2 retries.
+    max_attempts: int = 3
+    #: Seconds to wait before resending a failed call. Fixed, not exponential.
+    retry_delay: float = 30.0
     cache_dir: Optional[str] = None
 
     @classmethod
@@ -127,7 +140,8 @@ class TeacherConfig:
             temperature=float(_env('VNCOMPRESS_TEACHER_TEMPERATURE', '0.1')),
             max_tokens=int(_env('VNCOMPRESS_TEACHER_MAX_TOKENS', '4096')),
             timeout=int(_env('VNCOMPRESS_TEACHER_TIMEOUT', '120')),
-            max_retries=int(_env('VNCOMPRESS_TEACHER_MAX_RETRIES', '4')),
+            max_attempts=int(_env('VNCOMPRESS_TEACHER_MAX_ATTEMPTS', '3')),
+            retry_delay=float(_env('VNCOMPRESS_TEACHER_RETRY_DELAY', '30')),
             cache_dir=_env('VNCOMPRESS_TEACHER_CACHE_DIR', os.path.join(_repo_root(), DEFAULT_CACHE_DIR)),
         )
 
@@ -145,6 +159,20 @@ class TeacherConfig:
 # ============================================================================
 # Clients
 # ============================================================================
+
+
+class TeacherCallError(RuntimeError):
+    """A call that exhausted every attempt. Carries what a failure log needs."""
+
+    def __init__(self, message: str, attempts: int, last_error: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_error = last_error
+        self.status = status
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {'error': str(self), 'attempts': self.attempts,
+                'last_error': self.last_error, 'status': self.status}
 
 
 class TeacherClient:
@@ -186,25 +214,29 @@ class HTTPTeacherClient(TeacherClient):
             'max_tokens': self.config.max_tokens,
         }
         last_error: Optional[Exception] = None
-        for attempt in range(self.config.max_retries + 1):
+        status: Optional[int] = None
+        attempts = max(1, self.config.max_attempts)
+        for attempt in range(1, attempts + 1):
             try:
                 self.n_calls += 1
                 body = self._post(payload)
                 return (body['choices'][0]['message'].get('content') or '').strip()
             except urllib.error.HTTPError as exc:
-                # 4xx that is not rate limiting is a bug in the request; retrying
-                # it just burns quota and hides the real error.
+                # A 4xx that is not rate limiting is a bug in the request:
+                # retrying burns quota and hides the real error.
                 if exc.code not in _RETRYABLE_STATUS:
                     detail = exc.read().decode('utf-8', 'replace')[:400] if exc.fp else ''
-                    raise RuntimeError(f'Teacher endpoint returned HTTP {exc.code}: {detail}') from exc
-                last_error = exc
+                    raise TeacherCallError(f'Teacher endpoint returned HTTP {exc.code}: {detail}',
+                                           attempts=attempt, last_error=repr(exc), status=exc.code) from exc
+                last_error, status = exc, exc.code
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
                 last_error = exc
-            if attempt < self.config.max_retries:
+            if attempt < attempts:
                 self.n_retries += 1
-                self._sleep(min(2 ** attempt, 30))
-        raise RuntimeError(
-            f'Teacher call failed after {self.config.max_retries + 1} attempts: {last_error!r}')
+                self._sleep(self.config.retry_delay)
+        raise TeacherCallError(
+            f'Teacher call failed after {attempts} attempt(s)',
+            attempts=attempts, last_error=repr(last_error), status=status)
 
 
 class DryRunTeacherClient(TeacherClient):
@@ -254,6 +286,8 @@ class CachedTeacherClient(TeacherClient):
         self.enabled = enabled
         self.n_hits = 0
         self.n_misses = 0
+        # Counters are read from the main thread while workers update them.
+        self._lock = threading.Lock()
 
     def _key(self, messages: List[Dict[str, str]], temperature: float) -> str:
         blob = json.dumps({
@@ -273,16 +307,23 @@ class CachedTeacherClient(TeacherClient):
         if os.path.exists(path):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
+                    content = json.load(f)['content']
+                with self._lock:
                     self.n_hits += 1
-                    return json.load(f)['content']
+                return content
             except (OSError, ValueError, KeyError):
                 pass  # corrupt cache entry: fall through and regenerate
         content = self.inner.complete(messages, temperature)
-        self.n_misses += 1
+        with self._lock:
+            self.n_misses += 1
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
+        # Write via a per-thread temp file then rename: two workers racing on
+        # the same prompt must never leave a half-written entry behind.
+        tmp = f'{path}.{threading.get_ident()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump({'content': content, 'model': self.model,
                        'prompt_version': self.prompt_version}, f, ensure_ascii=False)
+        os.replace(tmp, path)
         return content
 
 

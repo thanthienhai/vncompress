@@ -143,15 +143,19 @@ def test_extract_json_raises_on_unparseable(text):
 
 
 def _config(**kw):
-    base = dict(base_url='https://example.test/v1', model='m', api_key='k', max_retries=2)
+    base = dict(base_url='https://example.test/v1', model='m', api_key='k',
+                max_attempts=3, retry_delay=30.0)
     base.update(kw)
     return TeacherConfig(**base)
 
 
-def test_http_client_retries_rate_limits_then_succeeds():
+def test_http_client_waits_the_fixed_delay_before_resending():
+    """A failed call waits retry_delay seconds and is sent again -- a fixed
+    pause, not exponential backoff."""
     import urllib.error
 
-    client = HTTPTeacherClient(_config(), sleep=lambda _s: None)
+    slept = []
+    client = HTTPTeacherClient(_config(), sleep=slept.append)
     calls = {'n': 0}
 
     def fake_post(payload):
@@ -163,12 +167,15 @@ def test_http_client_retries_rate_limits_then_succeeds():
     client._post = fake_post
     assert client.complete([{'role': 'user', 'content': 'x'}]) == 'ok'
     assert calls['n'] == 2 and client.n_retries == 1
+    assert slept == [30.0]
 
 
 def test_http_client_does_not_retry_a_client_error():
     """Retrying a 400 burns quota and hides the real bug."""
     import io as _io
     import urllib.error
+
+    from vncompress.teacher import TeacherCallError
 
     client = HTTPTeacherClient(_config(), sleep=lambda _s: None)
     calls = {'n': 0}
@@ -178,18 +185,27 @@ def test_http_client_does_not_retry_a_client_error():
         raise urllib.error.HTTPError('u', 400, 'Bad Request', {}, _io.BytesIO(b'bad model'))
 
     client._post = fake_post
-    with pytest.raises(RuntimeError, match='HTTP 400'):
+    with pytest.raises(TeacherCallError, match='HTTP 400') as excinfo:
         client.complete([{'role': 'user', 'content': 'x'}])
     assert calls['n'] == 1
+    assert excinfo.value.status == 400 and excinfo.value.attempts == 1
 
 
-def test_http_client_gives_up_after_max_retries():
+def test_http_client_gives_up_after_three_attempts_and_says_so():
+    """Three failures end the call. The error carries what the failure log needs."""
     import urllib.error
 
-    client = HTTPTeacherClient(_config(max_retries=2), sleep=lambda _s: None)
+    from vncompress.teacher import TeacherCallError
+
+    slept = []
+    client = HTTPTeacherClient(_config(max_attempts=3), sleep=slept.append)
     client._post = lambda payload: (_ for _ in ()).throw(urllib.error.URLError('down'))
-    with pytest.raises(RuntimeError, match='after 3 attempts'):
+    with pytest.raises(TeacherCallError, match='after 3 attempt') as excinfo:
         client.complete([{'role': 'user', 'content': 'x'}])
+    assert client.n_calls == 3
+    assert slept == [30.0, 30.0], 'waits between attempts, not after the last one'
+    assert excinfo.value.attempts == 3
+    assert 'URLError' in excinfo.value.to_dict()['last_error']
 
 
 # ============================================================================
@@ -411,17 +427,23 @@ def test_query_stage_skips_records_that_already_carry_a_query(tmp_path):
         Record(id='no_q', kind=KIND_CORPUS, source='uvw-2026', source_id='2', doc_id='d2',
                task='context_compression', context='Ngữ cảnh khác đủ dài. ' * 20),
     ]
-    client = DryRunTeacherClient()
-    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False)
-    with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
-        n_written, _, _ = stage_queries(args, client, records, out, set())
+    from scripts.generate_teacher_dataset import ResultWriter
 
-    assert n_written == 1, 'only the record without a query should cost a call'
+    client = DryRunTeacherClient()
+    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+                           workers=1)
+    with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
+        writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')
+        stage_queries(args, client, records, writer, set())
+
+    assert writer.n_written == 1, 'only the record without a query should cost a call'
     assert client.n_calls == 1
 
     args.include_answered = True
     with open(tmp_path / 'out2.jsonl', 'w', encoding='utf-8') as out:
-        assert stage_queries(args, client, records, out, set())[0] == 2
+        writer2 = ResultWriter(out, str(tmp_path / 'fail2.jsonl'), 'queries')
+        stage_queries(args, client, records, writer2, set())
+    assert writer2.n_written == 2
 
 
 def test_synthesized_questions_are_deduplicated_by_context_not_record_id():
@@ -456,3 +478,74 @@ def test_dedup_is_insensitive_to_whitespace_and_case_only():
     counters, rejected = Counter(), []
     kept = filter_queries(rows, {'r1': _source_record(context)}, _args(), counters, rejected)
     assert len(kept) == 2 and counters['duplicate_query'] == 1
+
+
+def test_an_exhausted_call_is_written_to_the_failure_log_not_dropped(tmp_path):
+    """A hole in a 20k-row dataset is invisible unless something writes down
+    that it happened."""
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import ResultWriter, stage_queries
+    from vncompress.dataset import KIND_CORPUS, Record
+    from vncompress.teacher import TeacherCallError
+
+    def always_fails(messages):
+        raise TeacherCallError('endpoint down', attempts=3, last_error="URLError('down')", status=None)
+
+    records = [Record(id=f'r{i}', kind=KIND_CORPUS, source='uvw-2026', source_id=str(i),
+                      doc_id=f'd{i}', task='context_compression', context='Ngữ cảnh đủ dài. ' * 20)
+               for i in range(3)]
+    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+                           workers=1)
+    failures = tmp_path / 'failures.jsonl'
+    with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
+        writer = ResultWriter(out, str(failures), 'queries')
+        stage_queries(args, DryRunTeacherClient(responder=always_fails), records, writer, set())
+
+    assert writer.n_written == 0 and writer.n_failed == 3
+    logged = [json.loads(line) for line in failures.read_text(encoding='utf-8').splitlines() if line]
+    assert {r['record_id'] for r in logged} == {'r0', 'r1', 'r2'}
+    assert all(r['attempts'] == 3 and r['stage'] == 'queries' for r in logged)
+    assert all(r['failed_at'] and r['error_type'] == 'TeacherCallError' for r in logged)
+
+
+def test_parallel_workers_write_every_row_exactly_once(tmp_path):
+    """Workers share one output handle; a lost or interleaved row would be a
+    silent data-loss bug over a multi-hour run."""
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import ResultWriter, stage_queries
+    from vncompress.dataset import KIND_CORPUS, Record
+
+    records = [Record(id=f'r{i}', kind=KIND_CORPUS, source='uvw-2026', source_id=str(i),
+                      doc_id=f'd{i}', task='context_compression',
+                      context=f'Ngữ cảnh số {i} đủ dài để hỏi. ' * 20)
+               for i in range(60)]
+    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+                           workers=8)
+    out_path = tmp_path / 'out.jsonl'
+    with open(out_path, 'w', encoding='utf-8') as out:
+        writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')
+        stage_queries(args, DryRunTeacherClient(), records, writer, set())
+
+    lines = [line for line in out_path.read_text(encoding='utf-8').splitlines() if line]
+    assert len(lines) == 60 and writer.n_written == 60
+    rows = [json.loads(line) for line in lines]        # every line must be valid JSON
+    assert {r['record_id'] for r in rows} == {f'r{i}' for i in range(60)}
+
+
+def test_resume_skips_keys_already_present_in_the_output(tmp_path):
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import ResultWriter, stage_queries
+    from vncompress.dataset import KIND_CORPUS, Record
+
+    records = [Record(id=f'r{i}', kind=KIND_CORPUS, source='uvw-2026', source_id=str(i),
+                      doc_id=f'd{i}', task='context_compression', context='Ngữ cảnh đủ dài. ' * 20)
+               for i in range(5)]
+    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+                           workers=2)
+    with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
+        writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')
+        n_skipped = stage_queries(args, DryRunTeacherClient(), records, writer, {'r0', 'r1'})
+    assert n_skipped == 2 and writer.n_written == 3
