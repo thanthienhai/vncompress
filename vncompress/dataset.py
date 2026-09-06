@@ -465,6 +465,60 @@ def _doc_order_key(doc_key: str, seed: int) -> str:
     return _blake(f'{seed}:{doc_key}', 16)
 
 
+def _content_key(text: str) -> str:
+    """Identity of a context, whitespace-normalised. Two records with the same
+    content key are the same passage no matter what document they came from."""
+    return _blake(' '.join(text.split()), 12)
+
+
+def link_documents_by_content(records: Iterable[Record]) -> Dict[str, str]:
+    """Union documents that share an identical context into one split unit.
+
+    A document id is not a safe split unit on its own, because the same passage
+    reaches the dataset under more than one id. Two ways this happens here, both
+    found by the §9 leakage check on real data:
+
+    - **A benchmark built from the corpus.** VCC-Bench's `long_document_qa`
+      contexts are UVW articles, normalised as `benchmark/wikipedia/wiki:...`
+      while the corpus copy is `corpus/uvw-2026/...`. Different ids, different
+      strata, split independently -- so the model could train on the passage and
+      be evaluated on a question about that same passage.
+    - **Boilerplate shared between articles.** Four unrelated UVW articles carry
+      an identical bibliography paragraph.
+
+    Returns doc_key -> group_key, where group_key is the lexicographically
+    smallest doc_key in the connected component (deterministic, independent of
+    record order). Documents that share nothing map to themselves.
+    """
+    parent: Dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[key] != root:  # path compression
+            parent[key], key = root, parent[key]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rb < ra:  # smallest key is the representative, so the result is stable
+            ra, rb = rb, ra
+        parent[rb] = ra
+
+    first_seen: Dict[str, str] = {}
+    for record in records:
+        doc_key = record.doc_key
+        find(doc_key)
+        owner = first_seen.setdefault(_content_key(record.context), doc_key)
+        if owner != doc_key:
+            union(owner, doc_key)
+    return {key: find(key) for key in parent}
+
+
 def group_by_document(records: Iterable[Record]) -> Dict[str, List[Record]]:
     groups: Dict[str, List[Record]] = {}
     for record in records:
@@ -494,29 +548,45 @@ def split_by_document(
         raise ValueError(f'eval_ratio must be in (0, 1), got {eval_ratio}')
 
     eval_only = set(eval_only_sources)
-    strata: Dict[str, List[Record]] = {}
+
+    # The split unit is a *content-linked* document group, not a bare doc_key:
+    # passages that reach the dataset under two ids must move together (§9).
+    links = link_documents_by_content(records)
+    strata: Dict[str, Dict[str, List[Record]]] = {}
+    forced_eval: set = set()
     for record in records:
-        strata.setdefault(record.stratum, []).append(record)
+        group = links[record.doc_key]
+        stratum = '/'.join(group.split('/')[:2])
+        strata.setdefault(stratum, {}).setdefault(group, []).append(record)
+        if record.source in eval_only:
+            forced_eval.add(group)
+    n_linked = sum(1 for key, group in links.items() if key != group)
 
     train: List[Record] = []
     eval_: List[Record] = []
     stratum_report: Dict[str, Any] = {}
 
     for stratum in sorted(strata):
-        stratum_records = strata[stratum]
-        docs = group_by_document(stratum_records)
+        docs = strata[stratum]
+        n_stratum = sum(len(rows) for rows in docs.values())
         source = stratum.split('/', 1)[1] if '/' in stratum else stratum
 
         if source in eval_only:
-            eval_.extend(stratum_records)
-            stratum_report[stratum] = _stratum_stats(docs, set(docs), len(stratum_records), 'eval_only')
+            for rows in docs.values():
+                eval_.extend(rows)
+            stratum_report[stratum] = _stratum_stats(docs, set(docs), n_stratum, 'eval_only')
             continue
 
         ordered = sorted(docs, key=lambda k: _doc_order_key(k, seed))
-        target = round(eval_ratio * len(stratum_records))
-        chosen: set = set()
-        taken = 0
+        # A group linked to an eval-only source goes to eval whole: the two
+        # share a passage, so the eval-only guarantee decides for both.
+        pinned = {key for key in docs if key in forced_eval}
+        target = round(eval_ratio * n_stratum)
+        chosen: set = set(pinned)
+        taken = sum(len(docs[key]) for key in pinned)
         for doc_key in ordered:
+            if doc_key in chosen:
+                continue
             size = len(docs[doc_key])
             if taken + size <= target:
                 chosen.add(doc_key)
@@ -530,12 +600,14 @@ def split_by_document(
             taken = len(docs[smallest])
         # Never let eval swallow a stratum outright.
         if chosen and len(chosen) == len(docs):
-            largest = max(ordered, key=lambda k: (len(docs[k]), _doc_order_key(k, seed)))
-            chosen.discard(largest)
+            spare = [k for k in ordered if k not in pinned]
+            if spare:
+                largest = max(spare, key=lambda k: (len(docs[k]), _doc_order_key(k, seed)))
+                chosen.discard(largest)
 
         for doc_key in ordered:
             (eval_ if doc_key in chosen else train).extend(docs[doc_key])
-        stratum_report[stratum] = _stratum_stats(docs, chosen, len(stratum_records), 'split')
+        stratum_report[stratum] = _stratum_stats(docs, chosen, n_stratum, 'split')
 
     manifest = {
         'schema_version': SCHEMA_VERSION,
@@ -545,6 +617,10 @@ def split_by_document(
         'eval_only_sources': sorted(eval_only),
         'n_records': len(records),
         'n_documents': len(group_by_document(records)),
+        # Split units, after documents that share an identical passage are
+        # merged. Lower than n_documents exactly when such a passage exists.
+        'n_split_groups': len(set(links.values())),
+        'n_content_linked_documents': n_linked,
         'train': {'n_records': len(train), 'n_documents': len(group_by_document(train))},
         'eval': {'n_records': len(eval_), 'n_documents': len(group_by_document(eval_))},
         'eval_ratio_realized': round(len(eval_) / max(len(records), 1), 4),

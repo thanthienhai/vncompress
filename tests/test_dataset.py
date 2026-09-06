@@ -18,6 +18,7 @@ from vncompress.dataset import (
     Record,
     check_split_leakage,
     group_by_document,
+    link_documents_by_content,
     normalize_benchmark,
     normalize_corpus,
     normalize_file,
@@ -141,12 +142,49 @@ def test_split_is_deterministic_and_seed_dependent():
 def test_split_stratifies_per_source():
     records = (normalize_corpus(_corpus(n_docs=50, paras_per_doc=4))
                + normalize_corpus([{'source': 'vietnamese-poetry', 'topic_id': f'p{i}',
-                                    'text': 'Thơ ca. ' * 40} for i in range(50)]))
+                                    'text': f'Thơ ca {i}. ' * 40} for i in range(50)]))
+    #        ^ distinct per document on purpose: identical texts are one passage
+    #          and the splitter now (correctly) refuses to tear them apart.
     _, eval_, manifest = split_by_document(records, eval_ratio=0.1)
     sources = {r.source for r in eval_}
     assert sources == {'uvw-2026', 'vietnamese-poetry'}, 'every source must reach the eval side'
     for stats in manifest['strata'].values():
         assert stats['eval_records'] > 0
+
+
+def test_documents_sharing_a_passage_land_on_the_same_side():
+    """§9: the split unit is content, not a document id.
+
+    Both halves of this are real leaks the check caught on the full dataset:
+    a benchmark whose contexts ARE corpus articles (different ids, different
+    strata, split independently), and one bibliography paragraph shared by
+    four unrelated articles.
+    """
+    shared = 'Đoạn văn dùng chung giữa hai tài liệu. ' * 12
+    records = (normalize_corpus(_corpus(n_docs=40, paras_per_doc=4))
+               + normalize_corpus([{'source': 'uvw-2026', 'topic_id': 'Bài_A',
+                                    'text': shared},
+                                   {'source': 'uvw-2026', 'topic_id': 'Bài_B',
+                                    'text': shared}])
+               + normalize_benchmark([{'sample_id': 'doc_qa_0001', 'task': 'long_document_qa',
+                                       'context': shared, 'query': 'q', 'reference_answer': 'a',
+                                       'source': 'wikipedia'}], default_source='wikipedia'))
+    train, eval_, manifest = split_by_document(records, eval_ratio=0.1, seed=42)
+    assert check_split_leakage(train, eval_) == []
+
+    sides = {r.id: 'train' for r in train}
+    sides.update({r.id: 'eval' for r in eval_})
+    linked = [rid for rid in sides if 'Bài_A' in rid or 'Bài_B' in rid or rid == 'doc_qa_0001']
+    assert len(linked) == 3
+    assert len({sides[rid] for rid in linked}) == 1, 'a shared passage must not straddle the split'
+    assert manifest['n_split_groups'] < manifest['n_documents']
+    assert manifest['n_content_linked_documents'] == 2
+
+
+def test_content_linking_leaves_unrelated_documents_alone():
+    records = normalize_corpus(_corpus(n_docs=20, paras_per_doc=3))
+    links = link_documents_by_content(records)
+    assert set(links) == set(links.values()), 'no document should be merged into another'
 
 
 def test_eval_only_source_sends_a_whole_source_to_eval():
