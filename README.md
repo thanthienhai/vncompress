@@ -86,9 +86,20 @@ python scripts/filter_dataset.py --stage compression
 ```
 
 `--dry-run` chạy hết đường ống bằng stub offline, không tốn token — **luôn chạy nó trước** khi trỏ
-vào endpoint tính tiền. Bỏ `--dry-run` để gọi thật. Generator mặc định chỉ đọc split `train` và
-**từ chối** `eval.jsonl` (§10). Kết quả thô được giữ ở `data/teacher/` để lọc lại mà không phải gọi
-teacher lần nữa.
+vào endpoint tính tiền (dry-run ghi ra file `*.dryrun.jsonl` riêng nên không thể lẫn với dữ liệu
+thật). Bỏ `--dry-run` để gọi thật. Generator mặc định chỉ đọc split `train` và **từ chối**
+`eval.jsonl` (§10). Kết quả thô được giữ ở `data/teacher/` để lọc lại mà không phải gọi teacher
+lần nữa.
+
+Chạy quy mô lớn thì thêm `--workers` (đo thật: 1 worker 0.2 req/s, 32 → 2.6, 64 → 3.4). Request lỗi
+được chờ 30s rồi gửi lại, tối đa 3 lần; hết lượt thì ghi vào `data/teacher/failures_<stage>.jsonl`:
+
+```bash
+python scripts/generate_teacher_dataset.py --stage queries --workers 64
+python scripts/inspect_failures.py --stage queries --check-output   # lỗi nào còn thiếu
+```
+
+Chạy lại đúng lệnh cũ là đủ để retry phần lỗi — resume bỏ qua những gì đã ghi được.
 
 ## 7. Huấn luyện
 

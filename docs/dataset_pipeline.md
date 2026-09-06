@@ -190,7 +190,9 @@ Có thể điều chỉnh tỷ lệ theo phân bố domain thực tế của pro
 > | `VNCOMPRESS_TEACHER_API_KEY` | key; **không bao giờ được log hay ghi vào metadata** |
 > | `VNCOMPRESS_TEACHER_MODEL` | tên model teacher, được ghi vào từng row (§14) |
 > | `VNCOMPRESS_TEACHER_TEMPERATURE` | mặc định `0.1` — §14 yêu cầu temperature thấp cho extraction/labeling |
-> | `VNCOMPRESS_TEACHER_MAX_TOKENS` / `_TIMEOUT` / `_MAX_RETRIES` | tham số sinh + retry |
+> | `VNCOMPRESS_TEACHER_MAX_TOKENS` / `_TIMEOUT` | tham số sinh |
+> | `VNCOMPRESS_TEACHER_MAX_ATTEMPTS` | mặc định `3` — tổng số lần thử cho một request |
+> | `VNCOMPRESS_TEACHER_RETRY_DELAY` | mặc định `30` giây — chờ cố định trước khi gửi lại |
 >
 > Loader cũng nhận alias `baseURL` / `apiKey` / `model_name`, để dán thẳng blob credential nhà cung cấp đưa.
 >
@@ -199,6 +201,31 @@ Có thể điều chỉnh tỷ lệ theo phân bố domain thực tế của pro
 > - **`--dry-run` đi hết đường ống mà không tốn token.** `DryRunTeacherClient` trả về JSON đúng cấu trúc suy ra từ chính prompt, nên parse → verify → merge → split đều được kiểm tra trước khi trỏ vào endpoint tính tiền. Nó là phép thử đường ống, **không phải phép thử chất lượng** — phần "nén" chỉ là cắt câu đầu.
 > - **Cache trên đĩa** khóa theo (model, prompt version, messages, tham số). Sửa prompt của stage này không làm mất cache của stage kia; chạy lại sau khi crash không mất tiền lần hai.
 > - **Mặc định đọc split `train`.** Trỏ vào `eval.jsonl` bị **từ chối** trừ khi truyền `--allow-eval-input` — §10 yêu cầu benchmark độc lập với teacher pipeline, và đây là chỗ ép buộc điều đó.
+> - **Dry-run ghi ra file riêng** (`*_raw.dryrun.jsonl`). Row stub và row thật trông giống hệt nhau về cấu trúc, nên nếu chung file thì một lần `--dry-run` lỡ tay sẽ nhiễm bẩn dataset mà không có dấu hiệu gì.
+
+### 4.4. Retry, failure log và song song
+
+**Retry — chờ cố định, không exponential backoff.** Một request lỗi chờ `retry_delay` giây (mặc định 30) rồi gửi lại, tối đa `max_attempts` lần (mặc định 3). Lỗi thường gặp trên endpoint dùng chung là rate limit hoặc restart tạm thời, nên một quãng nghỉ dài và đoán trước được vừa nhẹ tay với endpoint vừa dễ suy luận khi có hàng chục worker đang bay. Ngoại lệ: **4xx không phải rate limit thì fail ngay** — retry một request sai chỉ đốt quota và che lỗi thật.
+
+**Failure log — không bao giờ im lặng bỏ qua.** Hết lượt thử, call đó được ghi vào `data/teacher/failures_<stage>.jsonl`: key, record id, stage, loại lỗi, số lần thử, timestamp. Trong một lần chạy hàng chục nghìn request, một lỗ hổng trong dataset là **vô hình** trừ khi có thứ gì đó ghi lại rằng nó đã xảy ra.
+
+```bash
+python scripts/inspect_failures.py --stage queries                  # thống kê theo loại lỗi / HTTP status
+python scripts/inspect_failures.py --stage queries --check-output    # lỗi nào còn thiếu thật sự
+```
+
+Replay không cần script riêng: **chạy lại đúng lệnh generate cũ**. Call lỗi chưa từng được ghi vào output nên bộ resume sẽ tự lên lịch lại.
+
+**Song song (`--workers N`).** Mỗi task là một request HTTPS blocking, nên thread pool gần như tăng tốc tuyến tính cho tới khi endpoint bão hoà. Đo thật trên GLM-5.2 @ FPT Cloud:
+
+| workers | throughput | ETA stage queries (19.960 đoạn) |
+|---:|---:|---:|
+| 1 | 0.2 req/s | ~26 giờ |
+| 16 | 1.25 req/s | ~4.4 giờ |
+| 32 | 2.6 req/s | ~2.1 giờ |
+| 64 | 3.4 req/s | ~1.6 giờ |
+
+Bão hoà quanh 3.4 req/s; 64 worker không gây lỗi nào. `ResultWriter` khoá và **flush từng row**, nên crash ở giờ thứ sáu vẫn giữ nguyên phần đã ghi và resume chạy tiếp từ đó. Cache ghi qua file tạm rồi `rename`, nên hai worker đụng cùng một prompt không để lại entry ghi dở.
 
 Teacher LLM được dùng để biến raw context + query thành supervision chất lượng cao cho student compressor.
 
