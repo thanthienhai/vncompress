@@ -161,7 +161,15 @@ def run_tasks(tasks, worker, writer, workers, label):
     def guarded(task):
         try:
             worker(task)
-        except (TeacherOutputError, TeacherCallError, RuntimeError) as exc:
+        except BaseException as exc:  # noqa: BLE001 -- see below
+            # Nothing a single task does may take down the run. A named-exception
+            # tuple here cost 446 minutes of completed work: one unforeseen
+            # transport error propagated out and aborted 44,900 finished
+            # instances. The failure log is the right place for a surprise, so
+            # every task lands there and the run keeps going -- except the two
+            # signals that mean *the operator wants out*, which must still work.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             attempts, detail = _failure_info(exc)
             writer.failure(getattr(task, 'key', None) or str(task)[:80],
                            getattr(task, 'record_id', None), exc, attempts, detail)
@@ -178,7 +186,7 @@ def run_tasks(tasks, worker, writer, workers, label):
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(guarded, task) for task in tasks]
         for future in as_completed(futures):
-            future.result()  # guarded() never raises; re-raise a real bug loudly
+            future.result()  # guarded() only re-raises KeyboardInterrupt/SystemExit
             done += 1
             if done % step == 0 or done == total:
                 report()

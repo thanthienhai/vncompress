@@ -40,6 +40,7 @@ Credentials come from `.env` (gitignored) or the real environment; see
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import threading
@@ -229,7 +230,14 @@ class HTTPTeacherClient(TeacherClient):
                     raise TeacherCallError(f'Teacher endpoint returned HTTP {exc.code}: {detail}',
                                            attempts=attempt, last_error=repr(exc), status=exc.code) from exc
                 last_error, status = exc, exc.code
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+            except (OSError, http.client.HTTPException, json.JSONDecodeError,
+                    KeyError, IndexError) as exc:
+                # Transport-level failures, not just URLError. A long run dies on
+                # the one the tuple forgets: `RemoteDisconnected` is a
+                # ConnectionResetError, NOT a URLError, so it escaped urllib and
+                # killed a 7-hour run at 75%. OSError is the honest ceiling here
+                # -- it covers URLError, TimeoutError and every ConnectionError --
+                # and a malformed body (JSON/Key/Index) is equally worth a retry.
                 last_error = exc
             if attempt < attempts:
                 self.n_retries += 1

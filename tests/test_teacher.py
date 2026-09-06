@@ -8,8 +8,11 @@ No test reads the repository's real `.env` -- each one points `env_file` at a
 temporary path and clears the variables first, so a developer's credentials
 never leak into the suite's environment.
 """
+import http.client
 import json
 import os
+import ssl
+import urllib.error
 
 import pytest
 
@@ -168,6 +171,37 @@ def test_http_client_waits_the_fixed_delay_before_resending():
     assert client.complete([{'role': 'user', 'content': 'x'}]) == 'ok'
     assert calls['n'] == 2 and client.n_retries == 1
     assert slept == [30.0]
+
+
+@pytest.mark.parametrize('exc', [
+    http.client.RemoteDisconnected('Remote end closed connection without response'),
+    http.client.IncompleteRead(b'half'),
+    ConnectionResetError(104, 'Connection reset by peer'),
+    ConnectionRefusedError(111, 'Connection refused'),
+    TimeoutError('timed out'),
+    ssl.SSLError('decryption failed'),
+    urllib.error.URLError('name resolution failed'),
+])
+def test_http_client_retries_every_transport_failure_not_just_urlerror(exc):
+    """The regression that killed a 7-hour run at 75%.
+
+    `RemoteDisconnected` is a ConnectionResetError, NOT a URLError, so urllib
+    lets it escape and the old named-exception tuple did not catch it. One
+    dropped connection then propagated out of the worker and aborted 44,900
+    completed instances. Every transport failure must be retryable.
+    """
+    client = HTTPTeacherClient(_config(), sleep=lambda _s: None)
+    calls = {'n': 0}
+
+    def fake_post(payload):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise exc
+        return {'choices': [{'message': {'content': 'ok'}}]}
+
+    client._post = fake_post
+    assert client.complete([{'role': 'user', 'content': 'x'}]) == 'ok'
+    assert calls['n'] == 2 and client.n_retries == 1
 
 
 def test_http_client_does_not_retry_a_client_error():
