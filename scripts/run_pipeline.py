@@ -27,6 +27,7 @@ Usage:
     python scripts/run_pipeline.py --with-teacher --workers 64 --max-queries-per-record 1
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -47,6 +48,59 @@ def run(step, argv, allow_fail=False):
         sys.exit(result.returncode)
     print(f'-- {step}: {elapsed / 60:.1f} min', flush=True)
     return result.returncode
+
+
+def _unresolved_failures(stage):
+    """Failed keys that still have no row in the output.
+
+    The failure log is append-only history, so a key in it may already have
+    succeeded on a later pass; only the difference against the output tells you
+    what is actually missing.
+    """
+    teacher_dir = os.path.join(REPO, 'data', 'teacher')
+    fail_path = os.path.join(teacher_dir, f'failures_{stage}.jsonl')
+    out_path = os.path.join(teacher_dir,
+                            'queries_raw.jsonl' if stage == 'queries' else 'compression_raw.jsonl')
+    if not os.path.exists(fail_path):
+        return 0
+
+    def keys(path, field='key'):
+        found = set()
+        if not os.path.exists(path):
+            return found
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        found.add(json.loads(line).get(field))
+                    except ValueError:
+                        continue
+        return found
+
+    return len(keys(fail_path) - keys(out_path))
+
+
+def generate_with_retries(stage, argv, passes):
+    """Run a teacher stage, then re-run it while anything is still missing.
+
+    Rate limiting is the dominant failure at high concurrency (every failure in
+    the live run was HTTP 429), and a retry pass is nearly free: resume skips
+    everything already written, so pass two schedules only the gaps -- and it
+    schedules them against a near-idle endpoint instead of a saturated one,
+    which is exactly the condition they failed under.
+    """
+    run(f'teacher: {stage} (pass 1/{passes})', argv)
+    for attempt in range(2, passes + 1):
+        missing = _unresolved_failures(stage)
+        if not missing:
+            print(f'-- {stage}: no unresolved failures, skipping pass {attempt}')
+            return
+        print(f'-- {stage}: {missing} row(s) still missing, running pass {attempt}/{passes}')
+        run(f'teacher: {stage} (pass {attempt}/{passes})', argv)
+    remaining = _unresolved_failures(stage)
+    if remaining:
+        print(f'-- {stage}: {remaining} row(s) STILL missing after {passes} passes; '
+              f'they stay in data/teacher/failures_{stage}.jsonl for tracing')
 
 
 def concat(sources, target):
@@ -82,6 +136,9 @@ def main():
     ap.add_argument('--max-queries-per-record', type=int, default=1,
                     help='Queries per record for the compression stage. 1 matches the §11 target '
                          'of 20k contexts x 3 ratios ~ 60k instances; 3 triples the cost.')
+    ap.add_argument('--retry-passes', type=int, default=3,
+                    help='Times to re-run each teacher stage to pick up rate-limited gaps. '
+                         'Extra passes are nearly free -- resume skips everything already written.')
     ap.add_argument('--eval-ratio', type=float, default=0.1)
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
@@ -101,15 +158,18 @@ def main():
         if args.limit:
             common += ['--limit', str(args.limit)]
 
-        run('4/7 teacher: synthesize queries',
-            ['scripts/generate_teacher_dataset.py', '--stage', 'queries'] + common)
+        generate_with_retries(
+            'queries', ['scripts/generate_teacher_dataset.py', '--stage', 'queries'] + common,
+            args.retry_passes)
         run('4/7 filter queries', ['scripts/filter_dataset.py', '--stage', 'queries'])
         teacher_outputs.append(os.path.join(PROCESSED, 'records_synthetic_qa.jsonl'))
 
-        run('5/7 teacher: compress',
+        generate_with_retries(
+            'compression',
             ['scripts/generate_teacher_dataset.py', '--stage', 'compression',
              '--ratios', args.ratios,
-             '--max-queries-per-record', str(args.max_queries_per_record)] + common)
+             '--max-queries-per-record', str(args.max_queries_per_record)] + common,
+            args.retry_passes)
         run('5/7 filter compression', ['scripts/filter_dataset.py', '--stage', 'compression'])
         teacher_outputs.append(os.path.join(PROCESSED, 'records_teacher.jsonl'))
 

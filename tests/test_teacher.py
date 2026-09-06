@@ -608,3 +608,37 @@ def test_compression_falls_back_to_raw_queries_with_a_warning(tmp_path, capsys):
 
     assert got == {'r1': [{'query': 'chưa lọc'}]}
     assert 'RAW (unverified)' in capsys.readouterr().out
+
+
+def test_unresolved_failures_counts_only_what_is_still_missing(tmp_path, monkeypatch):
+    """The failure log is append-only history: a key in it may have succeeded on
+    a later pass, so only the difference against the output is a real gap."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        'run_pipeline', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     'scripts', 'run_pipeline.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    teacher = tmp_path / 'data' / 'teacher'
+    teacher.mkdir(parents=True)
+    (teacher / 'failures_queries.jsonl').write_text(
+        '\n'.join(json.dumps({'key': k}) for k in ('a', 'b', 'c')) + '\n', encoding='utf-8')
+    (teacher / 'queries_raw.jsonl').write_text(
+        '\n'.join(json.dumps({'key': k}) for k in ('a', 'b')) + '\n', encoding='utf-8')
+
+    monkeypatch.setattr(module, 'REPO', str(tmp_path))
+    assert module._unresolved_failures('queries') == 1, 'only "c" is still missing'
+
+
+def test_unresolved_failures_is_zero_without_a_failure_log(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        'run_pipeline', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     'scripts', 'run_pipeline.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'REPO', str(tmp_path))
+    assert module._unresolved_failures('compression') == 0
