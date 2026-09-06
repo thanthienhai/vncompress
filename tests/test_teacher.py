@@ -549,3 +549,62 @@ def test_resume_skips_keys_already_present_in_the_output(tmp_path):
         writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')
         n_skipped = stage_queries(args, DryRunTeacherClient(), records, writer, {'r0', 'r1'})
     assert n_skipped == 2 and writer.n_written == 3
+
+
+def test_compression_prefers_queries_that_passed_verification(tmp_path):
+    """Compressing against a question the filter already rejected wastes calls
+    and aims supervision at a target judged unusable."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import _load_synthesized_queries
+
+    teacher_dir = tmp_path / 'teacher'
+    teacher_dir.mkdir()
+    (teacher_dir / 'queries_raw.jsonl').write_text(_json.dumps({
+        'record_id': 'r1', 'queries': [{'query': 'câu bị loại'}, {'query': 'câu hợp lệ'}],
+    }, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    processed = tmp_path / 'processed'
+    processed.mkdir()
+    (processed / 'records_synthetic_qa.jsonl').write_text(_json.dumps({
+        'id': 'synthqa_r1_1', 'kind': 'benchmark', 'source': 'teacher-synth', 'source_id': 'r1',
+        'doc_id': 'd1', 'task': 'long_document_qa', 'context': 'ctx', 'query': 'câu hợp lệ',
+        'reference_answer': 'a', 'metadata': {'origin_record': 'r1'},
+    }, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    args = SimpleNamespace(teacher_dir=str(teacher_dir))
+    monkey = os.environ.get('VNCOMPRESS_PROCESSED_DIR')
+    os.environ['VNCOMPRESS_PROCESSED_DIR'] = str(processed)
+    try:
+        got = _load_synthesized_queries(args, [])
+    finally:
+        if monkey is None:
+            del os.environ['VNCOMPRESS_PROCESSED_DIR']
+        else:
+            os.environ['VNCOMPRESS_PROCESSED_DIR'] = monkey
+
+    assert got == {'r1': [{'query': 'câu hợp lệ'}]}, 'the rejected question must not be compressed'
+
+
+def test_compression_falls_back_to_raw_queries_with_a_warning(tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import _load_synthesized_queries
+
+    teacher_dir = tmp_path / 'teacher'
+    teacher_dir.mkdir()
+    (teacher_dir / 'queries_raw.jsonl').write_text(json.dumps({
+        'record_id': 'r1', 'queries': [{'query': 'chưa lọc'}],
+    }, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    empty = tmp_path / 'empty'
+    empty.mkdir()
+    os.environ['VNCOMPRESS_PROCESSED_DIR'] = str(empty)
+    try:
+        got = _load_synthesized_queries(SimpleNamespace(teacher_dir=str(teacher_dir)), [])
+    finally:
+        del os.environ['VNCOMPRESS_PROCESSED_DIR']
+
+    assert got == {'r1': [{'query': 'chưa lọc'}]}
+    assert 'RAW (unverified)' in capsys.readouterr().out

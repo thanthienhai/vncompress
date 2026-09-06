@@ -263,19 +263,47 @@ class CompressionTask:
         self.ratio = ratio
 
 
-def stage_compression(args, client, records, writer, done):
-    synthesized = {}
-    queries_path = os.path.join(args.teacher_dir, OUTPUT_NAME[STAGE_QUERIES])
-    if os.path.exists(queries_path):
-        with open(queries_path, 'r', encoding='utf-8') as f:
+def _load_synthesized_queries(args, records):
+    """Queries to compress against, preferring the ones that passed §6.
+
+    `filter_dataset.py --stage queries` drops questions whose answer is not a
+    verbatim span, or whose answer is the whole paragraph. Compressing against a
+    rejected question wastes calls and produces supervision aimed at a target
+    that was already judged unusable -- so the filtered file wins when it exists.
+    """
+    filtered_path = processed_path('records_synthetic_qa.jsonl')
+    if os.path.exists(filtered_path):
+        synthesized = {}
+        for record in normalize_file(filtered_path):
+            origin = record.metadata.get('origin_record') or record.source_id
+            if record.query:
+                synthesized.setdefault(origin, []).append({'query': record.query})
+        if synthesized:
+            print(f'  using VERIFIED queries for {len(synthesized)} records '
+                  f'({os.path.relpath(filtered_path, REPO)})')
+            return synthesized
+
+    raw_path = os.path.join(args.teacher_dir, OUTPUT_NAME[STAGE_QUERIES])
+    if os.path.exists(raw_path):
+        synthesized = {}
+        with open(raw_path, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     row = json.loads(line)
                     synthesized[row['record_id']] = row.get('queries', [])
-        print(f'  loaded synthesized queries for {len(synthesized)} records')
-    elif any(not r.query for r in records):
-        print(f'  [WARN] {queries_path} not found -- corpus paragraphs have no query and will be '
-              f'skipped. Run --stage queries first.')
+        print(f'  [WARN] using RAW (unverified) queries for {len(synthesized)} records -- run '
+              f'`python scripts/filter_dataset.py --stage queries` first to compress only against '
+              f'questions that passed §6')
+        return synthesized
+
+    if any(not r.query for r in records):
+        print('  [WARN] no synthesized queries found -- corpus paragraphs have no query and will '
+              'be skipped. Run --stage queries first.')
+    return {}
+
+
+def stage_compression(args, client, records, writer, done):
+    synthesized = _load_synthesized_queries(args, records)
 
     tasks, n_skipped, n_noquery = [], 0, 0
     for record in records:
