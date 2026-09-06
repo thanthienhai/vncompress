@@ -430,7 +430,7 @@ def test_query_stage_skips_records_that_already_carry_a_query(tmp_path):
     from scripts.generate_teacher_dataset import ResultWriter
 
     client = DryRunTeacherClient()
-    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+    args = SimpleNamespace(n_queries=3, json_retries=1, json_retry_delay=0, provenance={}, include_answered=False,
                            workers=1)
     with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
         writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')
@@ -495,7 +495,7 @@ def test_an_exhausted_call_is_written_to_the_failure_log_not_dropped(tmp_path):
     records = [Record(id=f'r{i}', kind=KIND_CORPUS, source='uvw-2026', source_id=str(i),
                       doc_id=f'd{i}', task='context_compression', context='Ngữ cảnh đủ dài. ' * 20)
                for i in range(3)]
-    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+    args = SimpleNamespace(n_queries=3, json_retries=1, json_retry_delay=0, provenance={}, include_answered=False,
                            workers=1)
     failures = tmp_path / 'failures.jsonl'
     with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
@@ -521,7 +521,7 @@ def test_parallel_workers_write_every_row_exactly_once(tmp_path):
                       doc_id=f'd{i}', task='context_compression',
                       context=f'Ngữ cảnh số {i} đủ dài để hỏi. ' * 20)
                for i in range(60)]
-    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+    args = SimpleNamespace(n_queries=3, json_retries=1, json_retry_delay=0, provenance={}, include_answered=False,
                            workers=8)
     out_path = tmp_path / 'out.jsonl'
     with open(out_path, 'w', encoding='utf-8') as out:
@@ -543,7 +543,7 @@ def test_resume_skips_keys_already_present_in_the_output(tmp_path):
     records = [Record(id=f'r{i}', kind=KIND_CORPUS, source='uvw-2026', source_id=str(i),
                       doc_id=f'd{i}', task='context_compression', context='Ngữ cảnh đủ dài. ' * 20)
                for i in range(5)]
-    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False,
+    args = SimpleNamespace(n_queries=3, json_retries=1, json_retry_delay=0, provenance={}, include_answered=False,
                            workers=2)
     with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
         writer = ResultWriter(out, str(tmp_path / 'fail.jsonl'), 'queries')

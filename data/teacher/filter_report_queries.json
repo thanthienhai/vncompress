@@ -1,11 +1,12 @@
 {
   "stage": "queries",
-  "raw_rows": 2235,
-  "accepted": 6871,
+  "raw_rows": 19954,
+  "accepted": 61326,
   "counters": {
-    "accepted": 6871,
-    "answer_not_verbatim": 47,
-    "degenerate_answer": 1
+    "accepted": 61326,
+    "answer_not_verbatim": 400,
+    "degenerate_answer": 14,
+    "duplicate_query": 51
   },
   "thresholds": {
     "ratio_tolerance": 0.25,

@@ -1,5 +1,5 @@
 {
-  "input": "data/processed/records_all.jsonl",
+  "input": "data/processed/records.jsonl",
   "n_records": 22421,
   "ok": true,
   "stats": {

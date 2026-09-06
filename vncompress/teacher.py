@@ -299,6 +299,24 @@ class CachedTeacherClient(TeacherClient):
     def _path(self, key: str) -> str:
         return os.path.join(self.cache_dir, key[:2], f'{key}.json')
 
+    def invalidate(self, messages: List[Dict[str, str]], temperature: Optional[float] = None) -> bool:
+        """Drop a cached response so the next call re-asks the model.
+
+        Needed because the cache stores raw text and cannot tell a good
+        response from one that fails to parse. Without this, a truncated or
+        empty response is cached and every subsequent retry -- including the
+        pipeline's later retry passes -- is served the same broken text from
+        disk and can never succeed.
+        """
+        if not self.enabled:
+            return False
+        path = self._path(self._key(messages, 0.0 if temperature is None else temperature))
+        try:
+            os.remove(path)
+            return True
+        except OSError:
+            return False
+
     def complete(self, messages: List[Dict[str, str]], temperature: Optional[float] = None) -> str:
         temp = 0.0 if temperature is None else temperature
         if not self.enabled:
@@ -316,6 +334,10 @@ class CachedTeacherClient(TeacherClient):
         content = self.inner.complete(messages, temperature)
         with self._lock:
             self.n_misses += 1
+        if not content.strip():
+            # An empty completion is a transient server-side hiccup, never a
+            # result worth remembering: caching it makes the failure permanent.
+            return content
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # Write via a per-thread temp file then rename: two workers racing on
         # the same prompt must never leave a half-written entry behind.

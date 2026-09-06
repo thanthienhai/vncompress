@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "name": "vcc-bench-eval-synthetic",
+    "version": "1.0.0",
+    "tasks": [],
+    "total_samples": 0,
+    "split": "eval",
+    "seed": 42,
+    "provenance": "teacher-generated",
+    "sources": [
+      "teacher-synth"
+    ],
+    "warning": "Do not pool with vcc_bench_eval.json: a model trained on teacher output scored against teacher output measures generalization across documents, not independent quality."
+  },
+  "samples": []
+}

@@ -10,7 +10,11 @@
     ],
     "total_samples": 24,
     "split": "eval",
-    "seed": 42
+    "seed": 42,
+    "provenance": "independent (not teacher-generated)",
+    "excluded_sources": [
+      "teacher-synth"
+    ]
   },
   "samples": [
     {

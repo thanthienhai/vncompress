@@ -401,8 +401,8 @@
     "corpus/vietnamese-poetry/99979"
   ],
   "train_doc_keys_sha256": "c759dd9f6f1c07fcf9d78cfc59532f51fbf2bbe5ad1dfbd9b8d6e45d99e71f68",
-  "date": "2026-09-06 15:03:13",
-  "input": "data/processed/records_all.jsonl",
+  "date": "2026-09-06 18:06:29",
+  "input": "data/processed/records.jsonl",
   "input_sha256": "29c105bf8566dc1ed83f3ecd60de2368a8f6fe4dd197b23ff119a064cd70fab4",
   "leakage_check": {
     "clean": true,
@@ -446,8 +446,12 @@
       "bytes": 1600613
     },
     "vcc_bench_eval.json": {
-      "sha256": "565204785af955092c4e78dedad45e1f3bcdc476931d5d58b083afcf6919200a",
-      "bytes": 166485
+      "sha256": "b59c3ad897afbe17242d2d5e0cca8cfae5072dd7d26d7e082ffe59657724980c",
+      "bytes": 166597
+    },
+    "vcc_bench_eval_synthetic.json": {
+      "sha256": "aabf6b24e5174d63f146efe6ae3bccce8934052f26ff998694e8d0ec1881dc4b",
+      "bytes": 453
     }
   }
 }

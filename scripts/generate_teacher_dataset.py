@@ -184,8 +184,20 @@ def run_tasks(tasks, worker, writer, workers, label):
                 report()
 
 
-def _call_with_retry(client, messages, max_attempts, temperature=None):
-    """§14: retry when the output is invalid, rather than dropping the sample."""
+def _call_with_retry(client, messages, max_attempts, temperature=None, retry_delay=0.0):
+    """§14: retry when the output is invalid, rather than dropping the sample.
+
+    Two things this has to get right, both learned from the live run:
+
+    - **Invalidate the cache first.** The cache stores raw text and cannot tell
+      a good response from a broken one, so a truncated or empty completion
+      would otherwise be replayed from disk on every retry -- including the
+      pipeline's later retry passes -- and the sample could never recover.
+    - **Do not echo an empty response back at the model.** Appending an empty
+      assistant turn and asking it to fix the format gives it nothing to fix;
+      re-asking the original prompt is what actually works.
+    """
+    original = messages
     last = None
     for attempt in range(max_attempts):
         raw = client.complete(messages, temperature=temperature)
@@ -193,11 +205,19 @@ def _call_with_retry(client, messages, max_attempts, temperature=None):
             return extract_json(raw), raw
         except TeacherOutputError as exc:
             last = exc
+            invalidate = getattr(client, 'invalidate', None)
+            if invalidate is not None:
+                invalidate(messages, temperature)
             if attempt + 1 < max_attempts:
-                messages = messages + [
-                    {'role': 'assistant', 'content': raw[:500]},
-                    {'role': 'user', 'content': 'Sai định dạng. Chỉ trả về đúng một object JSON hợp lệ.'},
-                ]
+                if raw.strip():
+                    messages = original + [
+                        {'role': 'assistant', 'content': raw[:500]},
+                        {'role': 'user', 'content': 'Sai định dạng. Chỉ trả về đúng một object JSON hợp lệ.'},
+                    ]
+                else:
+                    messages = original  # nothing to correct -- just ask again
+                if retry_delay:
+                    time.sleep(retry_delay)
     raise TeacherOutputError(f'invalid JSON after {max_attempts} attempts: {last}')
 
 
@@ -225,7 +245,8 @@ def stage_queries(args, client, records, writer, done):
 
     def worker(task):
         messages = build_query_messages(task.record.context, args.n_queries)
-        payload, _raw = _call_with_retry(client, messages, args.json_retries)
+        payload, _raw = _call_with_retry(client, messages, args.json_retries,
+                                         retry_delay=args.json_retry_delay)
         queries = payload.get('queries') if isinstance(payload, dict) else None
         writer.row({
             'key': task.key,
@@ -323,7 +344,8 @@ def stage_compression(args, client, records, writer, done):
 
     def worker(task):
         messages = build_compression_messages(task.record.context, task.query, task.ratio)
-        payload, _raw = _call_with_retry(client, messages, args.json_retries)
+        payload, _raw = _call_with_retry(client, messages, args.json_retries,
+                                         retry_delay=args.json_retry_delay)
         if not isinstance(payload, dict):
             raise TeacherOutputError('expected a JSON object')
         compressed = (payload.get('compressed_text') or '').strip()
@@ -372,8 +394,12 @@ def main():
     ap.add_argument('--max-queries-per-record', type=int, default=0,
                     help='--stage compression: cap queries used per record (0 = all). The instance '
                          'count is records x queries x ratios, so this is the main cost dial.')
-    ap.add_argument('--json-retries', type=int, default=2,
+    ap.add_argument('--json-retries', type=int, default=3,
                     help='Attempts to get valid JSON out of one prompt (§14).')
+    ap.add_argument('--json-retry-delay', type=float, default=5.0,
+                    help='Seconds to wait between invalid-JSON retries. An immediate retry tends '
+                         'to hit the same transient condition that produced the empty or truncated '
+                         'response in the first place.')
     ap.add_argument('--temperature', type=float, default=None, help='Override the .env temperature.')
     ap.add_argument('--dry-run', action='store_true',
                     help='Run the whole flow against a deterministic offline stub: no endpoint, no spend.')
