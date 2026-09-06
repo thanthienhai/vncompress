@@ -336,7 +336,28 @@ def test_compression_filter_rejects_bad_output(compressed, reason):
     assert rejected[0]['reason'] == reason
 
 
-def test_compression_filter_rejects_a_number_the_teacher_itself_marked_important():
+def test_dropping_a_source_number_the_query_never_asked_about_is_accepted():
+    """The teacher's `numbers` field lists numbers found in the SOURCE, not
+    numbers that must survive. Requiring all of them rejected correct answers."""
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_compression
+
+    context = 'Doanh thu đạt 8500 tỷ đồng trong năm 2026. ' + ('thêm nội dung nền. ' * 30)
+    counters, rejected = Counter(), []
+    rows = [{'key': 'k', 'record_id': 'r1', 'query': 'Năm nào?', 'target_tokens': 20,
+             'context_tokens': 80, 'teacher': {},
+             'teacher_output': {'compressed_text': 'Doanh thu đạt trong năm 2026.',
+                                'numbers': ['8500', '2026']}}]
+    kept = filter_compression(rows, {'r1': _source_record(context)}, _args(), counters, rejected)
+    assert len(kept) == 1, f'rejected as {[r["reason"] for r in rejected]}'
+    # How many survived is recorded for analysis rather than enforced.
+    assert kept[0].metadata['quality']['numbers_preserved'] == 0.5
+
+
+def test_a_number_the_model_invented_is_rejected():
+    """Fabricating a figure is the number failure that actually matters for a
+    finance or legal dataset."""
     from collections import Counter
 
     from scripts.filter_dataset import filter_compression
@@ -344,10 +365,16 @@ def test_compression_filter_rejects_a_number_the_teacher_itself_marked_important
     context = 'Doanh thu đạt 8500 tỷ đồng trong năm 2026. ' + ('thêm nội dung nền. ' * 30)
     counters, rejected = Counter(), []
     rows = [{'key': 'k', 'record_id': 'r1', 'target_tokens': 20, 'context_tokens': 80,
-             'teacher_output': {'compressed_text': 'Doanh thu đạt trong năm 2026.',
-                                'numbers': ['8500']}}]
+             'teacher_output': {'compressed_text': 'Doanh thu đạt 9900 tỷ đồng trong năm 2026.'}}]
     assert filter_compression(rows, {'r1': _source_record(context)}, _args(), counters, rejected) == []
-    assert counters['number_dropped'] == 1
+    assert counters['number_altered'] == 1
+
+
+def test_invented_numbers_ignores_trailing_punctuation():
+    from scripts.filter_dataset import invented_numbers
+
+    assert invented_numbers('năm 1948.', 'thành lập năm 1948 tại Paris') == []
+    assert invented_numbers('năm 1949', 'thành lập năm 1948 tại Paris') == ['1949']
 
 
 def test_compression_filter_accepts_and_populates_the_schema_five_fields():

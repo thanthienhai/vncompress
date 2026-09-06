@@ -40,8 +40,18 @@ Checks applied (the §6.1 items that only make sense once teacher output exists)
                         26-word needle -- rejecting that as under-budget threw
                         away the single best output in the set.
   - `degenerate`        "compressed" text is essentially the whole context
-  - `number_dropped`    a number the teacher itself marked important is missing
-                        from its own compressed text
+  - `number_altered`    a number appears in the compressed text that is not in
+                        the source. This is the number check that survives
+                        contact with real output: the teacher's `numbers` field
+                        turned out to list numbers found in the *source*, not
+                        numbers that must be kept, so requiring all of them to
+                        survive rejected correct compressions -- "Nam Phi biểu
+                        quyết trắng để bảo vệ chế độ apartheid" was thrown out
+                        for dropping a '13' that the question never asked about.
+                        A number the model INVENTED is the real integrity
+                        failure, and that is what this now catches. How many
+                        source numbers survived is recorded in
+                        quality.numbers_preserved for analysis instead.
   - `answer_not_verbatim` (queries) `answer_span` is not a literal span of the
                         paragraph, so it cannot anchor span-overlap supervision
   - `degenerate_answer` (queries) the answer is the whole paragraph -- the
@@ -90,6 +100,34 @@ def extractive_ratio(compressed, context):
     src = Counter(_words(context))
     covered = sum(min(n, src.get(word, 0)) for word, n in comp.items())
     return covered / sum(comp.values())
+
+
+_NUMBER = re.compile(r'\d[\d.,]*')
+
+
+def invented_numbers(compressed, context):
+    """Numbers in the compressed text that do not occur in the source.
+
+    §6.1 forbids out-of-source text for extractive compression, and a fabricated
+    or altered figure is the version of that failure which matters most for a
+    finance/legal dataset. Trailing punctuation is stripped before comparing so
+    "1948." and "1948" are the same number.
+    """
+    source = {n.rstrip('.,') for n in _NUMBER.findall(context or '')}
+    return [n for n in (_NUMBER.findall(compressed or ''))
+            if n.rstrip('.,') and n.rstrip('.,') not in source]
+
+
+def numbers_preserved(compressed, payload):
+    """Share of the numbers the teacher listed that survived into its output.
+
+    Recorded, not enforced: the field lists numbers present in the source, and
+    which of them matter depends on the query.
+    """
+    listed = [str(n) for n in (payload.get('numbers') or []) if str(n).strip()]
+    if not listed:
+        return None
+    return round(sum(1 for n in listed if n in (compressed or '')) / len(listed), 3)
 
 
 def _quarantine(rows, path):
@@ -199,14 +237,13 @@ def filter_compression(raw_rows, records_by_id, args, counters, rejected):
         elif len(compressed) >= 0.9 * len(source.context):
             reason = 'degenerate'
         else:
-            score = extractive_ratio(compressed, source.context)
-            if score < args.min_extractive:
+            # Numbers first: a fabricated figure also drags the extractive ratio
+            # down, and "not_extractive" would report it as a vague similarity
+            # miss instead of naming the altered number.
+            if invented_numbers(compressed, source.context):
+                reason = 'number_altered'
+            elif extractive_ratio(compressed, source.context) < args.min_extractive:
                 reason = 'not_extractive'
-            else:
-                missing = [n for n in (payload.get('numbers') or [])
-                           if str(n).strip() and str(n) not in compressed]
-                if missing:
-                    reason = 'number_dropped'
         if reason:
             counters[reason] += 1
             rejected.append({'reason': reason, 'key': row.get('key'),
@@ -242,6 +279,7 @@ def filter_compression(raw_rows, records_by_id, args, counters, rejected):
                 'compression_reason': payload.get('compression_reason', ''),
                 'quality': {
                     'extractive_ratio': round(extractive_ratio(compressed, source.context), 4),
+                    'numbers_preserved': numbers_preserved(compressed, payload),
                     'budget_compliance': realized <= target,
                     'realized_ratio': round(row.get('context_tokens', realized) / max(realized, 1), 3),
                 },
