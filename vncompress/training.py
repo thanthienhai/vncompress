@@ -27,11 +27,11 @@ import hashlib
 import json
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data import DataLoader, Dataset
 
 from .linguistics import (
     TONE_NAME_TO_ID,
@@ -39,6 +39,18 @@ from .linguistics import (
     RelevanceConsistencyLoss,
     build_relevance_labels,
     get_tone_analyzer,
+)
+from .dataset import (
+    KIND_BENCHMARK,
+    KIND_CORPUS,
+    MIN_CORPUS_CHARS,
+    SPAN_ANSWER_TASKS,
+    Record,
+    has_processed_split,
+    load_manifest,
+    load_split,
+    normalize_file,
+    split_by_document,
 )
 from .models import lora_target_modules, resize_embeddings_if_needed
 
@@ -101,6 +113,86 @@ def load_training_texts(data_path: Optional[str] = None) -> List[str]:
         if os.path.exists(candidate):
             return load_training_texts(candidate)
     return _demo_texts()
+
+
+def _corpus_candidates(data_path: Optional[str]) -> List[str]:
+    """Same file-resolution order load_training_texts() uses."""
+    if data_path:
+        return [data_path]
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [
+        os.path.join(here, 'data', 'benchmark', 'training_corpus_v1.json'),
+        os.path.join(here, 'data', 'benchmark', 'wikipedia_vi_raw.json'),
+        os.path.join(here, 'vcc_bench_data', 'training_corpus_v1.json'),
+        os.path.join(here, 'vcc_bench_data', 'wikipedia_vi_raw.json'),
+    ]
+
+
+def _corpus_records(data_path: Optional[str], min_chars: int = MIN_CORPUS_CHARS) -> List[Record]:
+    """Canonical corpus records for `data_path`, keeping each paragraph's
+    source-document id -- the unit §9 forbids splitting. load_training_texts()
+    returns bare strings and therefore *cannot* support a document-level
+    split; this is the loader that can."""
+    for candidate in _corpus_candidates(data_path):
+        if os.path.exists(candidate):
+            records = [r for r in normalize_file(candidate, min_chars=min_chars) if r.kind == KIND_CORPUS]
+            if records:
+                return records
+    return [
+        Record(id=f'demo_{i}', kind=KIND_CORPUS, source='demo', source_id=str(i),
+               doc_id=f'demo_{i}', task='context_compression', context=text)
+        for i, text in enumerate(_demo_texts())
+    ]
+
+
+def load_train_eval_texts(
+    data_path: Optional[str] = None,
+    eval_ratio: float = 0.1,
+    seed: int = 42,
+    processed_dir: Optional[str] = None,
+) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """Return `(train_texts, eval_texts, split_meta)` split at the DOCUMENT
+    level (docs/dataset_pipeline.md §9), replacing the record-level
+    `random_split` this module used to do.
+
+    A materialized `data/processed/` split (built by `scripts/split_dataset.py`)
+    is authoritative when present and no explicit `data_path` is given, so every
+    consumer -- SLM/tone, LACC, E6 -- trains on the *same* documents. Otherwise
+    an equivalent split is derived on the fly from the raw corpus, so training
+    is never blocked on running the pipeline scripts first.
+    """
+    if data_path is None and has_processed_split(processed_dir):
+        train = load_split('train', kind=KIND_CORPUS, processed_dir=processed_dir)
+        eval_ = load_split('eval', kind=KIND_CORPUS, processed_dir=processed_dir)
+        manifest = load_manifest(processed_dir) or {}
+        meta = {
+            'split_source': 'processed',
+            'policy': manifest.get('split_policy', 'document-level'),
+            'eval_ratio': manifest.get('eval_ratio_realized'),
+            'seed': manifest.get('seed'),
+            'train_doc_keys_sha256': manifest.get('train_doc_keys_sha256'),
+        }
+    else:
+        records = _corpus_records(data_path)
+        train, eval_, manifest = split_by_document(records, eval_ratio=eval_ratio, seed=seed)
+        meta = {
+            'split_source': 'derived',
+            'policy': manifest['split_policy'],
+            'eval_ratio': manifest['eval_ratio_realized'],
+            'seed': seed,
+            'train_doc_keys_sha256': manifest['train_doc_keys_sha256'],
+        }
+
+    # A one-document corpus cannot be split by document; fall back to holding
+    # out a single record so validation still has something to score.
+    if not eval_ and len(train) >= 2:
+        eval_ = [train[-1]]
+        train = train[:-1]
+        meta['degenerate_single_document'] = True
+
+    meta['n_train_documents'] = len({r.doc_key for r in train})
+    meta['n_eval_documents'] = len({r.doc_key for r in eval_})
+    return [r.context for r in train], [r.context for r in eval_], meta
 
 
 # ============================================================================
@@ -297,14 +389,18 @@ def run_lacc_training(
     ))
     model.print_trainable_parameters()
 
-    texts = load_training_texts(train_data_path)
-    dataset = ToneTrainingDataset(texts, tokenizer, max_length=max_length)
+    train_texts, eval_texts, split_meta = load_train_eval_texts(train_data_path)
+    train_dataset = ToneTrainingDataset(train_texts, tokenizer, max_length=max_length)
+    eval_dataset = ToneTrainingDataset(eval_texts, tokenizer, max_length=max_length)
     collator = ToneDataCollator(pad_token_id=tokenizer.pad_token_id, max_length=max_length)
-    print(f"  {len(dataset)} training samples from {len(texts)} texts")
+    print(f"  {len(train_dataset)} train / {len(eval_dataset)} eval samples "
+          f"from {len(train_texts)}/{len(eval_texts)} texts")
+    print(f"  split: {split_meta['policy']} (source={split_meta['split_source']}, "
+          f"eval_ratio={split_meta['eval_ratio']}, documents "
+          f"{split_meta['n_train_documents']}/{split_meta['n_eval_documents']})")
 
-    split = int(0.9 * len(dataset))
-    train_loader = DataLoader(Subset(dataset, range(split)), batch_size=batch_size, shuffle=True, collate_fn=collator)
-    eval_loader = DataLoader(Subset(dataset, range(split, len(dataset))), batch_size=batch_size, collate_fn=collator)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collator)
+    eval_loader = DataLoader(eval_dataset, batch_size=batch_size, collate_fn=collator)
 
     hidden_dim = model.config.hidden_size
     device_actual = next(model.parameters()).device
@@ -445,11 +541,17 @@ def run_slm_training(
     ))
     model.print_trainable_parameters()
 
-    dataset = VietnameseToneDataset(load_training_texts(train_data_path), tokenizer, max_length)
-    if len(dataset) < 2:
-        raise RuntimeError("Need at least two usable texts in the training dataset.")
-    train_n = min(max(1, int(len(dataset) * 0.9)), len(dataset) - 1)
-    train_ds, val_ds = random_split(dataset, [train_n, len(dataset) - train_n], generator=torch.Generator().manual_seed(42))
+    train_texts, val_texts, split_meta = load_train_eval_texts(train_data_path)
+    train_ds = VietnameseToneDataset(train_texts, tokenizer, max_length)
+    val_ds = VietnameseToneDataset(val_texts, tokenizer, max_length)
+    if len(train_ds) < 1 or len(val_ds) < 1:
+        raise RuntimeError(
+            f"Document-level split yielded {len(train_ds)} train / {len(val_ds)} usable texts "
+            f"(need >= 1 each). Check --train-data-path.")
+    print(f"  split: {split_meta['policy']} (source={split_meta['split_source']}, "
+          f"eval_ratio={split_meta['eval_ratio']}, documents "
+          f"{split_meta['n_train_documents']}/{split_meta['n_eval_documents']}) | "
+          f"{len(train_ds)} train / {len(val_ds)} eval texts")
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=SLMCollator(tokenizer.pad_token_id), pin_memory=True)
 
     tone_loss = PhonologicalConsistencyLoss(model.config.hidden_size, lambda_tone=lambda_tone).to(device)
@@ -507,9 +609,10 @@ def run_slm_training(
             'lora_r': lora_r, 'base_dtype': '4bit-nf4' if load_4bit else base_dtype,
         }, f, ensure_ascii=False, indent=2)
 
-    val_samples = [dataset[i] for i in val_ds.indices]
+    val_samples = [val_ds[i] for i in range(len(val_ds))]
     with open(os.path.join(final_dir, 'val_split.json'), 'w', encoding='utf-8') as f:
-        json.dump({'max_length': max_length, 'base_model': model_name, 'samples': val_samples}, f)
+        json.dump({'max_length': max_length, 'base_model': model_name,
+                   'split': split_meta, 'samples': val_samples}, f)
 
     print(f"Saved LoRA adapter + tokenizer: {final_dir}")
     print(f"Saved held-out validation split ({len(val_samples)} texts): {final_dir}/val_split.json")
@@ -529,7 +632,7 @@ def run_slm_training(
 # probe_kind='relevance') and plugs into LACC's tone_source='model' path.
 
 
-def load_relevance_samples(data_path: Optional[str], tasks=('long_document_qa', 'needle_in_haystack')) -> List[dict]:
+def load_relevance_samples(data_path: Optional[str], tasks=SPAN_ANSWER_TASKS) -> List[dict]:
     """Load (context, reference_answer) pairs from a VCC-Bench-shaped JSON
     ({"samples": [{context, reference_answer, task}]}), keeping only tasks whose
     answer is a span/needle in the context (so span-overlap supervision is
@@ -556,6 +659,82 @@ def load_relevance_samples(data_path: Optional[str], tasks=('long_document_qa', 
                     "quyền và trách nhiệm của mọi tổ chức, cá nhân, phải công khai, minh bạch.",
          'reference_answer': "quyền và trách nhiệm của mọi tổ chức, cá nhân"},
     ]
+
+
+def _relevance_pairs(records, tasks=SPAN_ANSWER_TASKS) -> List[dict]:
+    """Canonical records -> the (context, reference_answer) pairs E4 consumes,
+    applying the same filters load_relevance_samples() has always applied."""
+    return [
+        {'context': r.context, 'reference_answer': r.reference_answer}
+        for r in records
+        if (not tasks or r.task in tasks) and len(r.context) > 100 and r.reference_answer
+    ]
+
+
+def _declared_split(path: str) -> Optional[str]:
+    """`train`/`eval` if `path` is already one side of a split written by
+    scripts/split_dataset.py, else None -- so a pre-split file is not split
+    a second time."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return (json.load(f).get('metadata') or {}).get('split')
+    except (OSError, ValueError):
+        return None
+
+
+def load_train_eval_relevance_samples(
+    data_path: Optional[str] = None,
+    eval_ratio: float = 0.1,
+    seed: int = 42,
+    processed_dir: Optional[str] = None,
+    tasks=SPAN_ANSWER_TASKS,
+) -> Tuple[List[dict], List[dict], Dict[str, Any]]:
+    """Return `(train_pairs, eval_pairs, split_meta)` for the E4 probe, split
+    at the DOCUMENT level (§9).
+
+    This closes a contamination path that existed before: E4 trained on every
+    `long_document_qa`/`needle_in_haystack` sample of `vcc_bench_v1.json` --
+    the same samples `benchmark.py` then evaluated on. VCC-Bench fans one
+    Wikipedia article out into 3 query variants per paragraph, so even a
+    per-sample holdout would have leaked; grouping by document is what makes
+    the held-out side meaningful.
+    """
+    meta: Dict[str, Any] = {'policy': 'document-level, hash-ordered'}
+
+    if data_path and os.path.exists(data_path):
+        declared = _declared_split(data_path)
+        if declared in ('train', 'eval'):
+            # Already one side of a split -- use as-is, and pick up its sibling.
+            records = [r for r in normalize_file(data_path) if r.kind == KIND_BENCHMARK]
+            sibling = os.path.join(os.path.dirname(os.path.abspath(data_path)),
+                                   'vcc_bench_eval.json' if declared == 'train' else 'vcc_bench_train.json')
+            other = ([r for r in normalize_file(sibling) if r.kind == KIND_BENCHMARK]
+                     if os.path.exists(sibling) else [])
+            train_r, eval_r = (records, other) if declared == 'train' else (other, records)
+            meta['split_source'] = f'pre-split file ({os.path.basename(data_path)})'
+        else:
+            records = [r for r in normalize_file(data_path) if r.kind == KIND_BENCHMARK]
+            train_r, eval_r, manifest = split_by_document(records, eval_ratio=eval_ratio, seed=seed)
+            meta.update({'split_source': f'derived from {os.path.basename(data_path)}',
+                         'eval_ratio': manifest['eval_ratio_realized'], 'seed': seed})
+    elif has_processed_split(processed_dir):
+        train_r = load_split('train', kind=KIND_BENCHMARK, processed_dir=processed_dir)
+        eval_r = load_split('eval', kind=KIND_BENCHMARK, processed_dir=processed_dir)
+        manifest = load_manifest(processed_dir) or {}
+        meta.update({'split_source': 'processed', 'eval_ratio': manifest.get('eval_ratio_realized'),
+                     'seed': manifest.get('seed')})
+    else:
+        # No dataset file at all: fall back to the built-in demo pairs, which
+        # are too few to hold out from.
+        meta['split_source'] = 'demo fallback (no dataset file found)'
+        train_r, eval_r = [], []
+        demo = load_relevance_samples(None)
+        meta.update({'n_train_documents': len(demo), 'n_eval_documents': 0})
+        return demo, [], meta
+
+    meta['n_train_documents'] = len({r.doc_key for r in train_r})
+    meta['n_eval_documents'] = len({r.doc_key for r in eval_r})
+    return _relevance_pairs(train_r, tasks), _relevance_pairs(eval_r, tasks), meta
 
 
 class RelevanceDataset(Dataset):
@@ -601,6 +780,48 @@ class RelevanceCollator:
             mask[row, :n] = 1
             labels[row, :n] = torch.tensor(sample_labels)
         return {'input_ids': ids, 'attention_mask': mask, 'relevance_labels': labels}
+
+
+def score_relevance_probe(model, probe, dataset, pad_id: int, batch_size: int, device) -> Dict[str, float]:
+    """Held-out accuracy / positive-class P-R-F1 for the E4 probe, plus the
+    always-negative baseline. Relevance positives are rare (a token counts only
+    if its syllable also appears in the answer), so raw accuracy alone is
+    misleading -- the baseline is what says whether the probe learned anything.
+    """
+    loader = DataLoader(dataset, batch_size=batch_size, collate_fn=RelevanceCollator(pad_id))
+    probe.eval()
+    tp = fp = fn = correct = total = positives = 0
+    with torch.inference_mode():
+        for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            hidden = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'],
+                           output_hidden_states=True).hidden_states[-1]
+            logits = probe.tone_classifier(hidden.float())
+            labels = batch['relevance_labels']
+            scored = (labels != probe.ignore_index) & (batch['attention_mask'] == 1)
+            if not bool(scored.any()):
+                continue
+            pred = logits.argmax(dim=-1)[scored]
+            gold = labels[scored]
+            correct += int((pred == gold).sum())
+            total += int(gold.numel())
+            positives += int((gold == 1).sum())
+            tp += int(((pred == 1) & (gold == 1)).sum())
+            fp += int(((pred == 1) & (gold == 0)).sum())
+            fn += int(((pred == 0) & (gold == 1)).sum())
+    if total == 0:
+        return {}
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    return {
+        'n_tokens_scored': total,
+        'positive_rate': round(positives / total, 4),
+        'accuracy': round(correct / total, 4),
+        'precision': round(precision, 4),
+        'recall': round(recall, 4),
+        'f1': round(2 * precision * recall / max(precision + recall, 1e-12), 4),
+        'baseline_all_negative_accuracy': round(1 - positives / total, 4),
+    }
 
 
 def run_relevance_probe_training(
@@ -666,13 +887,20 @@ def run_relevance_probe_training(
     for p in model.parameters():
         p.requires_grad_(False)
 
-    samples = load_relevance_samples(train_data_path)
-    dataset = RelevanceDataset(samples, tokenizer, max_length)
+    train_samples, eval_samples, split_meta = load_train_eval_relevance_samples(train_data_path)
+    dataset = RelevanceDataset(train_samples, tokenizer, max_length)
+    eval_dataset = RelevanceDataset(eval_samples, tokenizer, max_length) if eval_samples else None
     if len(dataset) < 1:
         raise RuntimeError("No usable relevance-labelled samples (need answers that overlap their context).")
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         collate_fn=RelevanceCollator(tokenizer.pad_token_id))
-    print(f"  {len(dataset)} relevance-labelled samples")
+    print(f"  split: {split_meta['policy']} (source={split_meta['split_source']}, documents "
+          f"{split_meta['n_train_documents']}/{split_meta['n_eval_documents']})")
+    print(f"  {len(dataset)} train / {len(eval_dataset) if eval_dataset else 0} held-out "
+          f"relevance-labelled samples")
+    if not eval_dataset:
+        print("  [WARN] no held-out samples -- this run reports no generalization number. "
+              "Build the splits first: python scripts/split_dataset.py")
 
     probe = RelevanceConsistencyLoss(model.config.hidden_size, lambda_relevance=1.0).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=0.01)
@@ -702,6 +930,15 @@ def run_relevance_probe_training(
         if 0 < max_steps <= step:
             break
 
+    eval_metrics: Dict[str, float] = {}
+    if eval_dataset is not None and len(eval_dataset) > 0:
+        eval_metrics = score_relevance_probe(model, probe, eval_dataset, tokenizer.pad_token_id,
+                                             batch_size, device)
+        if eval_metrics:
+            print("  held-out: acc={accuracy} (all-negative baseline {baseline_all_negative_accuracy}) "
+                  "| P={precision} R={recall} F1={f1} on {n_tokens_scored} tokens"
+                  .format(**eval_metrics))
+
     os.makedirs(output_dir, exist_ok=True)
     probe_path = os.path.join(output_dir, 'relevance_probe.pt')
     torch.save(probe.state_dict(), probe_path)
@@ -710,6 +947,9 @@ def run_relevance_probe_training(
             'base_model': resolved_base, 'adapter_dir': adapter_dir, 'hidden_size': model.config.hidden_size,
             'num_classes': probe.num_classes, 'probe_kind': 'relevance', 'max_length': max_length,
             'base_dtype': '4bit-nf4' if load_4bit else base_dtype,
+            'split': split_meta, 'n_train_samples': len(dataset),
+            'n_eval_samples': len(eval_dataset) if eval_dataset else 0,
+            'held_out_metrics': eval_metrics,
         }, f, ensure_ascii=False, indent=2)
     print(f"Saved relevance probe: {probe_path} (+ relevance_probe_meta.json) | optimizer steps={step}")
     return probe
@@ -830,14 +1070,15 @@ def validate_slm(
         validation = [tuple(s) for s in saved['samples']]
         print(f"Loaded held-out split saved at training time: {len(validation)} texts")
     else:
-        print("[WARN] val_split.json not found; rebuilding the split from train_data_path -- "
-              "pass the SAME train_data_path/max_length used during training.")
-        ds = VietnameseToneDataset(load_training_texts(train_data_path), tokenizer, max_length)
-        if len(ds) < 2:
-            raise RuntimeError("Need at least two valid texts.")
-        train_n = min(max(1, int(len(ds) * 0.9)), len(ds) - 1)
-        _, validation = random_split(ds, [train_n, len(ds) - train_n], generator=torch.Generator().manual_seed(42))
-        validation = [tuple(s) for s in validation]
+        print("[WARN] val_split.json not found; rebuilding the document-level split from "
+              "train_data_path -- pass the SAME train_data_path/max_length used during training.")
+        _, val_texts, split_meta = load_train_eval_texts(train_data_path)
+        ds = VietnameseToneDataset(val_texts, tokenizer, max_length)
+        if len(ds) < 1:
+            raise RuntimeError("Rebuilt eval split contains no usable texts.")
+        print(f"  rebuilt from the {split_meta['split_source']} split "
+              f"({split_meta['n_eval_documents']} eval documents)")
+        validation = [tuple(ds[i]) for i in range(len(ds))]
     loader = DataLoader(validation, batch_size=batch_size, collate_fn=SLMCollator(tokenizer.pad_token_id))
 
     num_tones = probe.num_tones if probe is not None else 0

@@ -158,13 +158,33 @@ VIETNAMESE_DEMO_SAMPLES = [
 
 
 def _default_data_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'benchmark', 'vcc_bench_v1.json')
+    """The held-out eval split when it has been built, else the full legacy
+    benchmark (docs/dataset_pipeline.md §10).
+
+    `data/processed/vcc_bench_eval.json` is the side of the 90/10
+    document-level split that no training run has seen. Reporting on the full
+    `vcc_bench_v1.json` while an E4 probe was trained on 90% of the same
+    samples measures memorization, not compression -- so once the split exists
+    it becomes the default, and `--data-path` remains the explicit override for
+    comparing against historical whole-file numbers.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    eval_split = os.path.join(here, 'data', 'processed', 'vcc_bench_eval.json')
+    if os.path.exists(eval_split):
+        return eval_split
+    return os.path.join(here, 'data', 'benchmark', 'vcc_bench_v1.json')
 
 
 def _load_dataset(config: VCCBenchConfig, data_path, tokenizer, quick: bool) -> VCCBench:
     json_path = data_path or _default_data_path()
     if os.path.exists(json_path):
         print(f"\nLoading VCC-Bench dataset: {json_path}")
+        if os.path.basename(json_path) == 'vcc_bench_v1.json' and os.path.exists(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'processed', 'vcc_bench_eval.json')):
+            print("[WARN] Scoring the FULL benchmark while a held-out eval split exists "
+                  "(data/processed/vcc_bench_eval.json). Any model trained on the train split "
+                  "-- E4's relevance probe in particular -- has seen 90% of these samples.")
         return VCCBench.load_from_json(json_path, config)
     print(f"\n[WARN] Dataset not found at {json_path}, using demo samples")
     bench = VCCBench(config)
@@ -348,7 +368,8 @@ def main():
     parser.add_argument('--demo', action='store_true', help='Single-sample per-method detail, not a comparable run')
     parser.add_argument('--ablation', action='store_true', help='Isolate perplexity/tone/morphology signals (see docs/benchmark.md)')
     parser.add_argument('--list-methods', action='store_true')
-    parser.add_argument('--data-path', default=None, help='Default: data/benchmark/vcc_bench_v1.json')
+    parser.add_argument('--data-path', default=None,
+                        help='Default: data/processed/vcc_bench_eval.json (the held-out 90/10 split) when it exists, else data/benchmark/vcc_bench_v1.json.')
     parser.add_argument('--scorer-adapter-dir', default=None,
                          help="LACC scorer: a LoRA adapter dir from 'train.py --mode slm' (e.g. models/slm/final) "
                               "or a HuggingFace model id. Enables the lightweight-tier perplexity signal.")

@@ -23,3 +23,12 @@ data/benchmark/vcc_bench_uit_viquad_qa.json
 models/**/*.safetensors
 models/**/*.bin
 models/**/pytorch_model*.pt
+
+# Canonical record stream and its splits (scripts/normalize_dataset.py ->
+# scripts/split_dataset.py): ~58MB of text derived entirely from files that
+# are already in git, so committing them would double the repo for nothing.
+# Rebuild with those two scripts. The small artifacts that make a run
+# auditable -- split_manifest.json (policy, seed, realized ratios, eval
+# document keys, output checksums), records_meta.json, and the two
+# vcc_bench_*.json splits -- ARE committed.
+data/processed/*.jsonl

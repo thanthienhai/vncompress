@@ -27,6 +27,7 @@ Needs a GPU for the teacher pass in practice; the encoder fine-tune is light.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -80,6 +81,10 @@ def main():
     ap.add_argument('--lr', type=float, default=2e-5)
     ap.add_argument('--max-length', type=int, default=256)
     ap.add_argument('--max-texts', type=int, default=-1, help='Cap number of training texts (-1 = all).')
+    ap.add_argument('--eval-max-texts', type=int, default=200,
+                    help='Held-out texts to score after training (0 disables). The teacher pass over '
+                         'the eval split is the expensive part, so this is capped by default.')
+    ap.add_argument('--seed', type=int, default=42, help='Salts the document-level split ordering.')
     ap.add_argument('--output-dir', default='models/encoder_compressor')
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
@@ -89,7 +94,7 @@ def main():
     from transformers import AutoModelForTokenClassification, AutoTokenizer
 
     from vncompress.models import load_model
-    from vncompress.training import load_training_texts
+    from vncompress.training import load_train_eval_texts
 
     device = args.device if (args.device == 'cpu' or torch.cuda.is_available()) else 'cpu'
     print(f"Teacher: {args.teacher_model} | Encoder: {args.encoder_id} | ratio={args.ratio} | device={device}")
@@ -98,19 +103,30 @@ def main():
                                             dtype='float16' if device == 'cuda' else 'float32')
     enc_tok = AutoTokenizer.from_pretrained(args.encoder_id, use_fast=True)
 
-    texts = load_training_texts(args.train_data_path)
+    texts, eval_texts, split_meta = load_train_eval_texts(args.train_data_path, seed=args.seed)
     if args.max_texts > 0:
         texts = texts[:args.max_texts]
-    print(f"Building distillation labels for {len(texts)} texts...")
+    if args.eval_max_texts > 0:
+        eval_texts = eval_texts[:args.eval_max_texts]
+    else:
+        eval_texts = []
+    print(f"Split: {split_meta['policy']} (source={split_meta['split_source']}, documents "
+          f"{split_meta['n_train_documents']}/{split_meta['n_eval_documents']})")
+    print(f"Building distillation labels for {len(texts)} train / {len(eval_texts)} held-out texts...")
 
-    examples = []
-    for text in texts:
-        built = build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, args.ratio, args.max_length)
-        if built:
-            examples.append(built)
+    def label_all(batch_texts):
+        out = []
+        for text in batch_texts:
+            built = build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, args.ratio, args.max_length)
+            if built:
+                out.append(built)
+        return out
+
+    examples = label_all(texts)
+    eval_examples = label_all(eval_texts)
     if not examples:
         raise RuntimeError("No usable training examples were built.")
-    print(f"  {len(examples)} labeled examples")
+    print(f"  {len(examples)} train / {len(eval_examples)} held-out labeled examples")
 
     pad_id = enc_tok.pad_token_id or 0
 
@@ -150,10 +166,68 @@ def main():
             if step % 20 == 0:
                 print(f"  epoch {epoch + 1} step {step} loss {out.loss.item():.4f}")
 
+    eval_metrics = {}
+    if eval_examples:
+        eval_loader = DataLoader(eval_examples, batch_size=args.batch_size, collate_fn=collate)
+        model.eval()
+        tp = fp = fn = correct = total = keep = 0
+        with torch.inference_mode():
+            for batch in eval_loader:
+                batch = {k: v.to(model.device) for k, v in batch.items()}
+                pred = model(input_ids=batch['input_ids'],
+                             attention_mask=batch['attention_mask']).logits.argmax(dim=-1)
+                gold = batch['labels']
+                scored = gold != -100
+                pred, gold = pred[scored], gold[scored]
+                correct += int((pred == gold).sum())
+                total += int(gold.numel())
+                keep += int((gold == 1).sum())
+                tp += int(((pred == 1) & (gold == 1)).sum())
+                fp += int(((pred == 1) & (gold == 0)).sum())
+                fn += int(((pred == 0) & (gold == 1)).sum())
+        if total:
+            precision = tp / max(tp + fp, 1)
+            recall = tp / max(tp + fn, 1)
+            eval_metrics = {
+                'n_tokens_scored': total,
+                'keep_rate': round(keep / total, 4),
+                'accuracy': round(correct / total, 4),
+                'keep_precision': round(precision, 4),
+                'keep_recall': round(recall, 4),
+                'keep_f1': round(2 * precision * recall / max(precision + recall, 1e-12), 4),
+                'baseline_all_drop_accuracy': round(1 - keep / total, 4),
+            }
+            print("Held-out: acc={accuracy} (all-drop baseline {baseline_all_drop_accuracy}) | "
+                  "keep P={keep_precision} R={keep_recall} F1={keep_f1} on {n_tokens_scored} tokens"
+                  .format(**eval_metrics))
+
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)
     enc_tok.save_pretrained(args.output_dir)
-    print(f"Saved distilled encoder classifier to: {args.output_dir}")
+
+    # docs/dataset_pipeline.md §14: the teacher's identity and generation
+    # parameters must travel with the artifact, or a distilled checkpoint is
+    # unreproducible -- previously nothing recorded which teacher or which
+    # ratio produced these weights.
+    with open(os.path.join(args.output_dir, 'distillation_meta.json'), 'w', encoding='utf-8') as f:
+        json.dump({
+            'teacher_model': args.teacher_model,
+            'teacher_signal': 'sliding-window perplexity, top-1/ratio kept',
+            'encoder_id': args.encoder_id,
+            'ratio': args.ratio,
+            'max_length': args.max_length,
+            'epochs': args.epochs,
+            'batch_size': args.batch_size,
+            'lr': args.lr,
+            'seed': args.seed,
+            'train_data_path': args.train_data_path,
+            'split': split_meta,
+            'n_train_examples': len(examples),
+            'n_eval_examples': len(eval_examples),
+            'held_out_metrics': eval_metrics,
+        }, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved distilled encoder classifier to: {args.output_dir} (+ distillation_meta.json)")
     print(f"Use it: EncoderClassifierCompressor(tokenizer, encoder_path='{args.output_dir}')")
 
 

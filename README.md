@@ -55,11 +55,28 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-## 6. Huấn luyện
+## 6. Data pipeline
+
+Mọi thứ huấn luyện/đánh giá đọc **split 90/10 theo document**. Dựng một lần:
+
+```bash
+python scripts/normalize_dataset.py   # raw -> data/processed/records.jsonl (canonical, có doc_id)
+python scripts/verify_dataset.py      # deterministic checks (§6.1), ghi verification_report.json
+python scripts/split_dataset.py       # 90/10 theo document; từ chối ghi nếu phát hiện rò rỉ
+```
+
+Vì sao theo document chứ không theo record: một bài UVW-2026 bị cắt thành tối đa 162 paragraph cùng
+`topic_id`, và VCC-Bench sinh 3 biến thể câu hỏi cho mỗi paragraph — split mức record đặt cùng một
+tài liệu vào cả train lẫn eval. Chi tiết ở [`docs/dataset_pipeline.md`](docs/dataset_pipeline.md) §9.
+
+Bỏ qua bước này vẫn chạy được (split được suy ra trong bộ nhớ từ file raw), chỉ khác là không có
+manifest để audit.
+
+## 7. Huấn luyện
 
 ```bash
 python train.py --mode lacc --config configs/training.json          # fine-tune model sinh + tone probe
-python train.py --mode slm --train-data-path data/benchmark/training_corpus_v1.json  # SLM scorer nhỏ (cần GPU)
+python train.py --mode slm                                          # SLM scorer nhỏ (cần GPU), đọc split đã dựng
 python train.py --mode slm --validate --adapter-dir models/slm/final --tone-probe models/slm/tone_probe.pt
 ```
 
@@ -72,18 +89,20 @@ Sau khi wave 1 bác bỏ giả thuyết tone-aware, wave 2 thêm hai hướng hu
 ```bash
 # E4 — probe dự đoán liên-quan-câu-hỏi (thay cho probe thanh điệu), freeze base, chỉ train probe
 python scripts/train_relevance_probe.py --adapter-dir models/qwen3/final \
-    --data-path data/benchmark/vcc_bench_v2.json --output-dir models/qwen3 --load-4bit
-#   -> models/qwen3/relevance_probe.pt (+ relevance_probe_meta.json), cắm vào LACC qua tone_source='model'
+    --data-path data/processed/vcc_bench_train.json --output-dir models/qwen3 --load-4bit
+#   -> models/qwen3/relevance_probe.pt (+ relevance_probe_meta.json, kèm metric held-out)
 
 # E6 — encoder token-classification compressor (LLMLingua-2 / PhoBERT), distill nhãn keep/drop từ teacher
 python scripts/train_encoder_compressor.py --encoder-id vinai/phobert-base \
-    --train-data-path data/benchmark/training_corpus_v1.json \
     --teacher-model Qwen/Qwen2.5-0.5B-Instruct --ratio 4 --output-dir models/encoder_cls
+#   -> checkpoint + distillation_meta.json (teacher, ratio, seed, split, metric held-out)
 ```
+
+Cả hai đọc phía **train** của split và báo cáo số liệu trên phía **eval** chưa từng nhìn thấy.
 
 `load_scorer(..., probe_kind='relevance')` nạp relevance probe; A/B nó với probe thanh điệu bằng `scripts/verify_tone_probe_e2e.py`. Đo token inflation (P3): `python scripts/measure_token_inflation.py`.
 
-## 7. Benchmark
+## 8. Benchmark
 
 ```bash
 python benchmark.py --list-methods                                   # gồm cả các arm wave-2
@@ -107,7 +126,7 @@ python scripts/checksum_datasets.py     # xác thực checksum dataset
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) chạy toàn bộ trên mỗi push/PR vào `main`, dùng torch CPU-only.
 
-## 8. Kết quả
+## 9. Kết quả
 
 Mỗi experiment là một thư mục tự mô tả dưới `results/` (`config.json` + `environment.json` + `metrics.json`/`vcc_bench_results.json` + `predictions.json`), truy nguyên được qua git commit + checksum dataset. Xem `research/experiments.md` cho danh sách các lần chạy còn cần thực hiện và kết quả sơ bộ đã có (`results/training/reports/`).
 
@@ -131,7 +150,7 @@ Ví dụ: `results/training/2026-09-05_slm-scaleup/`, `results/training/2026-09-
 
 **Phân biệt với `models/`**: `results/training/...` chỉ chứa metadata + báo cáo (nhẹ, luôn commit được); checkpoint có thể tái sử dụng (LoRA adapter, tokenizer, `tone_probe.pt`) nằm ở `models/<mode>/` hoặc `models/<tên-tuỳ-chỉnh>/` (đặt qua `--output-dir`), bị ghi đè mỗi lần train lại và phần lớn bị gitignore (xem [`docs/training.md`](docs/training.md#5-filing-a-trainingeval-report)). Một báo cáo trong `results/training/` nên ghi rõ nó ứng với checkpoint nào trong `models/` tại thời điểm chạy.
 
-## 9. Cấu trúc thư mục
+## 10. Cấu trúc thư mục
 
 ```
 vncompress/
@@ -146,8 +165,11 @@ vncompress/
 │   ├── evaluation.py     # VCC-Bench, metrics, significance, taxonomy
 │   └── utils.py          # JSON I/O nhỏ, dùng chung
 ├── tests/                # 4 file test, CPU-only, MockTokenizer
-├── scripts/               # build dataset, checksum, smoke test, phân tích SLM
-├── data/benchmark/        # VCC-Bench dataset + PROVENANCE.md + CHECKSUMS.json
+│   ├── dataset.py        # canonical schema, verify §6.1, split theo document §9
+├── tests/                # test CPU-only, MockTokenizer
+├── scripts/               # data pipeline (normalize/verify/split), build dataset, checksum, phân tích
+├── data/benchmark/        # nguồn raw + VCC-Bench + PROVENANCE.md + CHECKSUMS.json
+├── data/processed/        # canonical records + split 90/10 + split_manifest.json
 ├── models/                # checkpoint đã train (adapter lớn bị gitignore)
 ├── results/               # kết quả benchmark/training, mỗi run tự mô tả
 ├── docs/{training,benchmark}.md
@@ -155,7 +177,7 @@ vncompress/
 └── paper/                 # LaTeX paper
 ```
 
-## 10. Trích dẫn
+## 11. Trích dẫn
 
 ```bibtex
 @misc{thanthien2026lacc,

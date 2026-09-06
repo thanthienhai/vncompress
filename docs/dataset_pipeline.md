@@ -1,11 +1,20 @@
 # Dataset Pipeline: Teacher Distillation, Training & Evaluation
 
-> **Trạng thái (đọc trước):** Tài liệu này gồm **hai lớp**, đừng lẫn lộn:
+> **Trạng thái (đọc trước):** Tài liệu này gồm **ba lớp**, đừng lẫn lộn:
 >
-> 1. **Hợp đồng dữ liệu wave-2 đang dùng thật** — mục §2.5. Đây là thứ các script training đã xây dựng (`E4` relevance probe, `E6` encoder compressor, SLM/tone) **thực sự đọc** hôm nay. Muốn train/eval wave-2 thì làm theo mục này.
-> 2. **Roadmap dataset V1 (đề xuất, chưa triển khai)** — mục §4–§5, §11–§13. Đây là teacher-distillation dataset tham vọng hơn (compressed_text, token_labels, preference, hard_negative, …). **Chưa có script nào sinh ra, và không training wave-2 nào tiêu thụ các trường này.** Các khối đó được gắn nhãn `ROADMAP` ở đầu mục.
+> 1. **`IMPLEMENTED` — xương sống pipeline đã chạy được.** Normalize → verify → split theo document (90/10) → consumer. Code: `vncompress/dataset.py` + `scripts/normalize_dataset.py`, `scripts/verify_dataset.py`, `scripts/split_dataset.py`. Đây là §2.5, §5 (phần core), §6.1, §9, §12, §13.
+> 2. **`PARTIAL`** — §6 (chỉ có deterministic check; semantic verifier + teacher agreement chưa có), §8, §14 (metadata đã ghi cho E6/E4; prompt versioning chưa cần vì chưa có teacher generation).
+> 3. **`ROADMAP` — chưa triển khai:** §3, §4, §5 (các trường teacher), §7, §11, §15. Đây là teacher-distillation dataset (compressed_text, token_labels, preference, hard_negative, …). **Chưa có script nào sinh ra, và không training wave-2 nào tiêu thụ các trường này.**
 >
-> Điểm mấu chốt: E4 và E6 **tự suy ra nhãn trong code** (span-overlap / perplexity teacher), nên chúng KHÔNG phụ thuộc canonical schema §5. Nhầm hai lớp này sẽ dẫn tới việc dựng một dataset mà script wave-2 không đọc được.
+> Điểm mấu chốt: E4 và E6 **tự suy ra nhãn trong code** (span-overlap / perplexity teacher), nên chúng KHÔNG phụ thuộc các trường teacher ở §5. Nhưng từ nay cả hai **đều đọc split ở `data/processed/`**, nên chạy `scripts/normalize_dataset.py && scripts/split_dataset.py` trước khi train/eval.
+>
+> **Bắt đầu nhanh:**
+>
+> ```bash
+> python scripts/normalize_dataset.py   # raw -> data/processed/records.jsonl (canonical, có doc_id)
+> python scripts/verify_dataset.py      # §6.1 deterministic checks
+> python scripts/split_dataset.py       # 90/10 theo document, chặn nếu rò rỉ
+> ```
 
 ## 1. Mục tiêu
 
@@ -80,11 +89,19 @@ Chi tiết hợp đồng input xem §2.5.
 
 ### 2.5. Hợp đồng dữ liệu wave-2 đang dùng thật
 
-Đây là thứ code training đã build đọc vào **hôm nay**. Mọi thứ ở §4–§13 nằm ngoài mục này là roadmap.
+Đây là thứ code training đọc vào **hôm nay**.
 
-**A. Corpus text thô — cho E6 và SLM/tone/LACC-model** (`vncompress.training.load_training_texts`)
+> **Đã đổi:** mọi consumer giờ đi qua `vncompress/dataset.py`. Loader cũ (`load_training_texts`, `load_relevance_samples`) vẫn giữ nguyên chữ ký và hành vi để tương thích ngược, nhưng đường đi mặc định là các hàm split-aware bên dưới. Không cần chạy script pipeline trước: nếu chưa có `data/processed/`, split theo document được suy ra ngay trong bộ nhớ từ file raw — chỉ khác là nó không được ghi lại để audit.
 
-- File mặc định: `data/benchmark/training_corpus_v1.json` (fallback: `wikipedia_vi_raw.json`, rồi corpus demo built-in).
+| Consumer | Hàm | Đọc gì |
+|---|---|---|
+| SLM/tone, LACC-model, E6 | `training.load_train_eval_texts()` | corpus records, split train/eval theo document |
+| E4 relevance probe | `training.load_train_eval_relevance_samples()` | cặp (context, reference_answer) từ benchmark records, split theo document |
+| VCC-Bench eval | `benchmark.py` | `data/processed/vcc_bench_eval.json` nếu có, ngược lại `data/benchmark/vcc_bench_v1.json` (kèm cảnh báo) |
+
+**A. Corpus text thô — cho E6 và SLM/tone/LACC-model** (`vncompress.training.load_train_eval_texts`)
+
+- File mặc định: `data/processed/{train,eval}.jsonl` nếu đã build; ngược lại `data/benchmark/training_corpus_v1.json` (fallback: `wikipedia_vi_raw.json`, rồi corpus demo built-in).
 - Shape chấp nhận (một trong ba):
   - `{"paragraphs": [{"text": "..."}, ...]}` — chỉ lấy `text` dài > 200 ký tự (đây là schema `build_training_corpus.py` sinh ra).
   - `{"samples": [{"context": "..."}, ...]}` — lấy `context` > 200 ký tự.
@@ -93,21 +110,26 @@ Chi tiết hợp đồng input xem §2.5.
 
 **B. Cặp (context, reference_answer) — cho E4 relevance probe** (`vncompress.training.load_relevance_samples`)
 
-- File: VCC-Bench JSON, `--data-path data/benchmark/vcc_bench_v2.json` trong handoff (hiện repo mới có `vcc_bench_v1.json`, cùng schema — xem cảnh báo §12).
+- File: `data/processed/vcc_bench_train.json` (khuyến nghị — đây là phía train của split 90/10), hoặc bất kỳ VCC-Bench JSON nào. File có `metadata.split` là `train`/`eval` sẽ **không bị split lần hai**.
 - Shape: `{"samples": [{"context", "reference_answer", "task"}]}`.
 - **Lọc bắt buộc:** chỉ giữ sample có `task ∈ {long_document_qa, needle_in_haystack}` (task mà câu trả lời là span/needle nằm trong context, để span-overlap có nghĩa), `context` > 100 ký tự, và `reference_answer` khác rỗng. Sample không có token dương nào sau khi gán nhãn sẽ bị bỏ.
 - Không cần bất kỳ trường nào khác trong canonical schema §5.
 
 **C. Evaluation — VCC-Bench** (`benchmark.py` → `vncompress.evaluation.VCCBench`)
 
-- File: `data/benchmark/vcc_bench_v1.json` (243 sample, 5 task) hoặc bộ QA thật `build_viquad_eval.py` (UIT-ViQuAD2.0, chỉ split test, eval-only).
+- File mặc định: `data/processed/vcc_bench_eval.json` (24 sample held-out) khi split đã build; ngược lại `data/benchmark/vcc_bench_v1.json` (243 sample). Chấm trên file 243 sample trong khi split tồn tại sẽ in cảnh báo, vì probe E4 đã nhìn thấy 90% số đó.
+- Hoặc bộ QA thật `build_viquad_eval.py` (UIT-ViQuAD2.0, chỉ split test, eval-only).
 - Sample cần: `{task, context, query, reference_answer}`. Eval đo **hành vi downstream** (EM/ROUGE-L/…), không dùng teacher output làm ground truth — khớp nguyên tắc §10.
 
-**Script build dataset đã tồn tại:** `build_training_corpus.py`, `build_vcc_bench.py`, `build_viquad_eval.py`, `fetch_vietnamese_data.py`, `checksum_datasets.py`. (Các script `generate_*/verify/filter/split` ở §13 **chưa được viết** và E4/E6 không cần chúng.)
+> **Đánh đổi cần biết:** bộ eval held-out chỉ có **24 sample**, vì `vcc_bench_v1.json` vốn chỉ có 243 sample trên 105 context duy nhất. Con số đó nhỏ tới mức không nên báo cáo như kết quả chính. Cách thoát đúng là có nguồn train query-conditioned riêng (UIT-ViQuAD train split, §3) rồi chạy `split_dataset.py --eval-only-source vcc_bench --eval-only-source wikipedia` để trả VCC-Bench về đúng vai trò eval-only 243 sample.
+
+**Script dataset đã tồn tại:** `normalize_dataset.py`, `verify_dataset.py`, `split_dataset.py` (pipeline chính) + `build_training_corpus.py`, `build_vcc_bench.py`, `build_viquad_eval.py`, `fetch_vietnamese_data.py`, `checksum_datasets.py` (dựng nguồn raw).
 
 ---
 
 ## 3. Dataset bổ sung cho pipeline V1
+
+> **`ROADMAP` — chưa tích hợp.** Trong bảng dưới, **chỉ UVW-2026 và UIT-ViQuAD có code**: UVW-2026 qua `build_training_corpus.py`, UIT-ViQuAD qua `build_viquad_eval.py` (và mới chỉ split `test`, dùng để eval). ViLegalText / VNFinsQA / ViSecQA được đánh P0 nhưng **chưa có script nào tải hoặc chuẩn hóa chúng**. Khi thêm, chỉ cần cho ra một trong các shape mà `normalize_file()` nhận là vào được pipeline.
 
 Các nguồn dưới đây nên được tích hợp theo từng phase, không coi tất cả là dependency bắt buộc của Wave 2.
 
@@ -242,18 +264,37 @@ Dataset cuối cùng nên chuẩn hóa về một schema thống nhất:
 
 ## 6. Verification và filtering
 
+> **`PARTIAL`.** §6.1 đã implement (`scripts/verify_dataset.py` → `vncompress.dataset.verify_records`). §6.2 (verifier LLM) và §6.3 (teacher agreement) **chưa có** — chúng chỉ có nghĩa khi đã có teacher output offline (§4), mà bước đó chưa tồn tại.
+
 Không đưa toàn bộ teacher output vào training. Mỗi sample phải qua verification.
 
 ### 6.1. Deterministic checks
 
-- JSON/schema hợp lệ.
-- Context không rỗng.
-- Query không rỗng đối với query-conditioned task.
-- Compression ratio thực tế nằm trong tolerance.
-- Không mất toàn bộ entity quan trọng.
-- Number/date/percentage quan trọng được bảo toàn.
-- Không xuất hiện text ngoài nguồn nếu task yêu cầu extractive compression.
-- Không duplicate với sample khác.
+> **`IMPLEMENTED`.** Chạy: `python scripts/verify_dataset.py [--input <file>] [--fail-on-error]`. Nhận cả canonical `.jsonl` lẫn file raw. Kết quả ghi ra `verification_report.json`.
+
+| Check | Mức | Ý nghĩa |
+|---|---|---|
+| `empty_context` | error | context rỗng |
+| `duplicate_id` | error | trùng `id` |
+| `missing_query` | error | sample query-conditioned nhưng `query` rỗng |
+| `missing_reference` | warning | `reference_answer` rỗng |
+| `short_context` / `long_context` | warning | ngoài khoảng 200–50.000 ký tự |
+| `duplicate_context` | warning | hai record dùng chung nguyên văn context |
+| `degenerate_reference` | warning | `reference_answer` là **bản sao nguyên văn** của `context` |
+| `answer_not_in_context` | warning | task span-answer nhưng đáp án không phải span nguyên văn |
+
+Kết quả trên dữ liệu đang commit (22.421 record):
+
+```text
+[OK  ] empty_context: 0        [HIT ] long_context: 9
+[OK  ] duplicate_id: 0         [HIT ] degenerate_reference: 166
+[OK  ] missing_query: 0        [HIT ] duplicate_context: 159
+[OK  ] missing_reference: 0    [HIT ] answer_not_in_context: 5
+```
+
+> **`degenerate_reference: 166`** là phát hiện đáng chú ý nhất và nó **không phải bug của pipeline mà là tính chất của `vcc_bench_v1.json`**: `build_vcc_bench.py` đặt `reference_answer = text` cho `long_document_qa` và nối toàn bộ turn cho `multi_turn_conversation`. 166/243 sample (68%) có đáp án là bản sao nguyên văn context, nên ROUGE-L/BERTScore trên các sample đó thực chất đo "còn giữ lại bao nhiêu chữ", tức là **phạt mọi mức nén theo định nghĩa**. Chỉ 35/243 sample (needle / agent / cross-lingual) có đáp án thật sự khác context. Đây là lý do `build_viquad_eval.py` tồn tại. Check này không chặn pipeline — nó chỉ bắt buộc con số đó phải hiện ra trong report thay vì lộ ra ở bảng kết quả.
+
+Các check còn lại của §6.1 (compression ratio trong tolerance, bảo toàn entity/number/date, không sinh text ngoài nguồn) **chỉ áp dụng được cho teacher output** và sẽ thêm cùng §4.
 
 ### 6.2. Semantic checks
 
@@ -315,40 +356,68 @@ Nên lưu cả `target_tokens` và `realized_tokens` để đánh giá budget th
 
 ---
 
-## 9. Train / Validation / Test split
+## 9. Train / Eval split
 
-Khuyến nghị split theo **source/document**, không random theo từng sample được sinh từ cùng một document.
+> **`IMPLEMENTED`.** `scripts/split_dataset.py` → `vncompress.dataset.split_by_document`. Tỷ lệ **90/10 (train/eval)** thay cho 80/10/10 ba phần: wave-2 hiện chỉ có hai vai trò dữ liệu thật (train và held-out eval), thêm một split thứ ba chỉ làm mỏng đi bộ eval vốn đã nhỏ. Muốn ba phần thì chạy `split_dataset.py` lần hai trên `train.jsonl`.
 
-Ví dụ:
-
-```text
-Train      80%
-Validation 10%
-Test       10%
-```
-
-Nếu một document tạo ra nhiều query/ratio thì toàn bộ các instance của document đó phải nằm cùng một split.
+Split theo **source/document**, không random theo từng sample sinh ra từ cùng một document.
 
 ### Không được làm
 
 ```text
 same document
  ├── query A → train
- ├── query B → validation
- └── query C → test
+ ├── query B → eval
+ └── query C → eval
 ```
 
-Điều này dễ gây leakage.
+**Đây chính xác là thứ code cũ đang làm** và là lý do mục này được hiện thực hóa:
 
-### Nên làm
+| Chỗ | Cách split cũ | Hậu quả |
+|---|---|---|
+| `run_slm_training` | `random_split` mức paragraph, seed 42 | 1 bài UVW-2026 bị cắt thành tối đa 162 paragraph cùng `topic_id` → ước tính **~737/1136 bài bị chia đôi** giữa train và eval |
+| `run_lacc_training` | `Subset(range(0.9*n))` mức record | cùng vấn đề, chỉ khác là cắt theo vị trí |
+| E4 relevance probe | không split | train trên **toàn bộ** sample `long_document_qa`/`needle_in_haystack` của `vcc_bench_v1.json` — đúng các sample mà `benchmark.py` chấm điểm |
+| E6 encoder | không split | không có held-out nào để đo |
+
+### Đang làm
 
 ```text
 Document A → train
-Document B → validation
-Document C → test
+Document B → eval
 ```
 
-Benchmark test nên được giữ độc lập với teacher-generation pipeline.
+Thuật toán (`split_by_document`):
+
+1. **Stratify theo `(kind, source)`** — mỗi nguồn đều có mặt ở cả hai bên.
+2. Trong mỗi stratum, xếp document theo `blake2b(seed:doc_key)` — **hash thuần, không RNG**: tái lập được across máy/phiên bản Python, và thêm document mới không xáo lại các document đã gán.
+3. Lấy document vào eval cho tới khi đủ `eval_ratio × số record` của stratum → tỷ lệ đúng ở **mức record**, mà document vẫn nguyên vẹn.
+4. Guard: stratum có ≥2 document thì eval không bao giờ rỗng, và không bao giờ nuốt trọn stratum.
+
+`doc_id` được suy ra ở bước normalize:
+
+| Nguồn | Đơn vị document |
+|---|---|
+| UVW-2026 | `topic_id` (bài viết gốc) |
+| Poetry | mỗi chunk là một document |
+| VCC-Bench wiki | `wiki:<article>` — 150 sample gộp về **12 bài** |
+| VCC-Bench legal | `law:<law_id>` — các chương của cùng một luật là một document |
+| `doc_qa_0007_q{0,1,2}` | `doc_qa_0007` |
+| `cross_0000_{vi_to_vi,…}` | `cross_0000` |
+
+Kết quả thực tế trên dữ liệu đang commit (`data/processed/split_manifest.json`):
+
+```text
+benchmark/vcc_bench         docs=  42  train=   84  eval=   9  (9.7%)
+benchmark/wikipedia         docs=  12  train=  135  eval=  15  (10.0%)
+corpus/uvw-2026             docs=1136  train=17960  eval=1996  (10.0%)
+corpus/vietnamese-poetry    docs=2222  train= 2000  eval= 222  (10.0%)
+-------------------------------------------------------------------
+tổng                        docs=3412  train=20179  eval=2242  (10.0%)
+Leakage check (§9): CLEAN
+```
+
+Bất biến này được **assert trong code** (`check_split_leakage`: trùng document / trùng record id / trùng nguyên văn context), `split_dataset.py` **từ chối ghi** một split bị rò rỉ, và `tests/test_dataset.py` kiểm tra nó trên cả fixture lẫn `vcc_bench_v1.json` thật.
 
 ---
 
@@ -425,28 +494,36 @@ Sau khi pipeline ổn định mới tăng lên 100K–500K+ instances.
 
 ## 12. Storage layout
 
-**Hiện tại (đang dùng)** — mọi file phẳng trong `data/benchmark/`:
-
-```text
-data/benchmark/
-├── training_corpus_v1.json        # corpus text thô cho E6/SLM (paragraphs) — build_training_corpus.py
-├── wikipedia_vi_raw.json          # fallback corpus
-├── vcc_bench_v1.json              # benchmark 5-task + nguồn (context, reference_answer) cho E4
-├── vcc_bench_<task>.json          # bản tách theo từng task
-├── CHECKSUMS.json / PROVENANCE.md # provenance
-└── (vcc_bench_uit_viquad_qa.json) # sinh bởi build_viquad_eval.py khi cần eval QA thật
-```
-
-> **Cảnh báo file:** handoff wave-2 và các mục dưới trỏ tới `data/benchmark/vcc_bench_v2.json`, nhưng repo **hiện chỉ có `vcc_bench_v1.json`** (cùng schema). Cho tới khi có v2, hãy chạy E4/benchmark với `--data-path data/benchmark/vcc_bench_v1.json`, hoặc tạo v2 rồi cập nhật lại. `load_relevance_samples`/`VCCBench` không tự đổi tên file — sai tên sẽ rơi về fallback demo (E4) hoặc báo không thấy dataset (benchmark).
-
-**Đề xuất (`ROADMAP`)** — chỉ cần khi triển khai teacher-distillation §4/§5:
+> **`IMPLEMENTED`.** `data/processed/` đã tồn tại và là nơi consumer đọc.
 
 ```text
 data/
-├── raw/{uvw2026,legal,finance,news}/
-├── teacher/{compression_raw,importance_raw,preference_raw}.jsonl
-├── processed/{train,val,test}.jsonl
-└── benchmark/{vcc_bench_v2.json, evaluation_sets/}
+├── benchmark/                          # RAW + benchmark gốc (đầu vào của pipeline)
+│   ├── training_corpus_v1.json         #   corpus UVW-2026 + poetry — build_training_corpus.py
+│   ├── wikipedia_vi_raw.json           #   fallback corpus — fetch_vietnamese_data.py
+│   ├── vcc_bench_v1.json               #   benchmark 5-task — build_vcc_bench.py
+│   ├── vcc_bench_<task>.json           #   bản tách theo từng task
+│   ├── CHECKSUMS.json / PROVENANCE.md  #   provenance
+│   └── (vcc_bench_uit_viquad_qa.json)  #   build_viquad_eval.py, gitignored
+│
+└── processed/                          # DERIVED (normalize -> verify -> split)
+    ├── records.jsonl                   #   canonical stream, có doc_id      [gitignored]
+    ├── train.jsonl / eval.jsonl        #   split 90/10 theo document        [gitignored]
+    ├── vcc_bench_train.json            #   phía train, legacy shape -> E4    [committed]
+    ├── vcc_bench_eval.json             #   phía eval, legacy shape -> bench  [committed]
+    ├── split_manifest.json             #   policy/seed/tỷ lệ/eval doc keys   [committed]
+    ├── records_meta.json               #   nguồn + sha256 đầu vào            [committed]
+    └── verification_report.json        #   kết quả §6.1                      [committed]
+```
+
+Ba file `.jsonl` bị gitignore vì chúng là ~58MB dẫn xuất hoàn toàn từ file đã có trong git — dựng lại bằng hai lệnh. Các artifact nhỏ khiến một lần chạy **audit được** thì có commit: `split_manifest.json` ghi policy, seed, tỷ lệ thực tế theo từng stratum, **toàn bộ eval document key**, sha256 của từng output, và kết quả leakage check.
+
+> **Cảnh báo file (vẫn còn):** handoff wave-2 trỏ tới `data/benchmark/vcc_bench_v2.json`, repo **chỉ có `vcc_bench_v1.json`**. Đường mặc định giờ không cần tên đó nữa (benchmark tự lấy `data/processed/vcc_bench_eval.json`), nhưng nếu truyền `--data-path` sai tên thì `load_relevance_samples`/`VCCBench` vẫn rơi về fallback demo (E4) hoặc báo không thấy dataset (benchmark).
+
+**Còn thiếu (`ROADMAP`)** — chỉ cần khi triển khai teacher-distillation §4/§5:
+
+```text
+data/teacher/{compression_raw,importance_raw,preference_raw}.jsonl
 ```
 
 Teacher raw output nên được giữ lại để có thể audit và re-filter mà không phải gọi LLM lại.
@@ -455,7 +532,16 @@ Teacher raw output nên được giữ lại để có thể audit và re-filter
 
 ## 13. Scripts
 
-**Đã tồn tại (dùng được ngay):**
+**Pipeline chính (`IMPLEMENTED`) — chạy theo đúng thứ tự này:**
+
+```text
+scripts/
+├── normalize_dataset.py       # raw (3 shape) -> data/processed/records.jsonl, canonical + doc_id
+├── verify_dataset.py          # §6.1 deterministic checks -> verification_report.json
+└── split_dataset.py           # 90/10 theo document -> train/eval + manifest; chặn nếu rò rỉ
+```
+
+**Dựng nguồn raw (đã có từ trước):**
 
 ```text
 scripts/
@@ -473,33 +559,37 @@ scripts/
 ├── generate_compression_dataset.py
 ├── generate_importance_dataset.py
 ├── generate_preference_dataset.py
-├── verify_dataset.py
-├── filter_dataset.py
-└── split_dataset.py
+└── filter_dataset.py           # lọc theo chất lượng teacher output; §6.1 đã nằm ở verify_dataset.py
 ```
 
-Pipeline tổng thể (`ROADMAP` cho V1; đường đi wave-2 hiện tại ngắn hơn nhiều — xem §2.5):
+Đường đi **hiện tại** (`IMPLEMENTED`):
 
 ```text
-Raw sources
+Raw sources (UVW-2026, poetry, Wikipedia, VCC-Bench templates, UIT-ViQuAD)
+    ↓  scripts/normalize_dataset.py
+canonical records.jsonl  (schema §5 core + doc_id)
+    ↓  scripts/verify_dataset.py
+verification_report.json  (§6.1)
+    ↓  scripts/split_dataset.py
+train.jsonl / eval.jsonl  (90/10 theo document, §9)  +  split_manifest.json
     ↓
-build / normalize / dedup
-    ↓
-query + context construction
-    ↓
-large teacher LLM
-    ↓
-raw teacher outputs
-    ↓
-verification
-    ↓
-quality filtering
-    ↓
-dedup + source-level split
-    ↓
-train / val / test
-    ↓
-E4 relevance probe / E6 encoder compressor / future compressor models
+E4 relevance probe (train split + held-out metrics)
+E6 encoder compressor (train split + held-out metrics + distillation_meta.json)
+SLM/tone + LACC-model (train/eval split)
+benchmark.py (eval split)
+```
+
+Đường đi **đích V1** (`ROADMAP`) chèn thêm teacher generation vào giữa:
+
+```text
+canonical records.jsonl
+    ↓  query + context construction        <- chưa có
+    ↓  large teacher LLM                   <- chưa có (§4)
+raw teacher outputs (data/teacher/*.jsonl) <- chưa có
+    ↓  semantic verification (§6.2/§6.3)   <- chưa có
+    ↓  quality filtering                   <- chưa có
+    ↓  scripts/split_dataset.py            <- đã có, dùng lại nguyên vẹn
+train / eval
 ```
 
 ---
@@ -507,6 +597,13 @@ E4 relevance probe / E6 encoder compressor / future compressor models
 ## 14. Recommended teacher strategy
 
 Teacher model nên là model instruction-following mạnh, có context window đủ lớn. Không nên khóa pipeline vào một model cụ thể; model name phải nằm trong metadata để tái lập thí nghiệm.
+
+> **`PARTIAL`.** Nguyên tắc "model name phải nằm trong metadata để tái lập" **đã được thực thi** cho hai artifact wave-2:
+>
+> - `scripts/train_encoder_compressor.py` ghi `distillation_meta.json` cạnh checkpoint: `teacher_model`, tín hiệu teacher, `encoder_id`, `ratio`, `seed`, `max_length`, siêu tham số, provenance split, và metric held-out. Trước đây checkpoint E6 **không ghi gì cả** — nhìn vào một thư mục model không thể biết nó được distill từ teacher nào, ở ratio nào.
+> - `relevance_probe_meta.json` (E4) và `val_split.json` (SLM) nay ghi kèm provenance split.
+>
+> Prompt versioning / caching / retry chỉ có nghĩa khi có teacher generation offline (§4), nên vẫn là `ROADMAP`.
 
 Khuyến nghị:
 

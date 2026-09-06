@@ -205,3 +205,60 @@ run `python scripts/checksum_datasets.py --write` afterwards and commit the
 updated `CHECKSUMS.json`; if you were just verifying reproducibility,
 `git checkout -- vcc_bench_data/*.json` restores the previously-committed
 files instead of keeping the re-stamped ones.
+
+---
+
+## Derived layer: `data/processed/`
+
+Everything under `data/benchmark/` above is the **raw** layer -- the input to
+the data pipeline. `data/processed/` is the **derived** layer that training and
+evaluation actually read, produced by three scripts in order:
+
+| Stage | Script | Output |
+|---|---|---|
+| 1. Normalize | `scripts/normalize_dataset.py` | `records.jsonl` (canonical schema, `doc_id` preserved), `records_meta.json` (input paths + sha256) |
+| 2. Verify | `scripts/verify_dataset.py` | `verification_report.json` (docs/dataset_pipeline.md §6.1 checks) |
+| 3. Split | `scripts/split_dataset.py` | `train.jsonl`, `eval.jsonl`, `vcc_bench_train.json`, `vcc_bench_eval.json`, `split_manifest.json` |
+
+### Reproducibility
+
+The split is a **pure function of (document key, seed)** -- documents are
+ordered by `blake2b(seed:doc_key)`, not shuffled with an RNG -- so re-running
+stage 3 on the same `records.jsonl` reproduces the same assignment on any
+machine and Python version, and adding new documents does not reshuffle the
+ones already assigned.
+
+`split_manifest.json` is the auditable record: split policy, seed, requested
+vs realized eval ratio, per-stratum document/record counts, the full list of
+**eval document keys**, a sha256 over the train document keys, sha256 + size of
+every output file, and the result of the no-leakage assertion.
+
+### What is committed
+
+`records.jsonl`, `train.jsonl` and `eval.jsonl` are **gitignored** (~58MB,
+derived entirely from files already in git -- rebuild with the two commands
+above). `split_manifest.json`, `records_meta.json`, `verification_report.json`,
+`vcc_bench_train.json` and `vcc_bench_eval.json` **are** committed, so a
+reported benchmark number can be traced to the exact held-out samples it was
+computed on without regenerating anything.
+
+### Snapshot recorded here
+
+Built from `training_corpus_v1.json` (22,178 paragraphs above the 200-char
+floor) and `vcc_bench_v1.json` (243 samples), at `--eval-ratio 0.1 --seed 42`:
+
+```text
+                             documents    train     eval   realized
+benchmark/vcc_bench                 42       84        9      9.7%
+benchmark/wikipedia                 12      135       15     10.0%
+corpus/uvw-2026                   1136    17960     1996     10.0%
+corpus/vietnamese-poetry          2222     2000      222     10.0%
+-----------------------------------------------------------------
+total                             3412    20179     2242     10.0%
+leakage check: CLEAN
+```
+
+Note the document counts: 150 VCC-Bench Wikipedia samples collapse to **12
+documents** (three query variants per paragraph, paragraphs drawn from 12
+articles), and 19,956 UVW-2026 paragraphs collapse to **1,136 articles**. Those
+ratios are why a record-level split leaked -- see docs/dataset_pipeline.md §9.

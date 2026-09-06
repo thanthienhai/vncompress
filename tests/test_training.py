@@ -209,3 +209,117 @@ def test_tone_classifier_loss_requires_matching_sequence_length():
     tone_labels = torch.zeros(1, 4, dtype=torch.long)  # wrong length
     with pytest.raises(ValueError, match="Sequence length mismatch"):
         probe(hidden_states, tone_labels)
+
+
+# ============================================================================
+# Document-level train/eval split (docs/dataset_pipeline.md §9)
+# ============================================================================
+
+
+def _corpus_file(tmp_path, n_docs=20, paras_per_doc=5):
+    import json
+
+    paragraphs = [
+        {'source': 'uvw-2026', 'topic_id': f'doc{d}', 'paragraph_index': i,
+         'text': f'Đoạn {i} của tài liệu {d}. ' + ('Nội dung tiếng Việt. ' * 15)}
+        for d in range(n_docs) for i in range(paras_per_doc)
+    ]
+    path = tmp_path / 'corpus.json'
+    path.write_text(json.dumps({'paragraphs': paragraphs}), encoding='utf-8')
+    return str(path)
+
+
+def test_load_train_eval_texts_splits_by_document_not_by_paragraph(tmp_path):
+    """The regression this replaces: `random_split` over paragraphs scattered
+    ~65% of UVW articles across both sides, because one article contributes up
+    to 162 paragraphs that all share a topic_id."""
+    from vncompress.dataset import normalize_file
+    from vncompress.training import load_train_eval_texts
+
+    path = _corpus_file(tmp_path, n_docs=20, paras_per_doc=5)
+    train_texts, eval_texts, meta = load_train_eval_texts(path)
+
+    assert train_texts and eval_texts
+    assert set(train_texts).isdisjoint(set(eval_texts))
+
+    doc_of = {r.context: r.doc_key for r in normalize_file(path)}
+    train_docs = {doc_of[t] for t in train_texts}
+    eval_docs = {doc_of[t] for t in eval_texts}
+    assert train_docs.isdisjoint(eval_docs), 'a document must not straddle the split'
+    assert meta['n_train_documents'] == len(train_docs)
+    assert meta['n_eval_documents'] == len(eval_docs)
+
+
+def test_load_train_eval_texts_is_deterministic(tmp_path):
+    from vncompress.training import load_train_eval_texts
+
+    path = _corpus_file(tmp_path)
+    first = load_train_eval_texts(path)[1]
+    second = load_train_eval_texts(path)[1]
+    assert first == second
+
+
+def test_load_train_eval_texts_holds_out_roughly_the_requested_ratio(tmp_path):
+    from vncompress.training import load_train_eval_texts
+
+    path = _corpus_file(tmp_path, n_docs=100, paras_per_doc=5)
+    train_texts, eval_texts, _ = load_train_eval_texts(path, eval_ratio=0.1)
+    assert len(eval_texts) == 50
+    assert len(train_texts) == 450
+
+
+def test_load_train_eval_texts_survives_a_single_document_corpus(tmp_path):
+    import json
+
+    from vncompress.training import load_train_eval_texts
+
+    path = tmp_path / 'one_doc.json'
+    path.write_text(json.dumps({'paragraphs': [
+        {'topic_id': 'only', 'paragraph_index': i, 'text': f'Đoạn {i}. ' + ('Nội dung. ' * 40)}
+        for i in range(4)
+    ]}), encoding='utf-8')
+
+    train_texts, eval_texts, meta = load_train_eval_texts(str(path))
+    assert train_texts and eval_texts, 'validation must still have something to score'
+    assert meta.get('degenerate_single_document') is True
+
+
+def test_relevance_samples_split_by_document(tmp_path):
+    """E4 used to train on every long_document_qa / needle_in_haystack sample
+    of vcc_bench_v1.json -- the same samples benchmark.py scored."""
+    import json
+
+    from vncompress.dataset import normalize_file
+    from vncompress.training import load_train_eval_relevance_samples
+
+    samples = [
+        {'sample_id': f'doc_qa_{d:04d}_q{q}', 'source': 'wikipedia', 'domain': f'Topic_{d}',
+         'task': 'long_document_qa', 'context': f'Ngữ cảnh {d}. ' + ('Câu văn tiếng Việt. ' * 20),
+         'query': f'q{q}', 'reference_answer': 'Ngữ cảnh'}
+        for d in range(30) for q in range(3)
+    ]
+    path = tmp_path / 'bench.json'
+    path.write_text(json.dumps({'samples': samples}), encoding='utf-8')
+
+    train, eval_, meta = load_train_eval_relevance_samples(str(path))
+    assert train and eval_
+    doc_of = {r.context: r.doc_key for r in normalize_file(str(path))}
+    assert {doc_of[s['context']] for s in train}.isdisjoint({doc_of[s['context']] for s in eval_})
+    assert meta['n_eval_documents'] >= 1
+
+
+def test_relevance_loader_does_not_re_split_a_pre_split_file(tmp_path):
+    import json
+
+    from vncompress.training import load_train_eval_relevance_samples
+
+    samples = [{'sample_id': f'needle_{i:04d}', 'task': 'needle_in_haystack',
+                'context': f'Ngữ cảnh {i}. ' + ('Nội dung. ' * 40), 'query': 'q',
+                'reference_answer': 'Ngữ cảnh'} for i in range(10)]
+    path = tmp_path / 'vcc_bench_train.json'
+    path.write_text(json.dumps({'metadata': {'split': 'train'}, 'samples': samples}), encoding='utf-8')
+
+    train, eval_, meta = load_train_eval_relevance_samples(str(path))
+    assert len(train) == 10, 'a file already declared as one side of a split must be used whole'
+    assert eval_ == []
+    assert 'pre-split' in meta['split_source']

@@ -45,38 +45,44 @@ import random
 import sys
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vncompress.training import SLMCollator as Collator  # noqa: E402
 from vncompress.training import VietnameseToneDataset  # noqa: E402
-from vncompress.training import load_training_texts as load_texts  # noqa: E402
+from vncompress.training import load_train_eval_texts  # noqa: E402
 
 
 def build_matching_split(corpus_path, tokenizer, max_length, expected_val):
-    """Rebuild train/val exactly as vncompress.training.run_slm_training() did, and verify the val
-    half matches the split saved at training time.
+    """Rebuild train/val exactly as vncompress.training.run_slm_training() does
+    -- a document-level 90/10 split (docs/dataset_pipeline.md §9) -- and verify
+    the val half matches the split saved at training time.
 
     The probe needs the TRAIN half, but val_split.json only stores val. The
-    split is deterministic (seed 42) given the same corpus/tokenizer/max_length,
-    so it can be reconstructed -- but silently reconstructing a *different*
-    split would leak training texts into the probe's evaluation, so this
-    verifies rather than assumes.
+    split is deterministic (documents ordered by a seeded hash) given the same
+    corpus/tokenizer/max_length, so it can be reconstructed -- but silently
+    reconstructing a *different* split would leak training texts into the
+    probe's evaluation, so this verifies rather than assumes.
     """
-    dataset = VietnameseToneDataset(load_texts(corpus_path), tokenizer, max_length)
-    if len(dataset) < 2:
-        raise SystemExit(f"Corpus {corpus_path} yielded <2 usable texts.")
-    train_n = min(max(1, int(len(dataset) * .9)), len(dataset) - 1)
-    train_ds, val_ds = random_split(
-        dataset, [train_n, len(dataset) - train_n],
-        generator=torch.Generator().manual_seed(42),
+    train_texts, val_texts, split_meta = load_train_eval_texts(corpus_path)
+    train_ds = VietnameseToneDataset(train_texts, tokenizer, max_length)
+    val_ds = VietnameseToneDataset(val_texts, tokenizer, max_length)
+    if len(train_ds) < 1 or len(val_ds) < 1:
+        raise SystemExit(f"Corpus {corpus_path} yielded {len(train_ds)}/{len(val_ds)} usable texts.")
+    rebuilt = [tuple(val_ds[i]) for i in range(len(val_ds))]
+    stale_hint = (
+        "\nNote: adapters trained BEFORE the switch to document-level splitting saved a "
+        "val_split.json produced by the old record-level `random_split`, which this function "
+        "can no longer reproduce -- and must not, since that split leaked documents across "
+        "both halves. Retrain the adapter, or run the controls against the val half stored in "
+        "val_split.json alone."
     )
-    rebuilt = [tuple(dataset[i]) for i in val_ds.indices]
     if len(rebuilt) != len(expected_val):
         raise SystemExit(
             f"Rebuilt val split has {len(rebuilt)} texts but val_split.json has "
             f"{len(expected_val)}. The corpus or --max-length does not match the "
             f"one used to train this adapter -- pass the right --corpus/--max-length."
+            + stale_hint
         )
     for i, (a, b) in enumerate(zip(rebuilt, expected_val)):
         if list(a[0]) != list(b[0]):
@@ -84,9 +90,11 @@ def build_matching_split(corpus_path, tokenizer, max_length, expected_val):
                 f"Rebuilt val split diverges from val_split.json at index {i}. "
                 f"The corpus file has changed since this adapter was trained "
                 f"(build_training_corpus.py overwrites it) -- cannot safely "
-                f"recover the train half."
+                f"recover the train half." + stale_hint
             )
-    return [tuple(dataset[i]) for i in train_ds.indices], rebuilt
+    print(f"  split: {split_meta['policy']} (source={split_meta['split_source']}, documents "
+          f"{split_meta['n_train_documents']}/{split_meta['n_eval_documents']})")
+    return [tuple(train_ds[i]) for i in range(len(train_ds))], rebuilt
 
 
 def apply_control_labels(samples, num_tones, seed):

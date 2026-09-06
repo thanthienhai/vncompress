@@ -12,10 +12,16 @@ trước khi chạy (CPU-only, ~20s).
 
 Không GPU-train — chỉ eval (dùng generator + scorer sẵn có):
 
+**Trước tiên dựng split** (mọi lệnh dưới đây đọc nó):
+
 ```bash
-# Core wave-2 arms trên VCC-Bench v2, 3 tỉ lệ, 2 generator để robustness check
+python scripts/normalize_dataset.py && python scripts/verify_dataset.py && python scripts/split_dataset.py
+```
+
+```bash
+# Core wave-2 arms trên bộ eval held-out, 3 tỉ lệ, 2 generator để robustness check
 python benchmark.py --model Qwen/Qwen2.5-7B-Instruct --ratios 2,4,8 \
-  --data-path data/benchmark/vcc_bench_v2.json \
+  --data-path data/processed/vcc_bench_eval.json \
   --scorer-adapter-dir models/qwen3/final --tone-probe-path models/qwen3/tone_probe.pt \
   --methods none,random,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop
 
@@ -67,8 +73,10 @@ probe nên cắm thẳng vào `LACCCompressor(tone_source='model')`.
 
 ```bash
 python scripts/train_relevance_probe.py \
-  --adapter-dir models/qwen3/final --data-path data/benchmark/vcc_bench_v2.json \
+  --adapter-dir models/qwen3/final --data-path data/processed/vcc_bench_train.json \
   --output-dir models/qwen3 --load-4bit        # freeze base, chỉ train probe (rẻ)
+  # relevance_probe_meta.json ghi kèm accuracy/P-R-F1 trên phía eval chưa từng thấy,
+  # cùng baseline all-negative (positive rất hiếm nên accuracy trần trụi dễ gây hiểu nhầm)
 ```
 
 Rồi A/B đúng khuôn wave 1 (probe-relevance vs probe-tone vs rule) bằng
@@ -81,8 +89,10 @@ pass song song).
 
 ```bash
 python scripts/train_encoder_compressor.py \
-  --encoder-id vinai/phobert-base --train-data-path data/benchmark/training_corpus_v1.json \
+  --encoder-id vinai/phobert-base \
   --teacher-model Qwen/Qwen2.5-0.5B-Instruct --ratio 4 --output-dir models/encoder_cls
+  # không cần --train-data-path: mặc định lấy phía train của split đã dựng.
+  # ghi distillation_meta.json (teacher, ratio, seed, split, metric held-out) cạnh checkpoint
 
 python benchmark.py --methods none,llmlingua,encoder --ratios 2,4,8 \
   --model Qwen/Qwen2.5-7B-Instruct --encoder-path models/encoder_cls

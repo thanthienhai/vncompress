@@ -1,0 +1,27 @@
+{
+  "date": "2026-09-06 13:23:11",
+  "min_corpus_chars": 200,
+  "n_records": 22421,
+  "n_documents": 3412,
+  "strata": [
+    "benchmark/vcc_bench",
+    "benchmark/wikipedia",
+    "corpus/uvw-2026",
+    "corpus/vietnamese-poetry"
+  ],
+  "inputs": [
+    {
+      "path": "data/benchmark/training_corpus_v1.json",
+      "kind": "corpus",
+      "n_records": 22178,
+      "sha256": "86a4c14c757869f149a7f14d7c461e6e21d778aa75fb57d94b7c058d1d379f9e"
+    },
+    {
+      "path": "data/benchmark/vcc_bench_v1.json",
+      "kind": "benchmark",
+      "n_records": 243,
+      "sha256": "6414e08837666381381a119dd783c36296a0714301ddb5ecff6b877eb01e1770"
+    }
+  ],
+  "output": "data/processed/records.jsonl"
+}
