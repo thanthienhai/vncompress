@@ -330,7 +330,7 @@ Dataset cuối cùng nên chuẩn hóa về một schema thống nhất:
 > **`PARTIAL`.** Hai lớp verification đã có:
 >
 > - **§6.1 trên dữ liệu nguồn** — `scripts/verify_dataset.py` → `vncompress.dataset.verify_records`.
-> - **§6.1 trên teacher output** — `scripts/filter_dataset.py`, chỉ chạy được khi đã có output của §4. Các check: `empty_output`, `not_extractive` (teacher viết lại/bịa thay vì trích xuất — lỗi âm thầm nguy hiểm nhất của một compression dataset), `over_budget` / `under_budget` (§8 tolerance), `degenerate`, `number_dropped` (con số mà chính teacher đánh dấu quan trọng lại biến mất khỏi bản nén của nó), `answer_not_verbatim` và `degenerate_answer` cho stage queries.
+> - **§6.1 trên teacher output** — `scripts/filter_dataset.py`, chỉ chạy được khi đã có output của §4. Xem bảng check ở §6.1 bên dưới.
 >
 > Row bị loại **không bị xóa** — chúng đi vào `data/teacher/quarantine_<stage>.jsonl` kèm lý do, đúng tinh thần §6.3. Loại bỏ ở đây không cần gọi lại teacher.
 >
@@ -364,7 +364,29 @@ Kết quả trên dữ liệu đang commit (22.421 record):
 
 > **`degenerate_reference: 166`** là phát hiện đáng chú ý nhất và nó **không phải bug của pipeline mà là tính chất của `vcc_bench_v1.json`**: `build_vcc_bench.py` đặt `reference_answer = text` cho `long_document_qa` và nối toàn bộ turn cho `multi_turn_conversation`. 166/243 sample (68%) có đáp án là bản sao nguyên văn context, nên ROUGE-L/BERTScore trên các sample đó thực chất đo "còn giữ lại bao nhiêu chữ", tức là **phạt mọi mức nén theo định nghĩa**. Chỉ 35/243 sample (needle / agent / cross-lingual) có đáp án thật sự khác context. Đây là lý do `build_viquad_eval.py` tồn tại. Check này không chặn pipeline — nó chỉ bắt buộc con số đó phải hiện ra trong report thay vì lộ ra ở bảng kết quả.
 
-Các check còn lại của §6.1 (compression ratio trong tolerance, bảo toàn entity/number/date, không sinh text ngoài nguồn) **chỉ áp dụng được cho teacher output** và sẽ thêm cùng §4.
+### Check trên teacher output
+
+> **`IMPLEMENTED`.** `scripts/filter_dataset.py`. Ba trong số các check này ban đầu tôi thiết kế sai, và chỉ lộ ra khi soi output thật — ghi lại đây vì cùng một loại sai lầm rất dễ lặp.
+
+| Check | Bắt cái gì |
+|---|---|
+| `empty_output` | không có gì dùng được |
+| `not_extractive` | bản nén chứa từ không có trong nguồn — teacher viết lại/bịa thay vì trích xuất |
+| `number_altered` | **con số xuất hiện trong bản nén mà không có trong nguồn** |
+| `over_budget` | vượt trần, tolerance = phần trăm **hoặc** một khoảng dư tuyệt đối, lấy cái lớn hơn |
+| `too_short` | ngắn tới mức vô nghĩa, tính theo **số từ tuyệt đối** |
+| `degenerate` | "bản nén" gần bằng cả ngữ cảnh |
+| `answer_not_verbatim`, `degenerate_answer` | cho stage queries |
+
+**Ba sai lầm thiết kế đã sửa** (tỷ lệ chấp nhận đo trên cùng tập dữ liệu thật: **80,6% → 89,9% → 95,5%**):
+
+1. **Coi ngân sách là sàn.** §4.3 định nghĩa nó là **trần** ("vượt quá là lỗi"). Với nén theo câu hỏi, độ dài đúng do câu hỏi quyết định. Check `under_budget` cũ loại đúng output tốt nhất trong tập: một needle task nén 6.973 từ xuống 26 từ chính là cái needle. Thay bằng sàn tuyệt đối (`--min-words`).
+2. **Tolerance chỉ theo phần trăm.** Ở 8x, target chỉ ~11 từ nên 25% chưa tới 3 từ — loại nhầm do làm tròn. Thêm khoảng dư tuyệt đối (`--budget-slack`).
+3. **`number_dropped`.** Trường `numbers` của teacher liệt kê số tìm thấy trong **nguồn**, không phải số bắt buộc giữ. Bản nén `"Nam Phi biểu quyết trắng để bảo vệ chế độ apartheid"` bị loại vì làm rơi một số `13` mà câu hỏi không hề hỏi tới. Đổi thành `number_altered` — bịa/sửa số mới là lỗi toàn vẹn thật sự. Tỷ lệ số được giữ lại ghi vào `quality.numbers_preserved` để phân tích, **không dùng để loại**.
+
+> Số đo đáng chú ý: `number_altered` nổ **1 lần trên 20.318 bản nén**. Trên dataset này teacher gần như không bao giờ bịa con số.
+
+Row bị loại đi vào `data/teacher/quarantine_<stage>.jsonl` kèm lý do — loại bỏ ở đây không cần gọi lại teacher.
 
 ### 6.2. Semantic checks
 
