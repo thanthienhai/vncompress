@@ -16,12 +16,18 @@ Không GPU-train — chỉ eval (dùng generator + scorer sẵn có):
 
 ```bash
 python scripts/normalize_dataset.py && python scripts/verify_dataset.py && python scripts/split_dataset.py
+
+# Hoặc cả chuỗi bằng một lệnh (thêm --with-teacher để sinh dữ liệu teacher, xem §4):
+python scripts/run_pipeline.py
 ```
 
 ```bash
 # Core wave-2 arms trên bộ eval held-out, 3 tỉ lệ, 2 generator để robustness check
 python benchmark.py --model Qwen/Qwen2.5-7B-Instruct --ratios 2,4,8 \
   --data-path data/processed/vcc_bench_eval.json \
+  # ^ chỉ nguồn ĐỘC LẬP. Bộ teacher sinh nằm ở vcc_bench_eval_synthetic.json,
+  #   chấm RIÊNG bằng một lần chạy khác -- gộp hai bộ sẽ làm con số bị chi phối
+  #   bởi việc chấm model đã train trên output teacher bằng chính output đó.
   --scorer-adapter-dir models/qwen3/final --tone-probe-path models/qwen3/tone_probe.pt \
   --methods none,random,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop
 
