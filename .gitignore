@@ -32,3 +32,19 @@ models/**/pytorch_model*.pt
 # document keys, output checksums), records_meta.json, and the two
 # vcc_bench_*.json splits -- ARE committed.
 data/processed/*.jsonl
+
+# Teacher-LLM credentials (docs/dataset_pipeline.md §4). Never commit: the
+# endpoint is billed per token and the key grants full access to it.
+# Copy .env.example -> .env and fill it in; .env.example IS committed and must
+# only ever contain placeholders.
+.env
+.env.*
+!.env.example
+
+# Teacher-LLM stage (docs/dataset_pipeline.md §4/§12). Raw responses are kept
+# on disk so re-filtering never needs a re-generation, but they are large,
+# regenerable, and full of model output -- not repo content. The small
+# reports (filter_report_*.json) ARE committed so a run stays auditable.
+data/teacher/.cache/
+data/teacher/*_raw.jsonl
+data/teacher/quarantine_*.jsonl

@@ -2,18 +2,27 @@
 
 > **Trạng thái (đọc trước):** Tài liệu này gồm **ba lớp**, đừng lẫn lộn:
 >
-> 1. **`IMPLEMENTED` — xương sống pipeline đã chạy được.** Normalize → verify → split theo document (90/10) → consumer. Code: `vncompress/dataset.py` + `scripts/normalize_dataset.py`, `scripts/verify_dataset.py`, `scripts/split_dataset.py`. Đây là §2.5, §5 (phần core), §6.1, §9, §12, §13.
-> 2. **`PARTIAL`** — §6 (chỉ có deterministic check; semantic verifier + teacher agreement chưa có), §8, §14 (metadata đã ghi cho E6/E4; prompt versioning chưa cần vì chưa có teacher generation).
-> 3. **`ROADMAP` — chưa triển khai:** §3, §4, §5 (các trường teacher), §7, §11, §15. Đây là teacher-distillation dataset (compressed_text, token_labels, preference, hard_negative, …). **Chưa có script nào sinh ra, và không training wave-2 nào tiêu thụ các trường này.**
+> 1. **`IMPLEMENTED` — xương sống pipeline, đã chạy trên dữ liệu thật.** Normalize → verify → split theo document (90/10) → consumer. Code: `vncompress/dataset.py` + `scripts/{normalize,verify,split}_dataset.py`. Đây là §2.5, §5 (phần core), §6.1, §9, §12, §13.
+> 2. **`IMPLEMENTED, CHƯA CHẠY THẬT` — tầng teacher distillation.** §4 (sinh supervision bằng teacher LLM), §5 (các trường teacher), §6 (filter/quarantine), §14 (prompt versioning, cache, retry). Code: `vncompress/teacher.py`, `vncompress/teacher_prompts.py`, `scripts/generate_teacher_dataset.py`, `scripts/filter_dataset.py`. **Toàn bộ đường đi đã verify end-to-end bằng `--dry-run` (stub offline, không tốn token); chưa gọi endpoint thật lần nào.**
+> 3. **`PARTIAL`** — §6.2/§6.3 (verifier LLM + teacher agreement), §8.
+> 4. **`ROADMAP` — chưa triển khai:** §3 (các nguồn P0 ngoài UVW/ViQuAD), §7 (hard cases), §11 (quy mô 60K), §15 Phase 3–5. Ngoài ra `generate_importance_dataset.py` / `generate_preference_dataset.py` (token label, preference pair, hard negative) vẫn chưa có.
 >
-> Điểm mấu chốt: E4 và E6 **tự suy ra nhãn trong code** (span-overlap / perplexity teacher), nên chúng KHÔNG phụ thuộc các trường teacher ở §5. Nhưng từ nay cả hai **đều đọc split ở `data/processed/`**, nên chạy `scripts/normalize_dataset.py && scripts/split_dataset.py` trước khi train/eval.
+> Điểm mấu chốt: E4 và E6 **tự suy ra nhãn trong code** (span-overlap / perplexity teacher), nên chúng KHÔNG phụ thuộc các trường teacher ở §5 — và **hiện vẫn chưa có training nào đọc `compressed_text`**. Tầng teacher hôm nay *sinh ra* supervision, chưa có student tiêu thụ nó.
 >
 > **Bắt đầu nhanh:**
 >
 > ```bash
+> # Tầng 1 — bắt buộc trước khi train/eval bất cứ thứ gì
 > python scripts/normalize_dataset.py   # raw -> data/processed/records.jsonl (canonical, có doc_id)
 > python scripts/verify_dataset.py      # §6.1 deterministic checks
 > python scripts/split_dataset.py       # 90/10 theo document, chặn nếu rò rỉ
+>
+> # Tầng 2 — teacher distillation. Chạy --dry-run trước, luôn luôn.
+> cp .env.example .env                  # điền endpoint + key (.env đã gitignore)
+> python scripts/generate_teacher_dataset.py --stage queries     --dry-run --limit 20
+> python scripts/filter_dataset.py      --stage queries
+> python scripts/generate_teacher_dataset.py --stage compression --dry-run --limit 20
+> python scripts/filter_dataset.py      --stage compression
 > ```
 
 ## 1. Mục tiêu
@@ -169,7 +178,27 @@ Có thể điều chỉnh tỷ lệ theo phân bố domain thực tế của pro
 
 ## 4. Teacher LLM pipeline
 
-> **`ROADMAP` — chưa triển khai.** Toàn bộ §4 mô tả một teacher-distillation pipeline tham vọng cho V1. **Không có script nào hiện thực hóa nó, và không training wave-2 nào tiêu thụ output của nó.** Đừng nhầm với cách E6 dùng teacher: E6 chỉ dùng teacher để chấm perplexity keep/drop **trong lúc train** (§2.4/§2.5 B), không sinh compressed_text/preference/hard_negative offline như dưới đây.
+> **`IMPLEMENTED`, nhưng CHƯA CHẠY THẬT.** Code: `vncompress/teacher.py` (client + cache + retry), `vncompress/teacher_prompts.py` (prompt có version), `scripts/generate_teacher_dataset.py` (sinh), `scripts/filter_dataset.py` (verify + merge). Toàn bộ đường đi đã chạy end-to-end bằng `--dry-run`; **chưa gọi endpoint thật lần nào**, nên chưa có dữ liệu teacher thật trong repo.
+>
+> Đừng nhầm với cách E6 dùng teacher: E6 dùng teacher để chấm perplexity keep/drop **trong lúc train** (§2.4/§2.5), còn §4 sinh `compressed_text` + span markup **offline** rồi lưu lại.
+>
+> **Cấu hình** (`.env`, đã gitignore — xem `.env.example`):
+>
+> | Biến | Ý nghĩa |
+> |---|---|
+> | `VNCOMPRESS_TEACHER_BASE_URL` | endpoint OpenAI-compatible, có cả path version (`.../v1`) |
+> | `VNCOMPRESS_TEACHER_API_KEY` | key; **không bao giờ được log hay ghi vào metadata** |
+> | `VNCOMPRESS_TEACHER_MODEL` | tên model teacher, được ghi vào từng row (§14) |
+> | `VNCOMPRESS_TEACHER_TEMPERATURE` | mặc định `0.1` — §14 yêu cầu temperature thấp cho extraction/labeling |
+> | `VNCOMPRESS_TEACHER_MAX_TOKENS` / `_TIMEOUT` / `_MAX_RETRIES` | tham số sinh + retry |
+>
+> Loader cũng nhận alias `baseURL` / `apiKey` / `model_name`, để dán thẳng blob credential nhà cung cấp đưa.
+>
+> **Ba tính chất đáng chú ý:**
+>
+> - **`--dry-run` đi hết đường ống mà không tốn token.** `DryRunTeacherClient` trả về JSON đúng cấu trúc suy ra từ chính prompt, nên parse → verify → merge → split đều được kiểm tra trước khi trỏ vào endpoint tính tiền. Nó là phép thử đường ống, **không phải phép thử chất lượng** — phần "nén" chỉ là cắt câu đầu.
+> - **Cache trên đĩa** khóa theo (model, prompt version, messages, tham số). Sửa prompt của stage này không làm mất cache của stage kia; chạy lại sau khi crash không mất tiền lần hai.
+> - **Mặc định đọc split `train`.** Trỏ vào `eval.jsonl` bị **từ chối** trừ khi truyền `--allow-eval-input` — §10 yêu cầu benchmark độc lập với teacher pipeline, và đây là chỗ ép buộc điều đó.
 
 Teacher LLM được dùng để biến raw context + query thành supervision chất lượng cao cho student compressor.
 
@@ -215,7 +244,14 @@ Teacher không nên chỉ được yêu cầu "tóm tắt văn bản". Prompt ph
 
 ## 5. Canonical dataset schema
 
-> **`ROADMAP` — chưa được tiêu thụ.** Schema giàu trường dưới đây là đích V1. **Không script training wave-2 nào đọc `compressed_text`, `token_labels`, `important_spans`, `entities/numbers/dates`, `hard_negative`, `preference`, `compression_reason`, hay `quality{}`.** Hợp đồng input thực tế của wave-2 chỉ cần `context` (+ `reference_answer`/`task` cho E4) — xem §2.5. Giữ mục này làm mục tiêu thiết kế, không phải định dạng bắt buộc hiện tại.
+> **`PARTIAL` — sinh được, chưa ai tiêu thụ.**
+>
+> - **Phần core** (`id`, `source`, `doc_id`, `language`, `domain`, `task`, `query`, `context`, `reference_answer`) đã là schema thật, do `vncompress/dataset.py` định nghĩa và mọi consumer đọc.
+> - **Phần teacher** (`compression_ratio`, `target_tokens`, `compressed_text`, `important_spans`, `removed_spans`, `entities`, `numbers`, `dates`, `conditions`, `negations`, `compression_reason`, `quality{}`) **đã được `scripts/filter_dataset.py --stage compression` điền vào** `metadata` của record, sau khi qua §6.
+> - **Vẫn chưa có gì:** `token_labels`, `tone_sensitive_spans`, `relations`, `hard_negative`, `preference` — cần `generate_importance_dataset.py` / `generate_preference_dataset.py`, chưa viết.
+> - **Quan trọng:** *không training nào đang đọc các trường teacher này.* E4 dùng span-overlap, E6 dùng perplexity teacher trong lúc train. Một student học trực tiếp từ `compressed_text` là bước tiếp theo, chưa làm.
+>
+> Các trường chưa sinh được **reserve theo tên** trong `dataset.RESERVED_FIELDS`, để phân biệt "chưa sinh" với "gõ sai tên".
 
 Dataset cuối cùng nên chuẩn hóa về một schema thống nhất:
 
@@ -264,7 +300,14 @@ Dataset cuối cùng nên chuẩn hóa về một schema thống nhất:
 
 ## 6. Verification và filtering
 
-> **`PARTIAL`.** §6.1 đã implement (`scripts/verify_dataset.py` → `vncompress.dataset.verify_records`). §6.2 (verifier LLM) và §6.3 (teacher agreement) **chưa có** — chúng chỉ có nghĩa khi đã có teacher output offline (§4), mà bước đó chưa tồn tại.
+> **`PARTIAL`.** Hai lớp verification đã có:
+>
+> - **§6.1 trên dữ liệu nguồn** — `scripts/verify_dataset.py` → `vncompress.dataset.verify_records`.
+> - **§6.1 trên teacher output** — `scripts/filter_dataset.py`, chỉ chạy được khi đã có output của §4. Các check: `empty_output`, `not_extractive` (teacher viết lại/bịa thay vì trích xuất — lỗi âm thầm nguy hiểm nhất của một compression dataset), `over_budget` / `under_budget` (§8 tolerance), `degenerate`, `number_dropped` (con số mà chính teacher đánh dấu quan trọng lại biến mất khỏi bản nén của nó), `answer_not_verbatim` và `degenerate_answer` cho stage queries.
+>
+> Row bị loại **không bị xóa** — chúng đi vào `data/teacher/quarantine_<stage>.jsonl` kèm lý do, đúng tinh thần §6.3. Loại bỏ ở đây không cần gọi lại teacher.
+>
+> **§6.2 (verifier LLM) và §6.3 (teacher agreement / teacher thứ hai) vẫn chưa có.**
 
 Không đưa toàn bộ teacher output vào training. Mỗi sample phải qua verification.
 
@@ -541,6 +584,17 @@ scripts/
 └── split_dataset.py           # 90/10 theo document -> train/eval + manifest; chặn nếu rò rỉ
 ```
 
+**Tầng teacher (`IMPLEMENTED`, chưa chạy thật):**
+
+```text
+scripts/
+├── generate_teacher_dataset.py  # --stage queries|compression -> data/teacher/*_raw.jsonl
+└── filter_dataset.py            # --stage queries|compression: verify §6 + merge -> records_*.jsonl
+vncompress/
+├── teacher.py                   # config .env, client OpenAI-compatible, cache, retry, dry-run
+└── teacher_prompts.py           # prompt có version (PROMPT_VERSION), §4.2/§4.3
+```
+
 **Dựng nguồn raw (đã có từ trước):**
 
 ```text
@@ -556,11 +610,12 @@ scripts/
 
 ```text
 scripts/
-├── generate_compression_dataset.py
-├── generate_importance_dataset.py
-├── generate_preference_dataset.py
-└── filter_dataset.py           # lọc theo chất lượng teacher output; §6.1 đã nằm ở verify_dataset.py
+├── generate_importance_dataset.py   # token_labels / importance score cho từng token
+└── generate_preference_dataset.py   # preference pair + hard negative
 ```
+
+(`generate_compression_dataset.py` và `filter_dataset.py` của bản đề xuất ban đầu nay là
+`generate_teacher_dataset.py --stage compression` và `filter_dataset.py`.)
 
 Đường đi **hiện tại** (`IMPLEMENTED`):
 
@@ -579,18 +634,24 @@ SLM/tone + LACC-model (train/eval split)
 benchmark.py (eval split)
 ```
 
-Đường đi **đích V1** (`ROADMAP`) chèn thêm teacher generation vào giữa:
+Đường đi **teacher distillation** (`IMPLEMENTED`, chưa chạy thật):
 
 ```text
-canonical records.jsonl
-    ↓  query + context construction        <- chưa có
-    ↓  large teacher LLM                   <- chưa có (§4)
-raw teacher outputs (data/teacher/*.jsonl) <- chưa có
-    ↓  semantic verification (§6.2/§6.3)   <- chưa có
-    ↓  quality filtering                   <- chưa có
-    ↓  scripts/split_dataset.py            <- đã có, dùng lại nguyên vẹn
+data/processed/train.jsonl                     (chỉ train — §10 chặn eval)
+    ↓  generate_teacher_dataset.py --stage queries
+data/teacher/queries_raw.jsonl                 (raw, giữ lại để re-filter)
+    ↓  filter_dataset.py --stage queries
+data/processed/records_synthetic_qa.jsonl      (kind=benchmark, doc_id kế thừa)
+    ↓  generate_teacher_dataset.py --stage compression   (ratio 2/4/8)
+data/teacher/compression_raw.jsonl
+    ↓  filter_dataset.py --stage compression   -> quarantine_compression.jsonl
+data/processed/records_teacher.jsonl           (canonical + trường teacher §5)
+    ↓  split_dataset.py --input <gộp>          (dùng lại nguyên vẹn)
 train / eval
 ```
+
+Còn thiếu để khép kín V1: semantic verification §6.2/§6.3, importance/preference generation,
+và **một student thật sự học từ `compressed_text`** — hiện chưa có.
 
 ---
 
@@ -603,7 +664,9 @@ Teacher model nên là model instruction-following mạnh, có context window đ
 > - `scripts/train_encoder_compressor.py` ghi `distillation_meta.json` cạnh checkpoint: `teacher_model`, tín hiệu teacher, `encoder_id`, `ratio`, `seed`, `max_length`, siêu tham số, provenance split, và metric held-out. Trước đây checkpoint E6 **không ghi gì cả** — nhìn vào một thư mục model không thể biết nó được distill từ teacher nào, ở ratio nào.
 > - `relevance_probe_meta.json` (E4) và `val_split.json` (SLM) nay ghi kèm provenance split.
 >
-> Prompt versioning / caching / retry chỉ có nghĩa khi có teacher generation offline (§4), nên vẫn là `ROADMAP`.
+> Prompt versioning / caching / retry **cũng đã có** cùng tầng teacher: `teacher_prompts.PROMPT_VERSION` nằm trong cache key và trong mọi row sinh ra; `CachedTeacherClient` cache theo (model, prompt version, messages, tham số); `HTTPTeacherClient` retry 429/5xx với backoff và **không** retry 4xx (retry một request sai chỉ đốt quota và che lỗi thật); `--json-retries` retry khi teacher trả JSON hỏng.
+>
+> Nguyên tắc "thay teacher mà không đổi schema dataset" được giữ đúng: đổi `VNCOMPRESS_TEACHER_MODEL` trong `.env` là xong, schema §5 không đổi, và `model` cũ vẫn nằm trong các row đã sinh.
 
 Khuyến nghị:
 

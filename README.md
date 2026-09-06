@@ -72,6 +72,24 @@ tài liệu vào cả train lẫn eval. Chi tiết ở [`docs/dataset_pipeline.m
 Bỏ qua bước này vẫn chạy được (split được suy ra trong bộ nhớ từ file raw), chỉ khác là không có
 manifest để audit.
 
+### Tầng teacher distillation (tuỳ chọn)
+
+Sinh supervision bằng một teacher LLM mạnh (§4): câu hỏi cho đoạn văn chưa có câu hỏi, rồi bản nén
+kèm markup entity/số/ngày/phủ định/điều kiện. Cấu hình endpoint trong `.env` (`cp .env.example .env`;
+`.env` đã gitignore), nhận mọi endpoint OpenAI-compatible.
+
+```bash
+python scripts/generate_teacher_dataset.py --stage queries --dry-run --limit 20
+python scripts/filter_dataset.py --stage queries            # verify §6 + merge, loại vào quarantine
+python scripts/generate_teacher_dataset.py --stage compression --dry-run --limit 20 --ratios 2,4,8
+python scripts/filter_dataset.py --stage compression
+```
+
+`--dry-run` chạy hết đường ống bằng stub offline, không tốn token — **luôn chạy nó trước** khi trỏ
+vào endpoint tính tiền. Bỏ `--dry-run` để gọi thật. Generator mặc định chỉ đọc split `train` và
+**từ chối** `eval.jsonl` (§10). Kết quả thô được giữ ở `data/teacher/` để lọc lại mà không phải gọi
+teacher lần nữa.
+
 ## 7. Huấn luyện
 
 ```bash
