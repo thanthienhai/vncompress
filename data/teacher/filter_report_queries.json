@@ -1,9 +1,9 @@
 {
   "stage": "queries",
-  "raw_rows": 19954,
-  "accepted": 61326,
+  "raw_rows": 19960,
+  "accepted": 61344,
   "counters": {
-    "accepted": 61326,
+    "accepted": 61344,
     "answer_not_verbatim": 400,
     "degenerate_answer": 14,
     "duplicate_query": 51

@@ -642,3 +642,91 @@ def test_unresolved_failures_is_zero_without_a_failure_log(tmp_path, monkeypatch
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, 'REPO', str(tmp_path))
     assert module._unresolved_failures('compression') == 0
+
+
+# ============================================================================
+# Cache poisoning: the defect that made retries impossible
+# ============================================================================
+
+
+def test_an_empty_completion_is_never_cached(tmp_path):
+    """The cache holds raw text and cannot tell a good response from a broken
+    one. Caching an empty completion makes the failure permanent: every later
+    retry, including the pipeline's retry passes, is served the same empty
+    string from disk and can never recover."""
+    responses = ['', '{"queries": []}']
+    inner = DryRunTeacherClient(responder=lambda m: responses.pop(0))
+    client = CachedTeacherClient(inner, str(tmp_path / 'c'), 'm', 'v1', 512)
+    messages = [{'role': 'user', 'content': 'x'}]
+
+    assert client.complete(messages) == ''
+    assert client.complete(messages) == '{"queries": []}', 'the empty response must not be replayed'
+    assert inner.n_calls == 2
+
+
+def test_invalidate_removes_a_cached_response(tmp_path):
+    responses = ['not json', '{"ok": 1}']
+    inner = DryRunTeacherClient(responder=lambda m: responses.pop(0))
+    client = CachedTeacherClient(inner, str(tmp_path / 'c'), 'm', 'v1', 512)
+    messages = [{'role': 'user', 'content': 'x'}]
+
+    assert client.complete(messages) == 'not json'
+    assert client.complete(messages) == 'not json', 'still cached until invalidated'
+    assert client.invalidate(messages) is True
+    assert client.complete(messages) == '{"ok": 1}'
+
+
+def test_invalidate_is_safe_when_nothing_is_cached(tmp_path):
+    client = CachedTeacherClient(DryRunTeacherClient(), str(tmp_path / 'c'), 'm', 'v1', 512)
+    assert client.invalidate([{'role': 'user', 'content': 'absent'}]) is False
+
+
+def test_retry_drops_the_cached_bad_response_so_the_model_is_actually_re_asked(tmp_path):
+    """The end-to-end symptom: six query records re-failed in 0.0 minutes across
+    three retry passes because nothing was ever re-asked."""
+    from scripts.generate_teacher_dataset import _call_with_retry
+
+    responses = ['', '', '{"queries": [{"query": "q"}]}']
+    inner = DryRunTeacherClient(responder=lambda m: responses.pop(0))
+    client = CachedTeacherClient(inner, str(tmp_path / 'c'), 'm', 'v1', 512)
+
+    payload, _raw = _call_with_retry(client, [{'role': 'user', 'content': 'x'}],
+                                     max_attempts=3, retry_delay=0)
+    assert payload == {'queries': [{'query': 'q'}]}
+    assert inner.n_calls == 3, 'each attempt must reach the model, not the cache'
+
+
+def test_an_empty_response_is_retried_with_the_original_prompt(tmp_path):
+    """Echoing an empty assistant turn back and asking the model to fix the
+    format gives it nothing to fix."""
+    from scripts.generate_teacher_dataset import _call_with_retry
+
+    seen = []
+
+    def responder(messages):
+        seen.append(list(messages))
+        return '' if len(seen) == 1 else '{"ok": 1}'
+
+    client = DryRunTeacherClient(responder=responder)
+    _call_with_retry(client, [{'role': 'user', 'content': 'prompt gốc'}],
+                     max_attempts=3, retry_delay=0)
+
+    assert len(seen) == 2
+    assert seen[1] == seen[0], 'an empty response must be retried with the original prompt'
+
+
+def test_a_malformed_but_non_empty_response_is_echoed_back_for_correction(tmp_path):
+    from scripts.generate_teacher_dataset import _call_with_retry
+
+    seen = []
+
+    def responder(messages):
+        seen.append(list(messages))
+        return 'đây không phải JSON' if len(seen) == 1 else '{"ok": 1}'
+
+    _call_with_retry(DryRunTeacherClient(responder=responder),
+                     [{'role': 'user', 'content': 'prompt gốc'}], max_attempts=3, retry_delay=0)
+
+    assert len(seen[1]) == 3, 'original + assistant echo + correction'
+    assert seen[1][1]['role'] == 'assistant'
+    assert 'JSON hợp lệ' in seen[1][2]['content']
