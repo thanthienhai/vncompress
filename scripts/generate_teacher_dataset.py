@@ -105,10 +105,16 @@ def _call_with_retry(client, messages, max_attempts, temperature=None):
 
 
 def stage_queries(args, client, records, out, done):
-    n_written = n_skipped = n_failed = 0
+    n_written = n_skipped = n_failed = n_answered = 0
     for record in records:
         if record.id in done:
             n_skipped += 1
+            continue
+        # A benchmark sample already carries a query; synthesizing another one
+        # spends tokens re-deriving what is already there. This stage exists for
+        # corpus paragraphs, which have none.
+        if record.query and not args.include_answered:
+            n_answered += 1
             continue
         messages = build_query_messages(record.context, args.n_queries)
         try:
@@ -131,6 +137,9 @@ def stage_queries(args, client, records, out, done):
         n_written += 1
         if n_written % 20 == 0:
             print(f'  ... {n_written} records')
+    if n_answered:
+        print(f'  {n_answered} record(s) already had a query and were skipped '
+              f'(pass --include-answered to synthesize anyway)')
     return n_written, n_skipped, n_failed
 
 
@@ -215,6 +224,9 @@ def main():
     ap.add_argument('--ratios', default='2,4,8',
                     help='Compression ratios for --stage compression (§8). Default: 2,4,8')
     ap.add_argument('--n-queries', type=int, default=3, help='Queries to synthesize per paragraph.')
+    ap.add_argument('--include-answered', action='store_true',
+                    help='--stage queries: also synthesize for records that already carry a query. '
+                         'Off by default -- it spends tokens re-deriving an existing field.')
     ap.add_argument('--limit', type=int, default=0, help='Cap input records (0 = all). Use for trials.')
     ap.add_argument('--json-retries', type=int, default=2,
                     help='Attempts to get valid JSON out of one prompt (§14).')

@@ -1,0 +1,13 @@
+{
+  "stage": "queries",
+  "raw_rows": 5,
+  "accepted": 15,
+  "counters": {
+    "accepted": 15
+  },
+  "thresholds": {
+    "ratio_tolerance": 0.25,
+    "min_budget_fraction": 0.2,
+    "min_extractive": 0.95
+  }
+}

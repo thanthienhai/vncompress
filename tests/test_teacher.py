@@ -390,3 +390,69 @@ def test_synthetic_questions_inherit_the_source_document_id():
                           counters, rejected)
     assert {r.doc_id for r in kept} == {'Ha_Noi'}
     assert {r.source for r in kept} == {'teacher-synth'}
+
+
+# ============================================================================
+# Defects the first real endpoint run exposed (dry-run could not surface them)
+# ============================================================================
+
+
+def test_query_stage_skips_records_that_already_carry_a_query(tmp_path):
+    """The first live run spent every one of its calls on benchmark samples
+    that already had a query -- this stage exists for corpus paragraphs."""
+    from types import SimpleNamespace
+
+    from scripts.generate_teacher_dataset import stage_queries
+    from vncompress.dataset import KIND_BENCHMARK, KIND_CORPUS, Record
+
+    records = [
+        Record(id='has_q', kind=KIND_BENCHMARK, source='vcc_bench', source_id='1', doc_id='d1',
+               task='long_document_qa', context='Ngữ cảnh đủ dài. ' * 20, query='Có sẵn?'),
+        Record(id='no_q', kind=KIND_CORPUS, source='uvw-2026', source_id='2', doc_id='d2',
+               task='context_compression', context='Ngữ cảnh khác đủ dài. ' * 20),
+    ]
+    client = DryRunTeacherClient()
+    args = SimpleNamespace(n_queries=3, json_retries=1, provenance={}, include_answered=False)
+    with open(tmp_path / 'out.jsonl', 'w', encoding='utf-8') as out:
+        n_written, _, _ = stage_queries(args, client, records, out, set())
+
+    assert n_written == 1, 'only the record without a query should cost a call'
+    assert client.n_calls == 1
+
+    args.include_answered = True
+    with open(tmp_path / 'out2.jsonl', 'w', encoding='utf-8') as out:
+        assert stage_queries(args, client, records, out, set())[0] == 2
+
+
+def test_synthesized_questions_are_deduplicated_by_context_not_record_id():
+    """`conv_0012_q0..q2` are three records sharing one context verbatim. Keyed
+    on record id, the same question was emitted three times."""
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_queries
+
+    context = 'Hà Nội là thủ đô của Việt Nam và có lịch sử lâu đời hơn một nghìn năm.'
+    queries = [{'query': 'Thủ đô của Việt Nam?', 'answer': 'Hà Nội', 'answer_span': 'Hà Nội'}]
+    rows = [{'record_id': rid, 'queries': queries} for rid in ('c_q0', 'c_q1', 'c_q2')]
+    sources = {rid: _source_record(context, doc_id='conv_0012') for rid in ('c_q0', 'c_q1', 'c_q2')}
+
+    counters, rejected = Counter(), []
+    kept = filter_queries(rows, sources, _args(), counters, rejected)
+    assert len(kept) == 1, 'one context + one question = one record'
+    assert counters['duplicate_query'] == 2
+
+
+def test_dedup_is_insensitive_to_whitespace_and_case_only():
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_queries
+
+    context = 'Hà Nội là thủ đô của Việt Nam và có lịch sử lâu đời.'
+    rows = [{'record_id': 'r1', 'queries': [
+        {'query': 'Thủ  đô?', 'answer': 'Hà Nội', 'answer_span': 'Hà Nội'},
+        {'query': 'THỦ ĐÔ?', 'answer': 'Hà Nội', 'answer_span': 'Hà Nội'},
+        {'query': 'Lịch sử bao lâu?', 'answer': 'lâu đời', 'answer_span': 'lâu đời'},
+    ]}]
+    counters, rejected = Counter(), []
+    kept = filter_queries(rows, {'r1': _source_record(context)}, _args(), counters, rejected)
+    assert len(kept) == 2 and counters['duplicate_query'] == 1

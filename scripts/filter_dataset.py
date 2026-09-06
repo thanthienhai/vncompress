@@ -43,6 +43,7 @@ Usage:
     python scripts/filter_dataset.py --stage compression --ratio-tolerance 0.25
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -119,7 +120,12 @@ def filter_queries(raw_rows, records_by_id, args, counters, rejected):
                 rejected.append({'reason': reason, 'record_id': row['record_id'], 'item': item})
                 continue
 
-            key = (row['record_id'], query.lower())
+            # Deduplicate on CONTENT, not on record id. VCC-Bench fans one
+            # paragraph out into three query variants (`conv_0012_q0..q2`) that
+            # share a context verbatim, so an id-keyed check let the same
+            # synthesized question through three times.
+            key = (hashlib.blake2b(context.encode('utf-8'), digest_size=8).hexdigest(),
+                   ' '.join(query.lower().split()))
             if key in seen:
                 counters['duplicate_query'] += 1
                 continue
