@@ -49,16 +49,33 @@ jobs:
       # document, record id, or context ends up on both sides, so a change to
       # normalization or to the split policy that reintroduces train/eval
       # leakage fails CI instead of silently inflating a results table.
+      # Rebuilds the canonical stream and the 90/10 document-level split from
+      # the committed raw files, into a scratch directory. split_dataset.py
+      # exits non-zero if any document, record id, or context ends up on both
+      # sides, so a change to normalization or to the split policy that
+      # reintroduces train/eval leakage fails CI.
+      #
+      # It writes to a scratch dir rather than data/processed/ because the
+      # committed splits are built from records_all.jsonl (raw records PLUS
+      # teacher-generated ones), which CI cannot reproduce -- it has no teacher
+      # endpoint. Diffing against them would fail for the wrong reason.
       - name: Data pipeline (normalize -> verify -> split, assert no leakage)
         run: |
           python scripts/normalize_dataset.py
           python scripts/verify_dataset.py --fail-on-error
-          python scripts/split_dataset.py
+          python scripts/split_dataset.py --output-dir "$RUNNER_TEMP/split-check"
 
-      # The two committed split files are what benchmark.py and the E4 probe
-      # actually read, so they must stay in sync with the code that produces
-      # them -- otherwise a change to normalization silently leaves everyone
-      # evaluating a stale held-out set. Their contents are deterministic (no
-      # timestamps), unlike split_manifest.json / records_meta.json.
-      - name: Committed splits match what the pipeline produces
-        run: git diff --exit-code -- data/processed/vcc_bench_train.json data/processed/vcc_bench_eval.json
+      # The committed manifest is the audit record for the dataset in this
+      # commit: it must say the split it describes was clean.
+      - name: Committed split manifest records a clean split
+        run: |
+          python - <<'PY'
+          import json, sys
+          with open('data/processed/split_manifest.json', encoding='utf-8') as f:
+              manifest = json.load(f)
+          check = manifest.get('leakage_check', {})
+          if not check.get('clean'):
+              sys.exit(f"committed split manifest reports leakage: {check.get('issues')}")
+          print(f"manifest OK: {manifest['train']['n_records']} train / "
+                f"{manifest['eval']['n_records']} eval, leakage check clean")
+          PY
