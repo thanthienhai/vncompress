@@ -305,7 +305,7 @@ def _source_record(context, doc_id='doc1'):
 def _args(**kw):
     from types import SimpleNamespace
 
-    base = dict(ratio_tolerance=0.25, min_budget_fraction=0.2, min_extractive=0.95)
+    base = dict(ratio_tolerance=0.25, min_words=4, budget_slack=8, min_extractive=0.95)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -730,3 +730,53 @@ def test_a_malformed_but_non_empty_response_is_echoed_back_for_correction(tmp_pa
     assert len(seen[1]) == 3, 'original + assistant echo + correction'
     assert seen[1][1]['role'] == 'assistant'
     assert 'JSON hợp lệ' in seen[1][2]['content']
+
+
+def test_aggressive_query_focused_compression_is_not_rejected_as_too_short():
+    """§4.3 makes the budget an upper bound. A needle task legitimately reduces
+    a huge haystack to a one-sentence needle; the old relative floor rejected
+    exactly the best output in the set."""
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_compression
+
+    needle = 'Mật khẩu truy cập hệ thống là VIETCOMPRESS2026_SECURE.'
+    context = ('nội dung nền không liên quan. ' * 2000) + needle
+    counters, rejected = Counter(), []
+    rows = [{'key': 'k', 'record_id': 'r1', 'query': 'Mật khẩu là gì?', 'compression_ratio': 2.0,
+             'target_tokens': 3000, 'context_tokens': 6000, 'token_unit': 'whitespace',
+             'teacher': {}, 'teacher_output': {'compressed_text': needle, 'numbers': []}}]
+    kept = filter_compression(rows, {'r1': _source_record(context)}, _args(), counters, rejected)
+    assert len(kept) == 1, f'rejected as {[r["reason"] for r in rejected]}'
+    assert counters['accepted'] == 1
+
+
+def test_truly_degenerate_output_is_still_rejected():
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_compression
+
+    counters, rejected = Counter(), []
+    rows = [{'key': 'k', 'record_id': 'r1', 'target_tokens': 100, 'context_tokens': 400,
+             'teacher_output': {'compressed_text': 'một hai'}}]
+    assert filter_compression(rows, {'r1': _source_record('một hai ba ' * 100)},
+                              _args(), counters, rejected) == []
+    assert counters['too_short'] == 1
+
+
+def test_tiny_budgets_get_absolute_slack_on_top_of_the_percentage():
+    """At 8x the target can be ~11 words, where a 25% tolerance is under three
+    words of room and rejects on rounding alone."""
+    from collections import Counter
+
+    from scripts.filter_dataset import filter_compression
+
+    context = 'một hai ba bốn năm sáu bảy tám chín mười ' * 10
+    counters, rejected = Counter(), []
+    # target 11, realized 17: over 25% (13.75) but inside the absolute slack (19).
+    rows = [{'key': 'k', 'record_id': 'r1', 'target_tokens': 11, 'context_tokens': 100,
+             'teacher': {}, 'teacher_output': {
+                 'compressed_text': 'một hai ba bốn năm sáu bảy tám chín mười một hai ba bốn năm sáu bảy',
+                 'numbers': []}}]
+    kept = filter_compression(rows, {'r1': _source_record(context)}, _args(), counters, rejected)
+    assert len(kept) == 1, f'rejected as {[r["reason"] for r in rejected]}'

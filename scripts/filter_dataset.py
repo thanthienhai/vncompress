@@ -28,7 +28,17 @@ Checks applied (the §6.1 items that only make sense once teacher output exists)
                         i.e. the teacher rewrote or invented rather than
                         extracted (the one failure mode that silently poisons a
                         compression dataset)
-  - `over_budget`       realized length exceeds the target beyond tolerance
+  - `over_budget`       realized length exceeds the target beyond tolerance.
+                        Tolerance is a percentage OR a small absolute slack,
+                        whichever is larger: at 8x the target can be ~11 words,
+                        where 25% is under three words of room.
+  - `too_short`         output is degenerate in absolute terms. Deliberately
+                        NOT "far below the target": §4.3 makes the budget an
+                        upper bound, and for a query-conditioned compressor the
+                        right length is set by the question. A needle task
+                        legitimately reduces a 7,000-word haystack to the
+                        26-word needle -- rejecting that as under-budget threw
+                        away the single best output in the set.
   - `degenerate`        "compressed" text is essentially the whole context
   - `number_dropped`    a number the teacher itself marked important is missing
                         from its own compressed text
@@ -175,13 +185,17 @@ def filter_compression(raw_rows, records_by_id, args, counters, rejected):
         realized = count_words(compressed)
         target = row.get('target_tokens') or 1
 
+        # The budget is an upper bound (§4.3). A percentage tolerance alone is
+        # unfair at aggressive ratios, where the target can be ~11 words, so a
+        # small absolute slack applies too.
+        ceiling = max(target * (1 + args.ratio_tolerance), target + args.budget_slack)
         reason = None
         if not compressed:
             reason = 'empty_output'
-        elif realized > target * (1 + args.ratio_tolerance):
+        elif realized > ceiling:
             reason = 'over_budget'
-        elif realized < max(1, target * args.min_budget_fraction):
-            reason = 'under_budget'
+        elif realized < args.min_words:
+            reason = 'too_short'
         elif len(compressed) >= 0.9 * len(source.context):
             reason = 'degenerate'
         else:
@@ -250,8 +264,13 @@ def main():
                          'or records_teacher.jsonl (compression)')
     ap.add_argument('--ratio-tolerance', type=float, default=0.25,
                     help='Allowed overshoot of the token budget (§8). 0.25 = up to 25%% over.')
-    ap.add_argument('--min-budget-fraction', type=float, default=0.2,
-                    help='Reject output far below budget -- usually a truncated response.')
+    ap.add_argument('--min-words', type=int, default=4,
+                    help='Absolute floor on compressed length. Catches truncated or degenerate '
+                         'output without punishing legitimately aggressive, query-focused '
+                         'compression (a needle task may reduce thousands of words to a dozen).')
+    ap.add_argument('--budget-slack', type=int, default=8,
+                    help='Absolute words of headroom added to the percentage tolerance, so tiny '
+                         'budgets at high ratios are not rejected for rounding.')
     ap.add_argument('--min-extractive', type=float, default=0.95,
                     help='Minimum share of compressed words present in the source (§6.1: no '
                          'out-of-source text for extractive compression).')
@@ -303,7 +322,8 @@ def main():
         json.dump({'stage': args.stage, 'raw_rows': len(raw_rows), 'accepted': counters['accepted'],
                    'counters': dict(counters), 'thresholds': {
                        'ratio_tolerance': args.ratio_tolerance,
-                       'min_budget_fraction': args.min_budget_fraction,
+                       'budget_slack': args.budget_slack,
+                       'min_words': args.min_words,
                        'min_extractive': args.min_extractive}},
                   f, ensure_ascii=False, indent=2)
     print(f'Report: {os.path.relpath(report_path, REPO)}')

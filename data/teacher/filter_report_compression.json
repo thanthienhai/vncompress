@@ -1,16 +1,18 @@
 {
   "stage": "compression",
-  "raw_rows": 58,
-  "accepted": 52,
+  "raw_rows": 15572,
+  "accepted": 14004,
   "counters": {
-    "accepted": 52,
-    "over_budget": 3,
-    "number_dropped": 2,
-    "not_extractive": 1
+    "accepted": 14004,
+    "number_dropped": 832,
+    "over_budget": 561,
+    "not_extractive": 17,
+    "too_short": 158
   },
   "thresholds": {
     "ratio_tolerance": 0.25,
-    "min_budget_fraction": 0.2,
+    "budget_slack": 8,
+    "min_words": 4,
     "min_extractive": 0.95
   }
 }
