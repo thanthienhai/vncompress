@@ -1,5 +1,12 @@
 # Dataset Pipeline: Teacher Distillation, Training & Evaluation
 
+> **Trạng thái (đọc trước):** Tài liệu này gồm **hai lớp**, đừng lẫn lộn:
+>
+> 1. **Hợp đồng dữ liệu wave-2 đang dùng thật** — mục §2.5. Đây là thứ các script training đã xây dựng (`E4` relevance probe, `E6` encoder compressor, SLM/tone) **thực sự đọc** hôm nay. Muốn train/eval wave-2 thì làm theo mục này.
+> 2. **Roadmap dataset V1 (đề xuất, chưa triển khai)** — mục §4–§5, §11–§13. Đây là teacher-distillation dataset tham vọng hơn (compressed_text, token_labels, preference, hard_negative, …). **Chưa có script nào sinh ra, và không training wave-2 nào tiêu thụ các trường này.** Các khối đó được gắn nhãn `ROADMAP` ở đầu mục.
+>
+> Điểm mấu chốt: E4 và E6 **tự suy ra nhãn trong code** (span-overlap / perplexity teacher), nên chúng KHÔNG phụ thuộc canonical schema §5. Nhầm hai lớp này sẽ dẫn tới việc dựng một dataset mà script wave-2 không đọc được.
+
 ## 1. Mục tiêu
 
 Tài liệu này định nghĩa pipeline xây dựng dataset cho `vncompress` theo hướng **query-conditioned Vietnamese context compression**. Dataset không chỉ chứa văn bản đã rút gọn mà còn chứa tín hiệu supervision để huấn luyện compressor: mức độ quan trọng của span/token, keep/drop label, compressed candidates và preference giữa các candidate.
@@ -64,12 +71,39 @@ Trong Wave 2, benchmark được mở rộng để đánh giá thêm các chiế
 
 ### 2.4. Wave 2 training data
 
-Wave 2 hiện có hai hướng supervision quan trọng:
+Wave 2 hiện có hai hướng supervision quan trọng, và điểm chung là **cả hai tự sinh nhãn trong lúc train**, không đọc nhãn dựng sẵn từ file:
 
-- **E4 — Relevance Probe:** học relevance score từ representation của model.
-- **E6 — Encoder Token Classification Compressor:** encoder phân loại token/span thành keep/drop; supervision được distill từ teacher LLM.
+- **E4 — Relevance Probe:** học "token này có liên quan tới câu trả lời không" từ hidden states của SLM đóng băng. Nhãn là **weak supervision span-overlap** (`linguistics.build_relevance_labels`): token dương nếu âm tiết đã decode của nó trùng một âm tiết trong `reference_answer`. Không cần teacher, không cần annotation.
+- **E6 — Encoder Token Classification Compressor:** encoder (`vinai/phobert-base`) phân loại token keep/drop. Supervision được **distill ngay trong `scripts/train_encoder_compressor.py`**: teacher causal LM (mặc định `Qwen/Qwen2.5-0.5B-Instruct`) chấm perplexity cửa sổ trượt, giữ top-`1/ratio` token làm lớp "keep", rồi chiếu quyết định đó lên encoder qua char-span. Nhãn keep/drop **không** được lưu ra file trung gian.
 
-Ví dụ E6 hiện tại dùng `vinai/phobert-base` làm encoder và có thể dùng `Qwen/Qwen2.5-0.5B-Instruct` làm teacher.
+Chi tiết hợp đồng input xem §2.5.
+
+### 2.5. Hợp đồng dữ liệu wave-2 đang dùng thật
+
+Đây là thứ code training đã build đọc vào **hôm nay**. Mọi thứ ở §4–§13 nằm ngoài mục này là roadmap.
+
+**A. Corpus text thô — cho E6 và SLM/tone/LACC-model** (`vncompress.training.load_training_texts`)
+
+- File mặc định: `data/benchmark/training_corpus_v1.json` (fallback: `wikipedia_vi_raw.json`, rồi corpus demo built-in).
+- Shape chấp nhận (một trong ba):
+  - `{"paragraphs": [{"text": "..."}, ...]}` — chỉ lấy `text` dài > 200 ký tự (đây là schema `build_training_corpus.py` sinh ra).
+  - `{"samples": [{"context": "..."}, ...]}` — lấy `context` > 200 ký tự.
+  - `[...]` — list string, hoặc list dict có khóa `text`/`context`.
+- Sinh ra corpus này: `scripts/build_training_corpus.py` (UVW-2026 làm nguồn chính + poetry augmentation, xem §2.1/§2.2). Corpus hiện tại `training_corpus_v1.json` có 22.222 paragraph.
+
+**B. Cặp (context, reference_answer) — cho E4 relevance probe** (`vncompress.training.load_relevance_samples`)
+
+- File: VCC-Bench JSON, `--data-path data/benchmark/vcc_bench_v2.json` trong handoff (hiện repo mới có `vcc_bench_v1.json`, cùng schema — xem cảnh báo §12).
+- Shape: `{"samples": [{"context", "reference_answer", "task"}]}`.
+- **Lọc bắt buộc:** chỉ giữ sample có `task ∈ {long_document_qa, needle_in_haystack}` (task mà câu trả lời là span/needle nằm trong context, để span-overlap có nghĩa), `context` > 100 ký tự, và `reference_answer` khác rỗng. Sample không có token dương nào sau khi gán nhãn sẽ bị bỏ.
+- Không cần bất kỳ trường nào khác trong canonical schema §5.
+
+**C. Evaluation — VCC-Bench** (`benchmark.py` → `vncompress.evaluation.VCCBench`)
+
+- File: `data/benchmark/vcc_bench_v1.json` (243 sample, 5 task) hoặc bộ QA thật `build_viquad_eval.py` (UIT-ViQuAD2.0, chỉ split test, eval-only).
+- Sample cần: `{task, context, query, reference_answer}`. Eval đo **hành vi downstream** (EM/ROUGE-L/…), không dùng teacher output làm ground truth — khớp nguyên tắc §10.
+
+**Script build dataset đã tồn tại:** `build_training_corpus.py`, `build_vcc_bench.py`, `build_viquad_eval.py`, `fetch_vietnamese_data.py`, `checksum_datasets.py`. (Các script `generate_*/verify/filter/split` ở §13 **chưa được viết** và E4/E6 không cần chúng.)
 
 ---
 
@@ -112,6 +146,8 @@ Có thể điều chỉnh tỷ lệ theo phân bố domain thực tế của pro
 ---
 
 ## 4. Teacher LLM pipeline
+
+> **`ROADMAP` — chưa triển khai.** Toàn bộ §4 mô tả một teacher-distillation pipeline tham vọng cho V1. **Không có script nào hiện thực hóa nó, và không training wave-2 nào tiêu thụ output của nó.** Đừng nhầm với cách E6 dùng teacher: E6 chỉ dùng teacher để chấm perplexity keep/drop **trong lúc train** (§2.4/§2.5 B), không sinh compressed_text/preference/hard_negative offline như dưới đây.
 
 Teacher LLM được dùng để biến raw context + query thành supervision chất lượng cao cho student compressor.
 
@@ -156,6 +192,8 @@ Teacher không nên chỉ được yêu cầu "tóm tắt văn bản". Prompt ph
 ---
 
 ## 5. Canonical dataset schema
+
+> **`ROADMAP` — chưa được tiêu thụ.** Schema giàu trường dưới đây là đích V1. **Không script training wave-2 nào đọc `compressed_text`, `token_labels`, `important_spans`, `entities/numbers/dates`, `hard_negative`, `preference`, `compression_reason`, hay `quality{}`.** Hợp đồng input thực tế của wave-2 chỉ cần `context` (+ `reference_answer`/`task` cho E4) — xem §2.5. Giữ mục này làm mục tiêu thiết kế, không phải định dạng bắt buộc hiện tại.
 
 Dataset cuối cùng nên chuẩn hóa về một schema thống nhất:
 
@@ -362,6 +400,8 @@ Không nên tối ưu một metric compression riêng lẻ rồi kết luận mo
 
 ## 11. Quy mô dataset V1
 
+> **`ROADMAP`.** Con số 60K instance dưới đây là dataset teacher-distilled tương lai. Wave-2 hiện tại **không** dùng một dataset compressed 3-ratio lưu sẵn: E6 nhận **một** `--ratio` và suy ra tập keep ngay lúc train từ perplexity teacher; E4 chỉ cần cặp (context, reference_answer). Quy mô thực tế đang bị chặn bởi số context trong `training_corpus_v1.json` (22.222 paragraph) và `vcc_bench_v1.json` (243 sample), không phải bởi bước teacher generation này.
+
 Mục tiêu ban đầu:
 
 ```text
@@ -383,37 +423,53 @@ Sau khi pipeline ổn định mới tăng lên 100K–500K+ instances.
 
 ---
 
-## 12. Storage layout đề xuất
+## 12. Storage layout
+
+**Hiện tại (đang dùng)** — mọi file phẳng trong `data/benchmark/`:
+
+```text
+data/benchmark/
+├── training_corpus_v1.json        # corpus text thô cho E6/SLM (paragraphs) — build_training_corpus.py
+├── wikipedia_vi_raw.json          # fallback corpus
+├── vcc_bench_v1.json              # benchmark 5-task + nguồn (context, reference_answer) cho E4
+├── vcc_bench_<task>.json          # bản tách theo từng task
+├── CHECKSUMS.json / PROVENANCE.md # provenance
+└── (vcc_bench_uit_viquad_qa.json) # sinh bởi build_viquad_eval.py khi cần eval QA thật
+```
+
+> **Cảnh báo file:** handoff wave-2 và các mục dưới trỏ tới `data/benchmark/vcc_bench_v2.json`, nhưng repo **hiện chỉ có `vcc_bench_v1.json`** (cùng schema). Cho tới khi có v2, hãy chạy E4/benchmark với `--data-path data/benchmark/vcc_bench_v1.json`, hoặc tạo v2 rồi cập nhật lại. `load_relevance_samples`/`VCCBench` không tự đổi tên file — sai tên sẽ rơi về fallback demo (E4) hoặc báo không thấy dataset (benchmark).
+
+**Đề xuất (`ROADMAP`)** — chỉ cần khi triển khai teacher-distillation §4/§5:
 
 ```text
 data/
-├── raw/
-│   ├── uvw2026/
-│   ├── legal/
-│   ├── finance/
-│   └── news/
-├── teacher/
-│   ├── compression_raw.jsonl
-│   ├── importance_raw.jsonl
-│   └── preference_raw.jsonl
-├── processed/
-│   ├── train.jsonl
-│   ├── val.jsonl
-│   └── test.jsonl
-└── benchmark/
-    ├── vcc_bench_v2.json
-    └── evaluation_sets/
+├── raw/{uvw2026,legal,finance,news}/
+├── teacher/{compression_raw,importance_raw,preference_raw}.jsonl
+├── processed/{train,val,test}.jsonl
+└── benchmark/{vcc_bench_v2.json, evaluation_sets/}
 ```
 
 Teacher raw output nên được giữ lại để có thể audit và re-filter mà không phải gọi LLM lại.
 
 ---
 
-## 13. Scripts nên bổ sung
+## 13. Scripts
+
+**Đã tồn tại (dùng được ngay):**
 
 ```text
 scripts/
-├── build_training_corpus.py
+├── build_training_corpus.py   # UVW-2026 + poetry -> training_corpus_v1.json (E6/SLM)
+├── build_vcc_bench.py         # dựng benchmark VCC-Bench
+├── build_viquad_eval.py       # UIT-ViQuAD2.0 -> bộ QA eval-only
+├── fetch_vietnamese_data.py   # tải + segment nguồn HF
+└── checksum_datasets.py       # provenance/checksum
+```
+
+**Đề xuất, chưa viết (`ROADMAP`, chỉ cần cho teacher-distillation §4/§5 — E4/E6 không cần):**
+
+```text
+scripts/
 ├── generate_compression_dataset.py
 ├── generate_importance_dataset.py
 ├── generate_preference_dataset.py
@@ -422,7 +478,7 @@ scripts/
 └── split_dataset.py
 ```
 
-Pipeline tổng thể:
+Pipeline tổng thể (`ROADMAP` cho V1; đường đi wave-2 hiện tại ngắn hơn nhiều — xem §2.5):
 
 ```text
 Raw sources

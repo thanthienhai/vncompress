@@ -212,6 +212,8 @@ def run_benchmark(
     exp_config: 'ExperimentConfig' = None,
     scorer_adapter_dir: str = None,
     tone_probe_path: str = None,
+    encoder_path: str = None,
+    encoder_id: str = None,
     ablation: bool = False,
 ):
     """Run VCC-Bench evaluation (or, with ablation=True, the signal-isolation
@@ -265,7 +267,23 @@ def run_benchmark(
             return create_compressor('lacc', tokenizer, model, config=None, device=device, scorer=scorer, **ABLATION_KWARGS[method_name])
         if method_name in WAVE2_ARMS:
             base, kw = WAVE2_ARMS[method_name]
-            extra = dict(scorer=scorer) if base == 'lacc' else {}
+            if base == 'lacc':
+                extra = dict(scorer=scorer)
+            elif base == 'encoder':
+                # E6: point the arm at a fine-tuned keep/drop checkpoint
+                # (--encoder-path, from scripts/train_encoder_compressor.py) or,
+                # failing that, a raw encoder id (--encoder-id) to smoke-test the
+                # wiring. Without either, EncoderClassifierCompressor.compress()
+                # raises rather than silently producing garbage.
+                if not (encoder_path or encoder_id):
+                    raise ValueError(
+                        "The 'encoder' arm needs a checkpoint: pass --encoder-path "
+                        "(a dir from scripts/train_encoder_compressor.py) or "
+                        "--encoder-id (a HF encoder id, e.g. vinai/phobert-base)."
+                    )
+                extra = dict(encoder_path=encoder_path, encoder_id=encoder_id)
+            else:
+                extra = {}
             return create_compressor(base, tokenizer, model, config=None, device=device, **extra, **kw)
         if method_name == 'lacc':
             return create_compressor('lacc', tokenizer, model, config=None, device=device, scorer=scorer)
@@ -337,6 +355,12 @@ def main():
     parser.add_argument('--tone-probe-path', default=None,
                          help="Trained tone probe (e.g. models/slm/tone_probe.pt), paired with --scorer-adapter-dir. "
                               "Enables LACC's trained-tone-probe signal instead of the rule-based one.")
+    parser.add_argument('--encoder-path', default=None,
+                         help="Fine-tuned keep/drop encoder checkpoint dir (from scripts/train_encoder_compressor.py), "
+                              "for the 'encoder' arm (wave-2 E6). Takes precedence over --encoder-id.")
+    parser.add_argument('--encoder-id', default=None,
+                         help="Raw encoder id for the 'encoder' arm when no fine-tuned checkpoint is available "
+                              "(e.g. vinai/phobert-base) -- smoke-tests the wiring only.")
     args = parser.parse_args()
 
     if args.list_methods:
@@ -380,6 +404,7 @@ def main():
         ratios=exp_config.compression_ratios, output_dir=exp_config.output_dir, quick=args.quick,
         data_path=exp_config.data_path, exp_config=exp_config,
         scorer_adapter_dir=args.scorer_adapter_dir, tone_probe_path=args.tone_probe_path,
+        encoder_path=args.encoder_path, encoder_id=args.encoder_id,
         ablation=args.ablation,
     )
 

@@ -85,7 +85,9 @@ python scripts/train_encoder_compressor.py \
   --teacher-model Qwen/Qwen2.5-0.5B-Instruct --ratio 4 --output-dir models/encoder_cls
 
 python benchmark.py --methods none,llmlingua,encoder --ratios 2,4,8 \
-  --model Qwen/Qwen2.5-7B-Instruct    # arm 'encoder' đọc checkpoint từ --output-dir
+  --model Qwen/Qwen2.5-7B-Instruct --encoder-path models/encoder_cls
+  # arm 'encoder' đọc checkpoint từ --encoder-path (chính là --output-dir ở trên);
+  # thiếu cả --encoder-path lẫn --encoder-id thì arm này báo lỗi ngay, không chạy mù.
 ```
 
 ## 5. Đề xuất chưa cần code
