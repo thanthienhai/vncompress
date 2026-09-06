@@ -47,4 +47,6 @@ data/processed/*.jsonl
 # reports (filter_report_*.json) ARE committed so a run stays auditable.
 data/teacher/.cache/
 data/teacher/*_raw.jsonl
+data/teacher/*_raw.dryrun.jsonl
 data/teacher/quarantine_*.jsonl
+data/teacher/failures_*.jsonl
