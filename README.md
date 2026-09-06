@@ -101,6 +101,11 @@ python scripts/inspect_failures.py --stage queries --check-output   # lỗi nào
 
 Chạy lại đúng lệnh cũ là đủ để retry phần lỗi — resume bỏ qua những gì đã ghi được.
 
+Sau khi có dữ liệu teacher, phía eval được **tách theo nguồn gốc**: `vcc_bench_eval.json` chỉ giữ
+nguồn độc lập (mặc định của `benchmark.py`), còn `vcc_bench_eval_synthetic.json` giữ phần teacher
+sinh. Chấm riêng — gộp lại thì con số bị chi phối bởi việc chấm model đã train trên output teacher
+bằng chính output của teacher đó.
+
 ## 7. Huấn luyện
 
 ```bash

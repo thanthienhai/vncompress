@@ -505,6 +505,19 @@ Có thể dùng teacher-generated supervision:
 
 ### Evaluation
 
+> **`IMPLEMENTED` — bộ eval được tách theo nguồn gốc.** Khi dữ liệu teacher được trộn vào, phía eval trở thành **482 sample do teacher sinh so với 24 sample độc lập** (số đo thật ở lần chạy đầu). Gộp chung một file thì mọi con số báo cáo bị chi phối bởi việc chấm một model đã train trên output của teacher bằng chính output của teacher đó, và 24 sample độc lập tan biến trong trung bình.
+>
+> `split_dataset.py` vì vậy ghi ra hai file:
+>
+> | file | nội dung | đo cái gì |
+> |---|---|---|
+> | `vcc_bench_eval.json` | chỉ nguồn độc lập (mặc định của `benchmark.py`) | hành vi trên dữ liệu teacher **chưa từng chạm vào** |
+> | `vcc_bench_eval_synthetic.json` | chỉ nguồn teacher sinh | khả năng khái quát sang **tài liệu chưa thấy** |
+>
+> **Không file nào thay thế file kia, và không được gộp.** Gộp thành một con số giờ là việc phải cố ý làm. `--teacher-source` khai báo nguồn nào tính là teacher sinh; `split_manifest.json` có khối `by_source` cho cả train lẫn eval.
+>
+> Ghi chú chất lượng, trên đúng trục mà repo này liên tục vấp: trong 24 sample độc lập có **15 sample `reference_answer` là bản sao nguyên văn `context`**; trong 482 sample teacher sinh, con số đó là **0**. Bộ eval độc lập vẫn nhỏ và vẫn nhiều degenerate — cách thoát đúng vẫn là UIT-ViQuAD (§2.5 C), không phải dựa vào dữ liệu teacher.
+
 Không dùng teacher output làm ground truth duy nhất. Evaluation nên dựa trên downstream behavior:
 
 ```text
@@ -580,7 +593,8 @@ data/
     ├── records.jsonl                   #   canonical stream, có doc_id      [gitignored]
     ├── train.jsonl / eval.jsonl        #   split 90/10 theo document        [gitignored]
     ├── vcc_bench_train.json            #   phía train, legacy shape -> E4    [committed]
-    ├── vcc_bench_eval.json             #   phía eval, legacy shape -> bench  [committed]
+    ├── vcc_bench_eval.json             #   eval NGUỒN ĐỘC LẬP -> benchmark   [committed]
+    ├── vcc_bench_eval_synthetic.json   #   eval teacher sinh, chấm RIÊNG     [committed]
     ├── split_manifest.json             #   policy/seed/tỷ lệ/eval doc keys   [committed]
     ├── records_meta.json               #   nguồn + sha256 đầu vào            [committed]
     └── verification_report.json        #   kết quả §6.1                      [committed]
