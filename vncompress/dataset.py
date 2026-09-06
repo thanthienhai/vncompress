@@ -103,6 +103,14 @@ class Record:
     language: str = 'vi'
     domain: str = 'general'
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: Explicit split unit for a DERIVED record, set to the doc_key of the
+    #: record it was derived from. A teacher-generated question carries its
+    #: source paragraph's text verbatim but has its own kind/source, so without
+    #: this it would get a different doc_key and could land on the opposite side
+    #: of the split from the paragraph it came from -- training on the text and
+    #: evaluating on a question about that same text. See
+    #: filter_dataset.filter_queries / filter_compression.
+    split_group: Optional[str] = None
 
     @property
     def char_length(self) -> int:
@@ -111,12 +119,16 @@ class Record:
     @property
     def doc_key(self) -> str:
         """The unit §9 forbids splitting. Namespaced by kind+source so two
-        sources can reuse an id without being merged into one document."""
-        return f'{self.kind}/{self.source}/{self.doc_id}'
+        sources can reuse an id without being merged into one document, unless
+        the record explicitly declares the group it was derived from."""
+        return self.split_group or f'{self.kind}/{self.source}/{self.doc_id}'
 
     @property
     def stratum(self) -> str:
-        return f'{self.kind}/{self.source}'
+        """Derived from doc_key, not from this record's own kind/source: a
+        split group must never span two strata, or stratified splitting could
+        not keep it together."""
+        return '/'.join(self.doc_key.split('/')[:2])
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -134,6 +146,8 @@ class Record:
             'reference_answer': self.reference_answer,
             'char_length': self.char_length,
         }
+        if self.split_group:
+            d['split_group'] = self.split_group
         if self.metadata:
             d['metadata'] = self.metadata
         return d
@@ -146,7 +160,7 @@ class Record:
             task=d.get('task', ''), context=d.get('context', ''),
             query=d.get('query', ''), reference_answer=d.get('reference_answer', ''),
             language=d.get('language', 'vi'), domain=d.get('domain', 'general'),
-            metadata=d.get('metadata', {}),
+            metadata=d.get('metadata', {}), split_group=d.get('split_group'),
         )
 
     def to_vcc_bench_sample(self) -> Dict[str, Any]:
@@ -535,6 +549,14 @@ def split_by_document(
         'eval': {'n_records': len(eval_), 'n_documents': len(group_by_document(eval_))},
         'eval_ratio_realized': round(len(eval_) / max(len(records), 1), 4),
         'strata': stratum_report,
+        # Derived records (teacher-generated questions, compressed instances)
+        # share their origin's stratum so they cannot be split away from it, so
+        # the stratum table alone no longer shows how much of the data is
+        # teacher-generated. This does.
+        'by_source': {
+            'train': _count_by(train, lambda r: r.source),
+            'eval': _count_by(eval_, lambda r: r.source),
+        },
         'eval_doc_keys': sorted({r.doc_key for r in eval_}),
         'train_doc_keys_sha256': hashlib.sha256(
             '\n'.join(sorted({r.doc_key for r in train})).encode('utf-8')).hexdigest(),

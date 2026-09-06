@@ -142,6 +142,11 @@ def filter_queries(raw_rows, records_by_id, args, counters, rejected):
                 # Inherited on purpose: questions about one article must not be
                 # split across train and eval (§9).
                 doc_id=source.doc_id,
+                # And the split unit is the ORIGIN's, not this record's own: the
+                # question carries the paragraph verbatim, so a different
+                # doc_key would let the paragraph go to train while a question
+                # about it goes to eval.
+                split_group=source.doc_key,
                 task='long_document_qa',
                 context=context,
                 query=query,
@@ -200,6 +205,7 @@ def filter_compression(raw_rows, records_by_id, args, counters, rejected):
             source=source.source,
             source_id=source.id,
             doc_id=source.doc_id,
+            split_group=source.doc_key,
             task='context_compression',
             context=source.context,
             query=row.get('query', ''),

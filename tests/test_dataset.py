@@ -300,3 +300,72 @@ def test_real_benchmark_splits_without_leaking_a_document():
     eval_docs = {r.doc_key for r in eval_}
     for doc_key, group in docs.items():
         assert (doc_key in eval_docs) == all(r in eval_ for r in group)
+
+
+# ============================================================================
+# Derived records must not be split away from what they were derived from
+# ============================================================================
+
+
+def test_a_derived_record_shares_its_origins_split_group():
+    """A teacher-generated question carries its source paragraph verbatim but
+    has its own kind/source. Without an explicit split group it gets a
+    different doc_key, and the split can put the paragraph in train and a
+    question about that same paragraph in eval."""
+    origin = Record(id='p1', kind=KIND_CORPUS, source='uvw-2026', source_id='1',
+                    doc_id='Ha_Noi', task='context_compression', context='ĐOẠN VĂN X')
+    naive = Record(id='q1', kind=KIND_BENCHMARK, source='teacher-synth', source_id='p1',
+                   doc_id='Ha_Noi', task='long_document_qa', context='ĐOẠN VĂN X',
+                   query='q', reference_answer='a')
+    assert naive.doc_key != origin.doc_key, 'the defect this guards against'
+
+    derived = Record(id='q1', kind=KIND_BENCHMARK, source='teacher-synth', source_id='p1',
+                     doc_id='Ha_Noi', task='long_document_qa', context='ĐOẠN VĂN X',
+                     query='q', reference_answer='a', split_group=origin.doc_key)
+    assert derived.doc_key == origin.doc_key
+    assert derived.stratum == origin.stratum, 'a split group must not span strata'
+
+
+def test_split_keeps_teacher_derived_records_with_their_source_paragraph():
+    corpus = normalize_corpus(_corpus(n_docs=30, paras_per_doc=4))
+    derived = [
+        Record(id=f'synthqa_{r.id}', kind=KIND_BENCHMARK, source='teacher-synth',
+               source_id=r.id, doc_id=r.doc_id, task='long_document_qa',
+               context=r.context, query='Câu hỏi?', reference_answer='Đoạn',
+               split_group=r.doc_key)
+        for r in corpus
+    ]
+    train, eval_, _ = split_by_document(corpus + derived, eval_ratio=0.1, seed=42)
+
+    assert check_split_leakage(train, eval_) == [], 'identical contexts must not straddle the split'
+    eval_ids = {r.id for r in eval_}
+    for record in corpus:
+        assert (record.id in eval_ids) == (f'synthqa_{record.id}' in eval_ids)
+
+
+def test_split_group_survives_a_jsonl_round_trip(tmp_path):
+    origin = Record(id='p1', kind=KIND_CORPUS, source='uvw-2026', source_id='1',
+                    doc_id='Ha_Noi', task='context_compression', context='x' * 300)
+    derived = Record(id='c1', kind=KIND_CORPUS, source='uvw-2026', source_id='p1',
+                     doc_id='Ha_Noi', task='context_compression', context='x' * 300,
+                     split_group=origin.doc_key)
+    path = str(tmp_path / 'r.jsonl')
+    write_jsonl(path, [origin, derived])
+    back = list(read_jsonl(path))
+    assert back[1].split_group == origin.doc_key
+    assert back[0].split_group is None, 'a plain record must not gain a spurious group'
+    assert back[0].doc_key == back[1].doc_key
+
+
+def test_manifest_reports_sources_separately_now_that_they_share_a_stratum():
+    corpus = normalize_corpus(_corpus(n_docs=20, paras_per_doc=4))
+    derived = [
+        Record(id=f'synthqa_{r.id}', kind=KIND_BENCHMARK, source='teacher-synth',
+               source_id=r.id, doc_id=r.doc_id, task='long_document_qa', context=r.context,
+               query='q', reference_answer='a', split_group=r.doc_key)
+        for r in corpus
+    ]
+    _, _, manifest = split_by_document(corpus + derived, eval_ratio=0.1)
+    assert set(manifest['strata']) == {'corpus/uvw-2026'}, 'derived records join their origin stratum'
+    assert manifest['by_source']['train']['teacher-synth'] > 0
+    assert manifest['by_source']['train']['uvw-2026'] > 0
