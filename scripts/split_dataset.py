@@ -16,13 +16,27 @@ Outputs (§12 `data/processed/`):
     train.jsonl / eval.jsonl        canonical records, all kinds
     vcc_bench_train.json            benchmark-kind train split, legacy shape
                                     (E4 relevance-probe training input)
-    vcc_bench_eval.json             benchmark-kind eval split, legacy shape
-                                    (benchmark.py --data-path input)
+    vcc_bench_eval.json             benchmark-kind eval split, INDEPENDENT
+                                    sources only (benchmark.py --data-path input)
+    vcc_bench_eval_synthetic.json   benchmark-kind eval split, teacher-generated
+                                    sources only -- scored separately, never pooled
     split_manifest.json             policy, seed, realized ratios, per-stratum
                                     counts, eval document keys, checksums
 
-The two legacy-shape files exist so `VCCBench.load_from_json()` and
+The legacy-shape files exist so `VCCBench.load_from_json()` and
 `load_relevance_samples()` consume a split with no parser change.
+
+**The eval side is split by provenance on purpose.** Once teacher-generated
+questions are in the dataset they dominate by volume -- in the first full run,
+482 of 506 eval samples. Pooling them with the original benchmark produces one
+average in which a model trained on teacher output is largely being scored
+against more teacher output from the same model, and the 24 independent samples
+disappear into the mean. Emitting two files makes the pooled number something
+you have to build deliberately rather than something you get by default.
+
+Neither file is a substitute for the other: the synthetic set measures
+generalization to unseen *documents*, the independent set measures behaviour on
+data the teacher never touched. Report them separately.
 
 Note on §10: by default the benchmark is split 90/10 like everything else, so
 E4 has query-conditioned training data today. That is a compromise -- §10 would
@@ -68,6 +82,9 @@ def main():
     ap.add_argument('--seed', type=int, default=42, help='Salts the document hash ordering.')
     ap.add_argument('--eval-only-source', action='append', default=[],
                     help='Send a whole source to eval (§10). Repeatable.')
+    ap.add_argument('--teacher-source', action='append', default=['teacher-synth'],
+                    help='Sources treated as teacher-generated, kept out of the independent eval '
+                         'file. Repeatable.')
     ap.add_argument('--allow-leakage', action='store_true',
                     help='Write the split even if the no-leakage assertion fails (debugging only).')
     args = ap.parse_args()
@@ -108,14 +125,28 @@ def main():
     write_jsonl(train_path, train)
     write_jsonl(eval_path, eval_)
 
+    teacher_sources = set(args.teacher_source)
     bench_train = [r for r in train if r.kind == KIND_BENCHMARK]
     bench_eval = [r for r in eval_ if r.kind == KIND_BENCHMARK]
+    bench_eval_independent = [r for r in bench_eval if r.source not in teacher_sources]
+    bench_eval_synthetic = [r for r in bench_eval if r.source in teacher_sources]
+
     bench_train_path = os.path.join(out_dir, 'vcc_bench_train.json')
     bench_eval_path = os.path.join(out_dir, 'vcc_bench_eval.json')
+    bench_eval_synth_path = os.path.join(out_dir, 'vcc_bench_eval_synthetic.json')
     write_vcc_bench_json(bench_train_path, bench_train,
                          {'name': 'vcc-bench-train', 'split': 'train', 'seed': args.seed})
-    write_vcc_bench_json(bench_eval_path, bench_eval,
-                         {'name': 'vcc-bench-eval', 'split': 'eval', 'seed': args.seed})
+    write_vcc_bench_json(bench_eval_path, bench_eval_independent,
+                         {'name': 'vcc-bench-eval', 'split': 'eval', 'seed': args.seed,
+                          'provenance': 'independent (not teacher-generated)',
+                          'excluded_sources': sorted(teacher_sources)})
+    write_vcc_bench_json(bench_eval_synth_path, bench_eval_synthetic,
+                         {'name': 'vcc-bench-eval-synthetic', 'split': 'eval', 'seed': args.seed,
+                          'provenance': 'teacher-generated',
+                          'sources': sorted(teacher_sources),
+                          'warning': 'Do not pool with vcc_bench_eval.json: a model trained on '
+                                     'teacher output scored against teacher output measures '
+                                     'generalization across documents, not independent quality.'})
 
     manifest.update({
         'date': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -128,7 +159,7 @@ def main():
         },
         'outputs': {
             os.path.basename(p): {'sha256': sha256_file(p), 'bytes': os.path.getsize(p)}
-            for p in (train_path, eval_path, bench_train_path, bench_eval_path)
+            for p in (train_path, eval_path, bench_train_path, bench_eval_path, bench_eval_synth_path)
         },
     })
     manifest_path = os.path.join(out_dir, 'split_manifest.json')
@@ -138,8 +169,13 @@ def main():
     rel = lambda p: os.path.relpath(p, REPO)  # noqa: E731
     print(f'\nWrote:\n  {rel(train_path)}\n  {rel(eval_path)}'
           f'\n  {rel(bench_train_path)} ({len(bench_train)} samples)'
-          f'\n  {rel(bench_eval_path)} ({len(bench_eval)} samples)'
+          f'\n  {rel(bench_eval_path)} ({len(bench_eval_independent)} samples, INDEPENDENT)'
+          f'\n  {rel(bench_eval_synth_path)} ({len(bench_eval_synthetic)} samples, teacher-generated)'
           f'\n  {rel(manifest_path)}')
+    if bench_eval_synthetic:
+        print(f'\n  Note: the eval side is {len(bench_eval_synthetic)} teacher-generated + '
+              f'{len(bench_eval_independent)} independent samples, written to separate files. '
+              f'Score them separately -- pooling hides the independent set in the mean.')
     print('\nConsumers now read the split automatically:')
     print('  train.py --mode slm                     (corpus train/eval, document-level)')
     print('  scripts/train_encoder_compressor.py     (corpus train split)')

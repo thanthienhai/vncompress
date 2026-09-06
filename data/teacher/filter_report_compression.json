@@ -1,0 +1,16 @@
+{
+  "stage": "compression",
+  "raw_rows": 58,
+  "accepted": 52,
+  "counters": {
+    "accepted": 52,
+    "over_budget": 3,
+    "number_dropped": 2,
+    "not_extractive": 1
+  },
+  "thresholds": {
+    "ratio_tolerance": 0.25,
+    "min_budget_fraction": 0.2,
+    "min_extractive": 0.95
+  }
+}

@@ -369,3 +369,40 @@ def test_manifest_reports_sources_separately_now_that_they_share_a_stratum():
     assert set(manifest['strata']) == {'corpus/uvw-2026'}, 'derived records join their origin stratum'
     assert manifest['by_source']['train']['teacher-synth'] > 0
     assert manifest['by_source']['train']['uvw-2026'] > 0
+
+
+def test_eval_side_is_written_out_by_provenance(tmp_path):
+    """Once teacher-generated questions exist they dominate the eval side by
+    volume. Pooling them with the original benchmark yields one average in
+    which a model trained on teacher output is mostly scored against more
+    teacher output, and the independent samples vanish into the mean."""
+    import json
+    import subprocess
+    import sys
+
+    records = normalize_benchmark([
+        {'sample_id': f'needle_{i:04d}', 'task': 'needle_in_haystack', 'source': 'vcc_bench',
+         'context': f'Ngữ cảnh độc lập {i}. ' + ('nội dung. ' * 40),
+         'query': 'q', 'reference_answer': 'Ngữ cảnh'} for i in range(20)
+    ]) + normalize_benchmark([
+        {'sample_id': f'synthqa_{i}', 'task': 'long_document_qa', 'source': 'teacher-synth',
+         'context': f'Ngữ cảnh teacher {i}. ' + ('nội dung. ' * 40),
+         'query': 'q', 'reference_answer': 'Ngữ cảnh'} for i in range(80)
+    ])
+
+    records_path = tmp_path / 'records.jsonl'
+    write_jsonl(str(records_path), records)
+    result = subprocess.run(
+        [sys.executable, os.path.join(REPO, 'scripts', 'split_dataset.py'),
+         '--input', str(records_path), '--output-dir', str(tmp_path)],
+        capture_output=True, text=True, cwd=REPO)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    independent = json.loads((tmp_path / 'vcc_bench_eval.json').read_text(encoding='utf-8'))
+    synthetic = json.loads((tmp_path / 'vcc_bench_eval_synthetic.json').read_text(encoding='utf-8'))
+
+    assert {s['source'] for s in independent['samples']} == {'vcc_bench'}
+    assert {s['source'] for s in synthetic['samples']} == {'teacher-synth'}
+    assert 'teacher-synth' in independent['metadata']['excluded_sources']
+    assert 'Do not pool' in synthetic['metadata']['warning']
+    assert synthetic['samples'], 'the teacher-generated eval must not be silently dropped'
