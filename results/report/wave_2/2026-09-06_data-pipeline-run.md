@@ -1,7 +1,7 @@
 # Wave 2 — Data pipeline: căn chỉnh theo spec và chạy teacher distillation
 
-**Ngày:** 2026-09-06 · **Nhánh:** `refactor/wave2-data-pipeline` (18 commit từ `wave2-implementation`)
-**Trạng thái:** hạ tầng xong và đã khoá bằng test; lần chạy full đang ở stage 2 (~45%)
+**Ngày:** 2026-09-06, cập nhật 2026-09-07 · **Nhánh:** `refactor/wave2-data-pipeline` (22 commit từ `wave2-implementation`)
+**Trạng thái:** **XONG** — chạy full end-to-end, split cuối sạch rò rỉ, 348 test xanh
 
 Tài liệu này ghi lại ba thứ: **đã làm gì**, **đo được gì**, và **còn lại gì**.
 Spec gốc: [`docs/dataset_pipeline.md`](../../../docs/dataset_pipeline.md).
@@ -116,38 +116,66 @@ Phân bố loại câu hỏi cho thấy teacher tự nhắm đúng hard case §7
 
 **Span nguyên văn 100%. Degenerate 0.**
 
-### 3.4. Teacher — stage 2 (nén): đang chạy, ~45%
+### 3.4. Teacher — stage 2 (nén): **XONG**
 
 | | |
 |---|---:|
-| instance | 27.250 / 60.078 |
-| tốc độ | 2,24 req/s (32 worker) |
-| lỗi | 141 (0,52%) |
-| chấp nhận sau lọc | **95,5%** (đo trên 20.318 row) |
+| instance sinh được | **60.171 / 60.237 (99,89%)** |
+| chấp nhận sau lọc | **57.529 / 60.171 (95,6%)** |
+| bỏ hẳn sau 3 pass | 66 (0,11%) — nằm trong `failures_compression.jsonl` để trace |
+| thời gian | ~7,5 giờ ở 2,2 req/s, 32 worker |
 
-Chất lượng nén (mẫu 52 instance đầu):
+Loại bởi filter (§6): `over_budget` 1.776 · `too_short` 783 · `not_extractive` 81 ·
+`number_altered` **2**.
 
-| ratio | target→realized | ratio đạt | extractive |
-|---:|---|---:|---:|
-| 2x | 40,8 → 25,0 từ | 3,76x | **1,000** |
-| 4x | 22,0 → 15,4 từ | 5,81x | **1,000** |
-| 8x | 11,7 → 10,4 từ | 9,77x | **1,000** |
+Chất lượng nén trên **toàn bộ 57.529 bản** (không phải mẫu):
 
-`extractive_ratio = 1,000` — trích xuất thuần, không diễn đạt lại. Model nén **mạnh hơn** mức
-được yêu cầu; §8 yêu cầu lưu cả `target_tokens` lẫn `realized_tokens` nên người dùng đọc được
-con số thật.
+| ratio yêu cầu | n | target | realized | **nén thực tế** | extractive | số giữ được |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2x | 19.782 | 65,8 | 22,8 | **7,31x** | 1,000 | 0,939 |
+| 4x | 19.452 | 32,8 | 17,1 | **8,83x** | 1,000 | 0,933 |
+| 8x | 18.295 | 16,9 | 12,3 | **11,55x** | 1,000 | 0,910 |
 
-> **`number_altered` nổ 1 lần trên 20.318 bản nén** — trên dataset này teacher gần như không bao
-> giờ bịa hay sửa con số. Đây là ràng buộc quan trọng nhất với dữ liệu tài chính/pháp lý.
+Hai điều phải đọc kỹ ở bảng này:
 
-### 3.5. Tác động lên E4
+- **`extractive_ratio = 1,000` trên cả 57.529 bản.** Teacher trích xuất thuần, không diễn đạt
+  lại. Đây là thứ làm dữ liệu này dùng được để dạy token-selection.
+- **Nhãn ratio không phải mức nén thật.** Yêu cầu 2x thì thực tế nhận 7,31x. Con số mẫu
+  52 instance trước đó (3,76x) quá lạc quan. Ai dùng `compression_ratio` như biến độc lập
+  sẽ đo sai; phải đọc `target_tokens` / `realized_tokens`.
+- `number_altered` **2 lần trên 57.529** — teacher gần như không bịa số. Nhưng
+  `numbers_preserved` chỉ 0,91–0,94: nó *bỏ* số thường xuyên (đúng, khi câu hỏi không hỏi tới),
+  chỉ là không *sửa* số.
+
+### 3.5. Split cuối (141.294 record)
+
+| | |
+|---|---:|
+| record | 127.189 train / 14.105 eval |
+| tài liệu | 2.796 / 616 |
+| đơn vị chia | 3.402 nhóm (từ 3.412 tài liệu — 10 bị gộp do trùng nội dung) |
+| tỷ lệ eval thật | **0,0998** |
+| leakage §9 | **CLEAN** |
+
+Theo nguồn:
+
+| nguồn | train | eval |
+|---|---:|---:|
+| uvw-2026 | 63.242 | 7.889 |
+| teacher-synth | 56.152 | 5.192 |
+| vietnamese-poetry | 7.188 | 892 |
+| wikipedia | 321 | 101 |
+| vcc_bench | 286 | 31 |
+
+### 3.6. Tác động lên E4
 
 | | trước | sau |
 |---|---:|---:|
-| cặp (context, answer) để train | **153** | **~61.300** |
-| eval độc lập | 24 | 24 (+ ~6.000 teacher sinh, **chấm riêng**) |
+| cặp (context, answer) để train | **153** | **61.344** |
+| eval độc lập, tổng | 24 | 132 |
+| eval độc lập, **thực sự dùng được** | **3** | **6** |
 
----
+Dòng cuối là con số quan trọng nhất trong cả báo cáo này, xem §5.
 
 ## 4. Lỗi đã tìm và sửa
 
@@ -169,37 +197,62 @@ con số thật.
 | **Rò rỉ ở bước merge** | câu hỏi teacher mang nguyên văn đoạn gốc nhưng `doc_key` khác → split có thể tách đôi | thêm `Record.split_group` |
 | **Eval bị teacher chi phối** | 482 teacher vs 24 độc lập, gộp chung thì số độc lập tan biến | tách hai file, gộp phải cố ý làm |
 | **`pgrep -f` / `pkill -f` tự khớp** | 3 lần trong phiên; một lần làm pipeline **đứng yên 1,5 giờ** | bỏ hẳn pattern matching, chỉ dùng PID |
+| **Tuple exception thiếu lỗi transport** | `RemoteDisconnected` là `ConnectionResetError`, **không phải** `URLError`, nên lọt khỏi vòng retry 30s×3 và **giết run ở phút 446** | nới thành `OSError` + `http.client.HTTPException`; test parametrize 7 kiểu lỗi thật, 5/7 fail với bản cũ |
+| **Một task hỏng giết cả run** | `guarded()` cũng bắt tuple hẹp → exception thoát ra `as_completed` và abort 44.900 instance đã xong | bắt `BaseException`, ghi failure log, chỉ re-raise `KeyboardInterrupt`/`SystemExit` |
+| **Đơn vị chia là doc id, không phải nội dung** | VCC-Bench `long_document_qa` **chính là** bài UVW nhưng doc_key khác → train đoạn văn rồi eval câu hỏi trên đúng đoạn đó; thêm 1 đoạn thư mục dùng chung 4 bài | `link_documents_by_content` union-find gộp doc_key trùng nội dung; manifest ghi `n_split_groups` để việc gộp không âm thầm |
 
-Tỷ lệ chấp nhận bản nén qua ba lần sửa filter: **80,6% → 89,9% → 95,5%**.
+Tỷ lệ chấp nhận bản nén qua ba lần sửa filter: **80,6% → 89,9% → 95,5%** (cuối cùng **95,6%** trên toàn bộ 60.171 row).
 Cả ba đều là giả định của tôi về output của teacher mà **chưa từng đối chiếu với output thật**.
 
 ---
 
 ## 5. Còn lại
 
-### Đang chạy (tự động, ~4 giờ)
+### 5.1. Chặn đường: bộ eval độc lập chỉ có **6 sample dùng được**
 
-```
-stage 2 nén (45%) → retry pass → filter → merge → split cuối → checksum
+Đây là vấn đề nghiêm trọng nhất và nó **không** được lần chạy này giải quyết.
+
+`vcc_bench_eval.json` có 132 sample, nhưng 126 trong số đó có `reference_answer` là
+bản sao gần nguyên văn của `context`. Chấm điểm trên chúng thì mọi metric suy biến
+thành đo độ trùng văn bản — bất kỳ phương pháp nào giữ nhiều token cũng "thắng".
+
+| | tổng | dùng được | theo task |
+|---|---:|---:|---|
+| trước lần chạy này | 24 | 3 | agent 2, needle 1 |
+| **sau** | 132 | **6** | agent 3, compression 2, needle 1 |
+
+Số dùng được tăng gấp đôi, nhưng **6 mẫu không phải là một benchmark**. Không con số
+nào báo cáo trên bộ này có ý nghĩa thống kê.
+
+Lối thoát (không có đường tắt): nạp **UIT-ViQuAD** (§3) làm nguồn QA độc lập có câu
+trả lời ngắn thật, rồi trả VCC-Bench về eval-only:
+
+```bash
+python scripts/split_dataset.py --input data/processed/records_all.jsonl \
+    --eval-only-source vcc_bench --eval-only-source wikipedia
 ```
 
-### Việc còn phải làm
+### 5.2. Việc còn phải làm
 
 | Ưu tiên | Việc | Vì sao |
 |---|---|---|
-| **P0** | **Bộ eval độc lập chỉ 24 sample, 15/24 degenerate** | Không đủ để báo cáo. Cách thoát đúng: UIT-ViQuAD train split (§3) → chạy `split_dataset.py --eval-only-source vcc_bench --eval-only-source wikipedia` để trả VCC-Bench về eval-only 243 sample |
-| **P0** | **Chưa có student nào học từ `compressed_text`** | Tầng teacher hiện *sinh ra* supervision, chưa ai tiêu thụ. E4 vẫn dùng span-overlap, E6 vẫn dùng perplexity |
-| P1 | Train lại E4/E6 trên dữ liệu mới | E4 đi từ 153 → 61.300 cặp; số cũ không còn ý nghĩa so sánh |
+| **P0** | **Nạp UIT-ViQuAD, trả VCC-Bench về eval-only** | Xem §5.1. Chặn mọi kết quả báo cáo được |
+| **P0** | **Chưa có student nào học từ `compressed_text`** | 57.529 bản nén chất lượng cao đang nằm không. E4 vẫn dùng span-overlap, E6 vẫn dùng perplexity — cả hai đều yếu hơn supervision vừa sinh ra |
+| P1 | Train lại E4/E6 trên dữ liệu mới | E4 đi từ 153 → 61.344 cặp; số cũ không còn để so sánh |
+| P1 | Trace 66 instance nén hỏng + 26 `TeacherOutputError` ở stage 1 | `inspect_failures.py --stage compression`. Phần lớn là "empty response" lặp lại — nghi context quá dài hoặc nội dung bị model từ chối |
 | P1 | `generate_importance_dataset.py`, `generate_preference_dataset.py` | `token_labels`, `hard_negative`, `preference` vẫn chưa sinh |
 | P1 | §6.2 verifier LLM, §6.3 teacher agreement | Chưa có |
-| P2 | Làm rõ trường `numbers` trong prompt | Hiện mơ hồ giữa "số trong nguồn" và "số phải giữ"; sửa prompt sẽ vô hiệu hoá cache |
+| P2 | Làm rõ trường `numbers` trong prompt | Hiện mơ hồ giữa "số trong nguồn" và "số phải giữ"; sửa prompt sẽ vô hiệu hoá toàn bộ cache |
 | P2 | Nguồn P0 còn thiếu ở §3 | ViLegalText, VNFinsQA, ViSecQA chưa có script |
 
-### Cảnh báo khi đọc kết quả
+### 5.3. Cảnh báo khi đọc kết quả
 
-- **Không gộp** `vcc_bench_eval.json` với `vcc_bench_eval_synthetic.json`.
-- `compression_ratio: 2` **không** phản ánh mức nén thật (model đạt ~3,8x); đọc
+- **Chỉ 6/132 sample trong `vcc_bench_eval.json` dùng được.** Xem §5.1 trước khi báo cáo bất kỳ số nào.
+- **Không gộp** `vcc_bench_eval.json` với `vcc_bench_eval_synthetic.json` (5.192 sample teacher sinh).
+- `compression_ratio: 2` **không** phản ánh mức nén thật (thực tế 7,31x); đọc
   `target_tokens` / `realized_tokens`.
+- `vcc_bench_train.json` (99MB) và `vcc_bench_eval_synthetic.json` (9MB) **không nằm trong git** —
+  dựng lại bằng `scripts/run_pipeline.py`, đối chiếu sha256 trong `split_manifest.json`.
 - Adapter train **trước** khi đổi sang split theo document có `val_split.json` không tái lập được;
   `train_probe_control.py` sẽ từ chối chạy và báo lý do.
 
@@ -207,8 +260,8 @@ stage 2 nén (45%) → retry pass → filter → merge → split cuối → chec
 
 ## 6. Kiểm chứng
 
-- **339 test** pass (thêm ~90 test mới), CI xanh cả 6 bước.
+- **348 test** pass (thêm ~99 test mới), CI xanh cả 6 bước.
 - CI dựng lại pipeline vào thư mục tạm và **fail nếu split rò rỉ**.
-- Split là hàm thuần của `(doc_key, seed)` — chạy lại cho kết quả byte-identical.
+- Split là hàm thuần của `(nội dung, seed)` — chạy lại cho kết quả byte-identical.
 - `split_manifest.json` ghi policy, seed, tỷ lệ thực tế theo stratum, **toàn bộ eval document key**,
   sha256 từng output, và kết quả leakage check.
