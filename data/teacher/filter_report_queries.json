@@ -10,7 +10,8 @@
   },
   "thresholds": {
     "ratio_tolerance": 0.25,
-    "min_budget_fraction": 0.2,
+    "budget_slack": 8,
+    "min_words": 4,
     "min_extractive": 0.95
   }
 }

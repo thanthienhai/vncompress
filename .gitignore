@@ -25,13 +25,23 @@ models/**/*.bin
 models/**/pytorch_model*.pt
 
 # Canonical record stream and its splits (scripts/normalize_dataset.py ->
-# scripts/split_dataset.py): ~58MB of text derived entirely from files that
-# are already in git, so committing them would double the repo for nothing.
-# Rebuild with those two scripts. The small artifacts that make a run
-# auditable -- split_manifest.json (policy, seed, realized ratios, eval
-# document keys, output checksums), records_meta.json, and the two
-# vcc_bench_*.json splits -- ARE committed.
+# scripts/split_dataset.py): ~470MB of text derived entirely from files that
+# are already in git plus a recorded teacher run, so committing them would
+# bury the repo for nothing. Rebuild with scripts/run_pipeline.py.
+#
+# The artifacts that make a run auditable ARE committed: split_manifest.json
+# (policy, seed, realized ratios, eval document keys, output checksums),
+# records_meta.json, verification_report.json, filter_report_*.json,
+# CHECKSUMS.json -- and vcc_bench_eval.json, the independent eval set, which
+# stays small and is what results are reported on.
+#
+# The two teacher-scale splits are NOT committed. vcc_bench_train.json passed
+# 99MB once the teacher stage filled it, against GitHub's hard 100MB-per-file
+# limit, and every regeneration would add another copy to history forever.
+# Their sha256 in CHECKSUMS.json is what pins them.
 data/processed/*.jsonl
+data/processed/vcc_bench_train.json
+data/processed/vcc_bench_eval_synthetic.json
 
 # Teacher-LLM credentials (docs/dataset_pipeline.md §4). Never commit: the
 # endpoint is billed per token and the key grants full access to it.

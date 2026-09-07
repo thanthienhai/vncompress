@@ -1,6 +1,6 @@
 {
-  "input": "data/processed/records.jsonl",
-  "n_records": 22421,
+  "input": "data/processed/records_all.jsonl",
+  "n_records": 141294,
   "ok": true,
   "stats": {
     "counters": {
@@ -9,28 +9,29 @@
       "missing_query": 0,
       "missing_reference": 0,
       "short_context": 0,
-      "long_context": 9,
-      "degenerate_reference": 166,
-      "duplicate_context": 159,
+      "long_context": 32,
+      "degenerate_reference": 479,
+      "duplicate_context": 119032,
       "answer_not_in_context": 5
     },
     "n_documents": 3412,
     "n_unique_contexts": 22262,
     "by_kind": {
-      "benchmark": 243,
-      "corpus": 22178
+      "benchmark": 62083,
+      "corpus": 79211
     },
     "by_source": {
-      "uvw-2026": 19956,
-      "vcc_bench": 93,
-      "vietnamese-poetry": 2222,
-      "wikipedia": 150
+      "teacher-synth": 61344,
+      "uvw-2026": 71131,
+      "vcc_bench": 317,
+      "vietnamese-poetry": 8080,
+      "wikipedia": 422
     },
     "by_task": {
       "agent_tool_calling": 8,
-      "context_compression": 22178,
+      "context_compression": 79707,
       "cross_lingual": 18,
-      "long_document_qa": 160,
+      "long_document_qa": 61504,
       "multi_turn_conversation": 48,
       "needle_in_haystack": 9
     }

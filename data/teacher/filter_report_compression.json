@@ -1,13 +1,13 @@
 {
   "stage": "compression",
-  "raw_rows": 20318,
-  "accepted": 19404,
+  "raw_rows": 60171,
+  "accepted": 57529,
   "counters": {
-    "accepted": 19404,
-    "over_budget": 686,
-    "not_extractive": 20,
-    "number_altered": 1,
-    "too_short": 207
+    "accepted": 57529,
+    "over_budget": 1776,
+    "not_extractive": 81,
+    "number_altered": 2,
+    "too_short": 783
   },
   "thresholds": {
     "ratio_tolerance": 0.25,
