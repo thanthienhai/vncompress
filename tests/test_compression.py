@@ -14,17 +14,24 @@ import pytest
 import torch
 
 from vncompress.compression import (
+    DEFAULT_PPL_OVERLAP,
+    DEFAULT_PPL_WINDOW,
     METHODS,
     BaseCompressor,
     CompressionConfig,
     CompressionResult,
     LACCCompressor,
     LACCScorer,
+    LLMLinguaCompressor,
     NoCompressor,
     RandomCompressor,
     SemanticQualityGate,
+    _default_stride,
     compute_query_relevance_weights,
+    contrastive_perplexity,
     create_compressor,
+    question_conditioned_perplexity,
+    sliding_window_perplexity,
 )
 
 
@@ -489,3 +496,151 @@ def test_none_and_random_are_usable_end_to_end(tokenizer, vi_ids):
 def test_lacc_result_metadata_is_json_serializable(tokenizer, vi_ids):
     result = _lacc_no_model(tokenizer).compress(vi_ids)
     json.dumps(result.metadata, allow_nan=False)
+
+
+# ============================================================================
+# Wave-2 changes (research/wave2_proposals.md)
+# ============================================================================
+
+
+class TinyLM(torch.nn.Module):
+    """A minimal deterministic causal-LM stand-in for the perplexity functions:
+    a learned per-token-id logit table so log P(t | context) is well-defined,
+    context-independent, and reproducible on CPU without any model download."""
+
+    def __init__(self, vocab_size: int = 64, seed: int = 0):
+        super().__init__()
+        self.vocab_size = vocab_size
+        g = torch.Generator().manual_seed(seed)
+        # Next-token logits depend only on the current token id (a bigram-ish
+        # table): enough for the scorers to produce non-degenerate NLLs.
+        self.table = torch.nn.Parameter(torch.randn(vocab_size, vocab_size, generator=g))
+
+    def forward(self, input_ids):
+        return type('O', (), {'logits': self.table[input_ids]})
+
+
+class TestWindowingDefaults:
+    def test_default_window_and_overlap(self):
+        assert DEFAULT_PPL_WINDOW == 2048
+        assert DEFAULT_PPL_OVERLAP == 256
+        assert _default_stride(2048) == 2048 - 256
+        assert _default_stride(1) == 1
+        assert 1 <= _default_stride(512) <= 511
+
+
+class TestContrastivePerplexity:
+    def _ids(self, n=40):
+        return [(i * 7 + 3) % 64 for i in range(n)]
+
+    def test_plain_perplexity_shape_and_finite(self):
+        model = TinyLM()
+        ids = self._ids()
+        scores = sliding_window_perplexity(model, ids, window_size=16)
+        assert scores.shape == (len(ids),)
+        assert torch.isfinite(scores).all()
+
+    def test_question_conditioned_is_finite_and_full_length(self):
+        model = TinyLM()
+        ids = self._ids()
+        q = [5, 9, 12]
+        cond = question_conditioned_perplexity(model, ids, q, window_size=16)
+        assert cond.shape == (len(ids),)
+        assert torch.isfinite(cond).all()
+
+    def test_contrastive_equals_plain_when_no_question(self):
+        model = TinyLM()
+        ids = self._ids()
+        plain = sliding_window_perplexity(model, ids, window_size=16)
+        contr = contrastive_perplexity(model, ids, question_ids=[], window_size=16)
+        assert torch.allclose(plain, contr)
+
+    def test_question_changes_the_scores(self):
+        model = TinyLM()
+        ids = self._ids()
+        plain = sliding_window_perplexity(model, ids, window_size=16)
+        contr = contrastive_perplexity(model, ids, question_ids=[1, 2, 3], window_size=16)
+        assert not torch.allclose(plain, contr)
+
+    def test_llmlingua_contrastive_arm_runs(self, tokenizer):
+        # LLMLingua with a stub model, contrastive on: must compress and not crash.
+        model = TinyLM()
+        ids = [(i * 5 + 1) % 64 for i in range(60)]
+        comp = LLMLinguaCompressor(
+            tokenizer, model=model, contrastive=True, config=CompressionConfig(target_ratio=2.0),
+        )
+        assert comp.get_name() == "LongLLMLingua"
+        result = comp.compress(list(ids), query="two three")
+        assert result.compressed_length <= len(ids)
+
+
+class TestMorphMultiply:
+    def test_multiply_mode_runs_and_compresses(self, tokenizer, vi_ids):
+        comp = _lacc_no_model(
+            tokenizer, use_tone=True, use_morphology=True, morph_combine="multiply",
+            config=CompressionConfig(target_ratio=2.0),
+        )
+        result = comp.compress(list(vi_ids))
+        assert result.compressed_length < len(vi_ids)
+        assert _is_subsequence(result.compressed_ids, vi_ids)
+        assert result.metadata["morph_combine"] == "multiply"
+
+    def test_invalid_morph_combine_raises(self, tokenizer):
+        with pytest.raises(ValueError):
+            _lacc_no_model(tokenizer, morph_combine="nonsense")
+
+
+class TestSentenceSelection:
+    def test_sentence_unit_keeps_order_and_compresses(self, tokenizer):
+        text = "a b c d . e f g h . i j k l . m n o p . q r s t ."
+        ids = tokenizer.encode(text)
+        comp = _lacc_no_model(
+            tokenizer, use_tone=False, selection_unit="sentence",
+            config=CompressionConfig(target_ratio=2.0, keep_boundary_tokens=1),
+        )
+        result = comp.compress(list(ids))
+        assert result.metadata["selection_unit"] == "sentence"
+        assert result.compressed_length <= len(ids)
+        assert _is_subsequence(result.compressed_ids, ids)
+
+    def test_invalid_selection_unit_raises(self, tokenizer):
+        with pytest.raises(ValueError):
+            _lacc_no_model(tokenizer, selection_unit="paragraph")
+
+
+class TestClassProportionalBudget:
+    def test_classprop_runs_and_respects_boundaries(self, tokenizer, vi_ids):
+        config = CompressionConfig(target_ratio=2.0, keep_boundary_tokens=2)
+        comp = _lacc_no_model(
+            tokenizer, use_tone=False, use_morphology=True, budget_mode="class_proportional", config=config,
+        )
+        result = comp.compress(list(vi_ids))
+        assert result.metadata["budget_mode"] == "class_proportional"
+        assert result.compressed_ids[:2] == vi_ids[:2]
+        assert result.compressed_ids[-2:] == vi_ids[-2:]
+        assert result.compressed_length < len(vi_ids)
+        assert _is_subsequence(result.compressed_ids, vi_ids)
+
+    def test_invalid_budget_mode_raises(self, tokenizer):
+        with pytest.raises(ValueError):
+            _lacc_no_model(tokenizer, budget_mode="greedy")
+
+
+class TestTaskGatedTone:
+    def test_tone_gated_off_for_non_surface_task(self, tokenizer, vi_ids):
+        comp = _lacc_no_model(tokenizer, use_tone=True, tone_task_gate=True)
+        result = comp.compress(list(vi_ids), task="long_document_qa")
+        assert result.metadata["tone_gated_off"] is True
+        assert result.metadata["tone_source"] is None
+
+    def test_tone_kept_for_surface_task(self, tokenizer, vi_ids):
+        comp = _lacc_no_model(tokenizer, use_tone=True, tone_task_gate=True)
+        result = comp.compress(list(vi_ids), task="cross_lingual")
+        assert result.metadata["tone_gated_off"] is False
+        assert result.metadata["tone_source"] == "rule"
+
+    def test_no_gate_keeps_tone_regardless_of_task(self, tokenizer, vi_ids):
+        comp = _lacc_no_model(tokenizer, use_tone=True, tone_task_gate=False)
+        result = comp.compress(list(vi_ids), task="long_document_qa")
+        assert result.metadata["tone_gated_off"] is False
+        assert result.metadata["tone_source"] == "rule"

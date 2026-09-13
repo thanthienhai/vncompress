@@ -3,6 +3,8 @@
 % Bản tham khảo tiếng Việt — ĐỒNG BỘ với lacc_icisn_en.tex (bản nộp ICISN)
 % LƯU Ý: ICISN yêu cầu bài nộp bằng tiếng Anh; file này chỉ là tài liệu
 % tham khảo/đối chiếu nội bộ, KHÔNG dùng để nộp hội nghị.
+% Cập nhật 2026-09-05 để báo cáo kết quả đo được của wave 1
+% (xem results/report/wave_1/2026-09-05_lacc-technical-report.md).
 % ============================================================================
 \documentclass[runningheads]{llncs}
 
@@ -43,141 +45,277 @@
 \maketitle
 
 \begin{abstract}
-Các phương pháp nén ngữ cảnh cho mô hình ngôn ngữ lớn (LLM) hiện nay — LLMLingua, SnapKV, H2O, StreamingLLM — đều \emph{bất chấp ngôn ngữ}: mọi token được xử lý như nhau bất kể ngôn ngữ nào. Với tiếng Việt — ngôn ngữ đơn lập, có 6 thanh điệu, trong đó 30--40\% token là hư từ — điều này gây ra mất thông tin thanh điệu khi nén, lãng phí ngân sách cho hư từ ít thông tin, và hiện tượng token inflation. Chúng tôi đề xuất \method{LACC} (\emph{Language-Aware Context Compression}), kết hợp một tín hiệu tương phản thanh điệu tính từ ma trận khoảng cách ngữ âm 6 thanh, một tín hiệu hình thái 5 lớp từ với ngân sách nén riêng cho từng lớp, và một tín hiệu perplexity, thành một điểm quan trọng token duy nhất, vận hành ở ba mức phần cứng từ 0~GB VRAM đến pipeline INT4 7B đầy đủ. Tín hiệu perplexity đến từ một mô hình nhỏ có sẵn hoặc từ một mô hình ngôn ngữ nhỏ (SLM) thuần Việt do chúng tôi huấn luyện với một hàm loss phụ trợ mới, \emph{Phonological Consistency Loss} (tối ưu đồng thời với LoRA), có bộ phân loại đóng vai trò kép làm tone probe lúc suy diễn. Chúng tôi báo cáo hiện trạng có thể kiểm chứng của hai nỗ lực đi kèm: \method{VCC-Bench} --- bộ benchmark nén ngữ cảnh tiếng Việt gồm 243 mẫu, 5 tác vụ, có quy trình xác thực nguồn gốc dữ liệu và tái lập kết quả; và một báo cáo huấn luyện/đánh giá từ đầu cho SLM tinh chỉnh LoRA này. Qua ba lần huấn luyện, việc mở rộng corpus từ 393 lên $\sim$22.200 đoạn văn đã nâng độ chính xác thanh điệu trên token có dấu thanh từ 16,6\% lên 92,9\%, và cải thiện perplexity validation 25,2\% so với mô hình gốc chưa tinh chỉnh. Một đánh giá thử nghiệm sơ bộ trên \method{VCC-Bench} cho thấy tín hiệu thanh điệu rule-based của \method{LACC} gần như tăng gấp đôi Tone Preservation Rate trung bình so với baseline không nén/ngẫu nhiên ở tỉ lệ nén 2$\times$ (0,96 so với 0,51--0,52). Chúng tôi báo cáo các kết quả này cùng các sửa lỗi kỹ thuật và vấn đề còn tồn đọng --- bao gồm một lỗi làm ROUGE-L mù trước dấu thanh tiếng Việt --- để các khẳng định trong bài đúng với những gì đã, và chưa, được đo đạc.
+Các phương pháp nén ngữ cảnh cho mô hình ngôn ngữ lớn (LLM) --- LLMLingua, SnapKV, H2O, StreamingLLM --- đều \emph{bất chấp ngôn ngữ}: mọi token được chấm điểm như nhau bất kể ngôn ngữ nào. Tiếng Việt là ngôn ngữ đơn lập, 6 thanh điệu, trong đó 30--40\% token là hư từ, nên rất tự nhiên khi đặt câu hỏi: tín hiệu đặc thù ngôn ngữ có giúp nén tốt hơn không? Chúng tôi đề xuất \method{LACC} (\emph{Language-Aware Context Compression}), kết hợp tín hiệu tương phản thanh điệu từ ma trận khoảng cách ngữ âm 6 thanh, tín hiệu hình thái 5 lớp từ với ngân sách riêng theo lớp, và tín hiệu perplexity, thành một điểm quan trọng token duy nhất; tín hiệu perplexity có thể đến từ một SLM thuần Việt do chúng tôi huấn luyện với một hàm loss mới, \emph{Phonological Consistency Loss} (tối ưu đồng thời với LoRA), có bộ phân loại đóng vai trò kép làm tone probe lúc suy diễn. Chúng tôi kiểm định giả thuyết này một cách chặt chẽ trên \method{VCC-Bench} v2 (614 mẫu, 5 tác vụ, ngữ cảnh 2K--32K token), với hai bộ sinh độc lập và khoảng tin cậy paired-bootstrap. \textbf{Giả thuyết trung tâm không đứng được.} Bảo toàn thanh điệu (Tone Preservation Rate tới 0,96) \emph{không} làm câu trả lời tốt hơn; trên các tác vụ định vị thông tin, nén tone-aware còn \emph{thấp hơn ngẫu nhiên}, và một sweep calibration đẩy trọng số thanh điệu về 0. LLMLingua và SnapKV --- đều dùng một scorer perplexity/attention nhỏ --- thắng mọi biến thể \method{LACC} với khoảng cách lớn. Ba thứ còn đứng được: (i) phân bổ ngân sách theo lớp hình thái thắng ngẫu nhiên 65--182\% trên QA tiếng Việt ở 0~GB VRAM; (ii) chính \method{VCC-Bench}, một benchmark có tài liệu nguồn gốc, phơi bày được thất bại; và (iii) \emph{phương pháp huấn luyện} --- LoRA + Phonological Consistency Loss giảm perplexity validation 34--39\% ở bốn thang scorer (0.6B--8B) và thêm $+0{,}0625$ macro-F1 thanh điệu \emph{đặc hiệu} (so với $-0{,}0147$ ở task đối chứng token-identity), tức cấu trúc thanh điệu thực sự học được; nó chỉ không phải thứ làm cho việc nén tốt lên. Một A/B có kiểm soát (giữ nguyên SLM, chỉ đổi nguồn tín hiệu thanh điệu) khẳng định nghịch lý: probe học được giữ tone \emph{kém hơn} heuristic tra từ điển ($\Delta$TPR $-0{,}246$) nhưng trả lời \emph{tốt hơn} ($\Delta$token-F1 $+0{,}086$, 95\% CI $[+0{,}028,+0{,}146]$). Chúng tôi báo cáo kết quả âm này, các đóng góp còn lại, và các sửa lỗi đo lường --- gồm một lỗi ROUGE-L mù trước dấu thanh --- đã khiến phát hiện trở nên đáng tin.
 
-\keywords{Nén ngữ cảnh \and Mô hình ngôn ngữ lớn \and Xử lý ngôn ngữ tự nhiên tiếng Việt \and Bảo toàn thanh điệu \and Ngôn ngữ tài nguyên thấp \and Tinh chỉnh LoRA.}
+\keywords{Nén ngữ cảnh \and Mô hình ngôn ngữ lớn \and Xử lý ngôn ngữ tự nhiên tiếng Việt \and Bảo toàn thanh điệu \and Ngôn ngữ tài nguyên thấp \and Tinh chỉnh LoRA \and Kết quả âm.}
 \end{abstract}
 
 
 \section{Giới thiệu}
 
-Mô hình ngôn ngữ lớn ngày càng phải xử lý ngữ cảnh dài --- văn bản pháp luật, hội thoại nhiều lượt, chuỗi hành động agent nhiều bước --- trong khi chi phí $O(n^2)$ của self-attention khiến suy diễn đắt đỏ. Nén ngữ cảnh giải quyết vấn đề này theo ba hướng: \emph{nén prompt} (LLMLingua~\cite{jiang2023llmlingua}, Selective Context~\cite{li2023selective}) --- loại token có perplexity thấp; \emph{nén KV cache} (SnapKV~\cite{li2024snapkv}, H2O~\cite{zhang2023h2o}, StreamingLLM~\cite{xiao2024streamingllm}) --- loại bỏ vị trí cache theo điểm attention; và \emph{nén không gian tiềm ẩn} (Gist Tokens~\cite{mu2023gist}, ICAE~\cite{ge2024icae}) --- học memory token chuyên biệt.
+Mô hình ngôn ngữ lớn ngày càng phải xử lý ngữ cảnh dài --- văn bản pháp luật, hội thoại nhiều lượt, chuỗi hành động agent nhiều bước --- trong khi chi phí $O(n^2)$ của self-attention khiến suy diễn đắt đỏ. Nén ngữ cảnh giải quyết theo ba hướng: \emph{nén prompt} (LLMLingua~\cite{jiang2023llmlingua}, Selective Context~\cite{li2023selective}) --- loại token perplexity thấp; \emph{nén KV cache} (SnapKV~\cite{li2024snapkv}, H2O~\cite{zhang2023h2o}, StreamingLLM~\cite{xiao2024streamingllm}) --- loại vị trí cache theo điểm attention; và \emph{nén không gian tiềm ẩn} (Gist Tokens~\cite{mu2023gist}, ICAE~\cite{ge2024icae}) --- học memory token chuyên biệt.
 
-Cả ba hướng đều \emph{mù ngôn ngữ}. Với tiếng Việt --- ngôn ngữ đơn lập, 6 thanh tương phản, khoảng 30--40\% token là hư từ --- điều này gây ra ba vấn đề cụ thể: \textbf{(P1) mất thông tin thanh điệu}, vì xóa token mang dấu thanh hoặc làm hỏng dấu có thể đổi hẳn nghĩa (\viet{má} ``mẹ'' $\to$ \viet{ma} ``con ma''); \textbf{(P2) lãng phí ngân sách cho hư từ}, vì các hư từ ít thông tin (\viet{đã}, \viet{của}, \viet{và}, \ldots) bị chấm điểm ngang hàng với thực từ; và \textbf{(P3) token inflation}, vì cùng nội dung tiếng Việt tốn 1.5--2.0$\times$ token so với tiếng Anh~\cite{lee2026equity,deng2026language}, làm hẹp context window hiệu dụng.
+Cả ba hướng đều \emph{mù ngôn ngữ}. Với tiếng Việt --- đơn lập, 6 thanh tương phản, khoảng 30--40\% token là hư từ --- có thể giả thuyết ba vấn đề: \textbf{(P1) mất thông tin thanh điệu}, vì xóa token mang dấu hoặc làm hỏng dấu có thể đổi hẳn nghĩa (\viet{má} $\to$ \viet{ma}); \textbf{(P2) lãng phí ngân sách cho hư từ}, vì hư từ ít thông tin (\viet{đã}, \viet{của}, \viet{và}) bị chấm ngang thực từ; và \textbf{(P3) token inflation}, vì cùng nội dung tiếng Việt tốn 1.5--2.0$\times$ token so với tiếng Anh~\cite{lee2026equity,deng2026language}. Bài báo này \emph{kiểm định} các giả thuyết đó bằng thí nghiệm có kiểm soát, thay vì mặc định chúng đúng.
 
-\textbf{Đóng góp.} (1) \method{LACC} --- khung tính điểm token có nhận thức ngôn ngữ, kết hợp tín hiệu tương phản thanh điệu, tín hiệu lớp hình thái, và tín hiệu perplexity thành một điểm quan trọng duy nhất, ở ba mức phần cứng (0~GB, $\sim$0.3--1~GB, INT4 7B đầy đủ). (2) \emph{Phonological Consistency Loss} --- một hàm mục tiêu huấn luyện tối ưu đồng thời với LoRA để hidden states của một SLM nhỏ mã hóa trực tiếp thanh điệu tiếng Việt; bộ phân loại thu được đóng vai trò kép làm \emph{tone probe} lúc suy diễn, khép kín vòng lặp huấn luyện--chấm điểm cho nhánh model-based (một đóng góp về phương pháp huấn luyện thực sự, khác với các tín hiệu dựa-từ-điển ở trên). (3) \method{VCC-Bench} --- bộ benchmark nén ngữ cảnh tiếng Việt đầu tiên, công bố cùng quy trình xác thực nguồn gốc/checksum/tái lập kết quả. (4) Một báo cáo huấn luyện và đánh giá từ đầu cho mô hình LoRA-cộng-tone-loss này, gồm ba lần huấn luyện, vấn đề quy mô dataset đã thúc đẩy các lần chạy này, và các vấn đề kỹ thuật --- kể cả một lỗi ROUGE-L nghiêm trọng --- hiện đang giới hạn những gì có thể khẳng định về chất lượng nén đầu-cuối. Chúng tôi tách bạch những gì đã \emph{thiết kế} (Mục~3), những gì đã \emph{đo được} (Mục~5), và những gì \emph{còn bỏ ngỏ} (Mục~6), để bài báo không phóng đại kết quả chưa được xác thực lại dưới một pipeline đã sửa lỗi.
+\textbf{Phát hiện.} Kết quả headline là một kết quả \emph{âm}, được thiết lập qua ba đường bằng chứng độc lập và một A/B có kiểm soát. \textbf{P1 bị bác bỏ}: bảo toàn thanh điệu không phải proxy cho chất lượng --- nó nghịch biến với chất lượng. Giữ 93,2\% token có dấu vẫn xóa mất câu chứa đáp án; trên mọi task định vị thông tin, nén tone-aware thấp hơn random dropout; và một sweep calibration 30 nhánh đặt trọng số thanh điệu tối ưu tại đúng 0. \textbf{P2 được xác nhận}: ngân sách theo lớp hình thái thắng ngẫu nhiên 65--182\% trên QA tiếng Việt ở 0~GB VRAM. \textbf{P3 chưa đo} ở đây. Quan trọng: \emph{phương pháp huấn luyện hoạt động và đặc hiệu cho tone} dù tone không giúp nén --- đây là một đóng góp thật, tách bạch được.
+
+\textbf{Đóng góp.} (1) \method{LACC}, khung tính điểm token có nhận thức ngôn ngữ, kết hợp tương phản thanh điệu, lớp hình thái, và perplexity ở ba mức phần cứng (0~GB tới INT4 7B) --- mà ablation cho thấy \emph{thua chính tín hiệu perplexity đơn lẻ của nó}, với trọng số thanh điệu tối ưu được calibrate về 0. (2) \emph{Phonological Consistency Loss}, mục tiêu huấn luyện tối ưu đồng thời với LoRA để hidden states mã hóa thanh điệu; một nghiên cứu đối chứng $2{\times}2$ cho thấy mục tiêu LoRA/tone thêm $+0{,}0625$ macro-F1 trên task thanh điệu thật so với $-0{,}0147$ trên task đối chứng token-identity, loại trừ việc chỉ ghi nhớ. (3) \method{VCC-Bench} v2, benchmark nén ngữ cảnh tiếng Việt 614 mẫu, 5 tác vụ, có tài liệu nguồn gốc, checksum, và một invariant độ dài reference cưỡng chế trong CI --- đóng góp còn đứng vững nhất, và là công cụ khiến kết quả âm đo được. (4) Một báo cáo huấn luyện/đánh giá đầy đủ: thang scorer bốn cỡ (0.6B--8B) có CI bootstrap, cùng đánh giá downstream trên 5 tác vụ, 3 tỉ lệ nén, hai bộ sinh. Chúng tôi tách bạch cái đã \emph{thiết kế} (Mục~3), cái đã \emph{đo} (Mục~5), và cái còn \emph{bỏ ngỏ} (Mục~6).
 
 
 \section{Nghiên cứu liên quan}
 
-LLMLingua~\cite{jiang2023llmlingua} chấm điểm token bằng perplexity từ một LM tham chiếu nhỏ với budget controller, đạt tỉ lệ nén tới 20$\times$; Selective Context~\cite{li2023selective} chấm điểm bằng cosine similarity với câu hỏi. SnapKV~\cite{li2024snapkv} chọn vị trí KV cache từ attention trên một observation window ở cuối prompt; H2O~\cite{zhang2023h2o} giữ các ``heavy hitter'' có cumulative attention cao; StreamingLLM~\cite{xiao2024streamingllm} khai thác attention sink. Gist Tokens~\cite{mu2023gist} và ICAE~\cite{ge2024icae} thay vào đó huấn luyện mô hình nén prompt vào memory token đã học. Không phương pháp nào tích hợp tín hiệu đặc thù ngôn ngữ. Tiếng Việt là ngôn ngữ đơn lập, có thanh điệu với 6 thanh tương phản về ngữ âm~\cite{nguyen1997vietnamese}. Các nghiên cứu về công bằng tokenizer vẫn ghi nhận tiếng Việt chịu token inflation 1.5--2.0$\times$ so với tiếng Anh ngay cả với tokenizer công bằng nhất~\cite{lee2026equity}, và ngôn ngữ tài nguyên thấp chịu ``hình phạt kép'' về chi phí suy diễn cao hơn và độ chính xác thấp hơn~\cite{deng2026language}. Các mô hình tiếng Việt tiền huấn luyện như PhoBERT~\cite{nguyen2020phobert} cho thấy giá trị của mô hình hóa đặc thù ngôn ngữ cho NLP tiếng Việt nói chung, nhưng theo hiểu biết của chúng tôi, chưa có phương pháp công bố nào tích hợp tín hiệu thanh điệu hay hình thái vào chấm điểm quan trọng token cho bài toán nén ngữ cảnh, dù tiếng Việt hay bất kỳ ngôn ngữ có thanh điệu, tài nguyên thấp nào khác.
+LLMLingua~\cite{jiang2023llmlingua} chấm token bằng perplexity từ một LM tham chiếu nhỏ với budget controller, nén tới 20$\times$; Selective Context~\cite{li2023selective} chấm bằng cosine similarity với câu hỏi. SnapKV~\cite{li2024snapkv} chọn vị trí KV cache từ attention trên observation window cuối prompt; H2O~\cite{zhang2023h2o} giữ ``heavy hitter'' có cumulative attention cao; StreamingLLM~\cite{xiao2024streamingllm} khai thác attention sink. Gist Tokens~\cite{mu2023gist} và ICAE~\cite{ge2024icae} huấn luyện mô hình nén prompt vào memory token. Không phương pháp nào tích hợp tín hiệu đặc thù ngôn ngữ. Tiếng Việt là ngôn ngữ đơn lập, thanh điệu, 6 thanh tương phản về ngữ âm~\cite{nguyen1997vietnamese}. Các nghiên cứu công bằng tokenizer vẫn ghi nhận token inflation 1.5--2.0$\times$ so với tiếng Anh ngay cả với tokenizer công bằng nhất~\cite{lee2026equity}, và ngôn ngữ tài nguyên thấp chịu ``hình phạt kép''~\cite{deng2026language}. Các LM tiếng Việt tiền huấn luyện như PhoBERT~\cite{nguyen2020phobert} cho thấy giá trị của mô hình hóa đặc thù ngôn ngữ, nhưng theo hiểu biết của chúng tôi chưa có phương pháp công bố nào tích hợp tín hiệu thanh điệu hay hình thái vào chấm điểm token cho nén ngữ cảnh --- nên các tín hiệu đó có giúp ích hay không là một câu hỏi mở, và đến nay chưa được kiểm định.
 
 
 \section{Phương pháp đề xuất: LACC}
 
-\method{LACC} tính điểm quan trọng cho mỗi token bằng cách kết hợp ba tín hiệu đã chuẩn hóa,
+\method{LACC} tính điểm quan trọng mỗi token bằng cách kết hợp ba tín hiệu đã chuẩn hóa,
 \begin{equation}
 \score{t} = w_{\text{ppl}} \tilde{\score{}}_{\text{ppl}}(t) + w_{\text{tone}} \tilde{\score{}}_{\text{tone}}(t) + w_{\text{morph}} \tilde{\score{}}_{\text{morph}}(t),
 \label{eq:combined}
 \end{equation}
-với mỗi $\tilde{\score{}}(\cdot)\!\in\![0,1]$ và tổng các trọng số bằng 1 ($w_{\text{ppl}}\!=\!0$, $w_{\text{tone}}\!=\!w_{\text{morph}}\!=\!0.5$ khi không dùng mô hình ngoài). $B=\max(\lfloor n/R\rfloor-2k,0)$ token ở giữa có điểm $\score{t}$ cao nhất được giữ lại, cùng $k{=}2$ token biên mỗi phía, theo đúng thứ tự gốc.
+với mỗi $\tilde{\score{}}(\cdot)\!\in\![0,1]$ và tổng trọng số bằng 1. $B=\max(\lfloor n/R\rfloor-2k,0)$ token ở giữa có điểm cao nhất được giữ, cùng $k{=}2$ token biên mỗi phía, theo thứ tự gốc. Nhấn mạnh: các trọng số này là \emph{đối tượng nghiên cứu}, không phải prior cố định --- một sweep calibration (Mục~5.4) đặt điểm tối ưu tại $w_{\text{tone}}{=}0$.
 
-\textbf{Tín hiệu thanh điệu.} Với token đã giải mã $t$, gọi $\rho(t)$ là tỉ lệ ký tự mang thanh khác \tone{ngang} và $\nu(t)$ là số thanh khác-\tone{ngang} phân biệt xuất hiện. Trọng số bảo toàn là $\weight{tone}(t) = 1.0+\alpha\rho(t)(1+\beta\nu(t)/6)$, với $\alpha{=}0.5$, $\beta{=}0.3$ (khoảng $[1.0,1.65]$). Một ma trận tương phản ngữ âm $6\times6$, $D_{\text{tone}}(a,b)\in[0,0.9]$, đo mức độ khác biệt cảm nhận giữa hai thanh; với lân cận $\pm2$-token $N(t)$, hệ số tương phản là
+\textbf{Tín hiệu thanh điệu.} Với token đã giải mã $t$, gọi $\rho(t)$ là tỉ lệ ký tự mang thanh khác \tone{ngang} và $\nu(t)$ số thanh khác-\tone{ngang} phân biệt. Trọng số bảo toàn $\weight{tone}(t) = 1.0+\alpha\rho(t)(1+\beta\nu(t)/6)$, mặc định $\alpha{=}0.5$, $\beta{=}0.3$. Ma trận tương phản ngữ âm $6\times6$, $D_{\text{tone}}(a,b)\in[0,0.9]$, đo mức khác biệt cảm nhận giữa hai thanh; với lân cận $\pm2$-token $N(t)$,
 \begin{equation}
 f_{\text{contrast}}(t) = 1+\gamma\cdot\tfrac{1}{|N(t)|}\textstyle\sum_{n\in N(t)} D_{\text{tone}}(\text{tone}(t),\text{tone}(n)), \quad \gamma{=}0.4,
 \end{equation}
-và $\score{}_{\text{tone}}(t)=\weight{tone}(t)\times f_{\text{contrast}}(t)$. Ví dụ: \token{má} (\tone{sắc}) đứng cạnh \token{ma} (\tone{ngang}) và \token{mà} (\tone{huyền}) có điểm $\approx2.01$, gần gấp đôi điểm $\approx1.0$ của một hư từ trung tính về thanh điệu.
+và $\score{}_{\text{tone}}(t)=\weight{tone}(t)\times f_{\text{contrast}}(t)$. Ví dụ \token{má} (\tone{sắc}) cạnh \token{ma} (\tone{ngang}) và \token{mà} (\tone{huyền}) có điểm $\approx2{,}01$, gần gấp đôi $\approx1{,}0$ của hư từ trung tính.
 
-\textbf{Tín hiệu hình thái từ.} Mỗi token được tra từ điển và gán vào một trong 5 lớp --- \textsc{func} (hư từ, $\sim$35\%), \textsc{content} (thực từ, $\sim$50\%), \textsc{redup} (từ láy, $\sim$5\%), \textsc{compound} (từ ghép, $\sim$8\%), \textsc{sino} (từ Hán-Việt, $\sim$2\%) --- dùng từ điển đóng ($\sim$200 hư từ, $\sim$60 morpheme Hán-Việt) cho tra cứu $O(1)$. Mỗi lớp có hệ số bảo toàn ($0.40, 1.20, 0.60, 1.50, 1.50$ tương ứng) và tỉ lệ giữ lại $r_c$ ($0.30/0.85/0.50/0.95$ cho \textsc{func}/\textsc{content}/\textsc{redup}/\textsc{compound}) dùng để phân bổ ngân sách nén theo tỉ lệ, $B_c = B\cdot|T_c|r_c/\sum_{c'}|T_{c'}|r_{c'}$. Các cặp từ láy $(t_L,t_R)$ được phát hiện có điểm $t_L$ nhân $1.5$ và $t_R$ đặt lại $0.1$.
+\textbf{Tín hiệu hình thái.} Mỗi token được tra từ điển và gán vào 1 trong 5 lớp --- \textsc{func} (hư từ), \textsc{content} (thực từ), \textsc{redup} (từ láy), \textsc{compound} (từ ghép), \textsc{sino} (Hán-Việt) --- qua từ điển đóng ($\sim$200 hư từ, $\sim$60 morpheme Hán-Việt) cho tra cứu $O(1)$. Mỗi lớp có hệ số bảo toàn ($0{,}40, 1{,}20, 0{,}60, 1{,}50, 1{,}50$). Đây là tín hiệu duy nhất giúp ích đo được (Mục~5.3).
 
-\textbf{Tín hiệu perplexity từ mô hình có sẵn.} Khi có GPU, một mô hình ngôn ngữ nhân quả nhỏ có sẵn (135M--1.5B tham số, vd SmolLM2-135M hay Qwen2.5-0.5B, $\sim$0.3--1.0~GB ở INT4) chấm điểm token theo độ bất ngờ, $\score{}_{\text{ppl}}(t_i)=-\log P(t_i\mid t_{<i})$, theo cửa sổ trượt 512 token --- cùng nguyên lý LLMLingua~\cite{jiang2023llmlingua} nhưng mô hình nhỏ hơn $\sim$50 lần. Bộ tính điểm này không cần huấn luyện gì thêm; đây là một mô hình có sẵn, cắm-là-chạy.
+\textbf{Tín hiệu perplexity từ mô hình có sẵn.} Khi có GPU, một LM nhân quả nhỏ chấm token theo độ bất ngờ, $\score{}_{\text{ppl}}(t_i)=-\log P(t_i\mid t_{<i})$, theo cửa sổ trượt --- nguyên lý LLMLingua~\cite{jiang2023llmlingua}. Bộ này không cần huấn luyện gì thêm.
 
-\textbf{Phương pháp huấn luyện đề xuất: Phonological Consistency Loss.} Thay vì chỉ dựa vào bộ tính điểm có sẵn ở trên, chúng tôi đề xuất huấn luyện một SLM thuần Việt sao cho hidden states của nó \emph{mã hóa trực tiếp thanh điệu}, bằng cách thêm một mục tiêu phụ trợ vào quá trình tinh chỉnh LoRA chuẩn,
+\textbf{Phương pháp huấn luyện đề xuất: Phonological Consistency Loss.} Chúng tôi cũng huấn luyện một SLM thuần Việt sao cho hidden states \emph{mã hóa trực tiếp thanh điệu}, bằng cách thêm mục tiêu phụ trợ vào LoRA,
 \begin{equation}
 \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{LM}} + \lambda_{\text{tone}}\,\mathcal{L}_{\text{tone}}, \qquad
 \mathcal{L}_{\text{tone}} = \frac1N\sum_{i=1}^{N} \text{CE}\big(\text{MLP}(h_i),\, y_i^{\text{tone}}\big),
 \label{eq:phon}
 \end{equation}
-với $h_i$ là hidden state tại vị trí token \emph{đã nén} $i$, $y_i^{\text{tone}}\in\{0,\ldots,6\}$ là nhãn thanh điệu đúng (\tone{ngang} cộng 5 thanh có dấu), và $\text{MLP}$ là một bộ phân loại 3 lớp (Linear$\to$GELU$\to$LayerNorm$\to$Linear) được huấn luyện \emph{đồng thời} với LoRA adapter, không phải fit lại sau. Lúc suy diễn, chính bộ phân loại này được tái sử dụng làm \emph{tone probe}: điểm thanh điệu dựa-mô-hình cho token $t_i$ là $\score{}_{\text{tone-model}}(t_i) = 1.0 + \max_k \text{softmax}(\text{MLP}(h_i))_k$, tức token nào mô hình tự tin về thanh điệu thì được chấm điểm quan trọng hơn để giữ lại. Điều này khép kín vòng lặp giữa huấn luyện và suy diễn --- cùng một mục tiêu dạy mô hình bảo toàn thanh điệu cũng chính là tín hiệu dùng để chọn token --- khác với điểm thanh điệu dựa-từ-điển ở trên vốn không cần huấn luyện gì cả. Mục~5 báo cáo độ chính xác phân loại thanh điệu và perplexity của mô hình này trên tập hold-out qua ba lần huấn luyện; tone probe đã huấn luyện \textbf{chưa} thay thế bộ tính điểm có sẵn ở trên bên trong pipeline \method{LACC} đầu-cuối (Mục~6).
+với $h_i$ là hidden state lớp cuối tại vị trí token $i$, $y_i^{\text{tone}}\in\{0,\ldots,6\}$ lớp thanh điệu (\tone{ngang}, \tone{huyền}, \tone{sắc}, \tone{hỏi}, \tone{ngã}, \tone{nặng}, unknown), và $\text{MLP}$ bộ phân loại tuyến tính huấn luyện \emph{đồng thời} với LoRA adapter. Lúc suy diễn, chính bộ phân loại này làm \emph{tone probe}: $\score{}_{\text{tone-model}}(t_i) = 1.0 + \max_k \text{softmax}(\text{MLP}(h_i))_k$. Đây là một đóng góp về phương pháp huấn luyện thực sự (Mục~5.1--5.2), khác điểm thanh điệu dựa-từ-điển.
 
-\textbf{Độ phức tạp.} Tín hiệu thanh điệu và hình thái chạy $O(n)$ trên CPU, 0~VRAM; mỗi bộ tính điểm perplexity (có sẵn hoặc đã huấn luyện) là $O(n\cdot d^2)$ trên GPU; chuẩn hóa và chọn Top-$B$ chạy $O(n\log n)$. Tầng không-mô-hình chỉ cần \textbf{0~GB VRAM}; tầng nhẹ chỉ cần thêm $\sim$0.3--1.0~GB ngoài mô hình sinh văn bản.
+\textbf{Kiến trúc đo lường: ba mô hình, ba vai.} Phép đo downstream cố định phân vai. Một \emph{scorer} (Qwen3-4B + LoRA, mô hình ta train) gán điểm quan trọng token nhưng không sinh chữ. Một \emph{generator} (Qwen2.5-7B-Instruct, có sẵn, không train) đọc context đã nén và trả lời; một generator thứ hai (Qwen3-8B, tắt reasoning) kiểm tra kết luận không phải artifact của một bộ giải mã. Baseline LLMLingua và SnapKV dùng scorer Qwen2.5-0.5B có sẵn, và reference cho các task model-written do Qwen2.5-14B-Instruct viết. Chỉ tầng nén thay đổi giữa các nhánh; generator cố định. \emph{Vì bài toán là để tiết kiệm chi phí, đáng lưu ý là scorer 4B của ta nạp $\sim$8~GB weights chỉ để xếp hạng token, mà vẫn thua scorer 0.5B của baseline} (Mục~5.3).
 
 
 \section{VCC-Bench và Quy trình Đánh giá}
 
-\method{VCC-Bench} v1 (snapshot \texttt{2026-07-06}) hiện có \textbf{243 mẫu trên 5 tác vụ}: Long-Document QA (160, văn bản pháp luật/báo chí, 2K--32K token), Multi-turn Conversation (48), Cross-lingual Compression (18), Needle-in-Haystack (9), và Agent Tool-Calling (8) --- nội dung lấy từ Wikipedia tiếng Việt (CC~BY-SA~4.0), văn bản pháp luật nhúng sẵn (phạm vi công cộng), và template tổng hợp, mỗi file có checksum SHA-256 để phát hiện sai lệch. Quy mô này nhỏ hơn và nghiêng về Long-Document QA nhiều hơn so với thiết kế mục tiêu ban đầu (500/300/400/250/200); mở rộng các tác vụ còn thiếu là việc tương lai. Một \texttt{ExperimentConfig} dùng chung cố định seed \texttt{42} (Python/NumPy/PyTorch), một split cố định duy nhất \texttt{"full"}, các tỉ lệ nén chuẩn $\{2\times,4\times,8\times\}$, và giải mã greedy, đồng thời lưu \texttt{config.json}/\texttt{environment.json} (git commit, phiên bản dependency) cho mỗi lần chạy để truy nguyên được.
+\method{VCC-Bench} v2 có \textbf{614 mẫu trên 5 tác vụ}: Long-Document QA (300; span người viết UIT-ViQuAD2.0; ngữ cảnh median 21.660 ký tự), Needle-in-Haystack (120; dựng chính xác; median 45.696 ký tự), Summarization (120; reference do Qwen2.5-14B-Instruct viết), Cross-lingual (66), và Agent Tool-Calling (8). Theo loại reference: 300 span người viết, 180 model-written, 120 constructed-exact, 14 template tay. Mỗi file có checksum SHA-256, và một \texttt{ExperimentConfig} dùng chung cố định seed 42, các tỉ lệ chuẩn $\{2\times,4\times,8\times\}$, giải mã greedy, lưu git commit và phiên bản dependency mỗi lần chạy. Trong 120 mẫu needle, 60 mẫu nhúng decoy mất dấu (vd \viet{BAO MAT} cạnh \viet{BẢO MẬT} đúng) để tách riêng: nếu compressor làm mất dấu thì model có nhầm không.
 
-\textbf{Một lỗi độ đo đáng báo cáo.} \texttt{compute\_rouge\_l} khởi tạo \texttt{RougeScorer} mà không truyền tokenizer; tokenizer mặc định của thư viện loại bỏ mọi ký tự ngoài \texttt{[a-z0-9]}, bao gồm \emph{mọi} nguyên âm mang dấu thanh tiếng Việt (U+1EA0--U+1EF9). Do đó \viet{bàn}, \viet{bán}, \viet{bạn} --- ba từ khác nhau --- đều thành \texttt{['b','n']}, khiến ROUGE-L chấm 1,0 cho một đáp án sai chỉ khác đáp án đúng ở dấu thanh. Vì ROUGE-L chiếm 40\% điểm chất lượng tổng hợp, lỗi này âm thầm khiến mọi kết quả chất lượng trước đó mù trước chính hiện tượng bài báo này nói đến. Chúng tôi đã sửa (2026-08-20) bằng \texttt{VietnameseRougeTokenizer} giữ nguyên dấu thanh, tương tự cách LongBench~\cite{bai2023longbench} chấm tiếng Trung bằng jieba. \textbf{Mọi kết quả tính trước bản sửa này đều không hợp lệ và cần chạy lại}, đây là lý do bảng kết quả chất lượng đầy đủ trên VCC-Bench chưa có trong bài báo này (Mục~6).
+\textbf{Vì sao v2 thay v1.} v1 (243 mẫu) \emph{không đo được gì}: ở 208/243 mẫu (160/160 QA), \texttt{reference\_answer} chính là \texttt{context}, nên benchmark đang chấm ``tái tạo input,'' và median context chỉ $\sim$350 token --- không task nào thực sự dài. v2 nâng context lên 2K--32K token, thay QA bằng span người viết, mở needle thành grid $4\text{ độ dài}\times5\text{ độ sâu}\times6\text{ biến thể}$, và \textbf{cưỡng chế một invariant độ dài reference trong CI} để defect này không âm thầm quay lại.
+
+\textbf{Một lỗi độ đo đáng báo cáo.} \texttt{compute\_rouge\_l} khởi tạo \texttt{RougeScorer} không tokenizer; tokenizer mặc định loại mọi ký tự ngoài \texttt{[a-z0-9]}, bao gồm \emph{mọi} nguyên âm mang dấu thanh (U+1EA0--U+1EF9). Do đó \viet{bàn}, \viet{bán}, \viet{bạn} --- ba từ --- đều thành \texttt{['b','n']}, khiến ROUGE-L chấm 1,0 cho đáp án sai dấu. Vì ROUGE-L chiếm 40\% điểm chất lượng tổng hợp, lỗi này âm thầm khiến các độ đo chất lượng trước đó mù trước chính hiện tượng bài báo nghiên cứu. Chúng tôi sửa bằng \texttt{VietnameseRougeTokenizer} giữ dấu, tương tự cách LongBench~\cite{bai2023longbench} chấm tiếng Trung bằng jieba. Mọi kết quả dưới đây tính \emph{sau} bản sửa này; phụ lục liệt kê sáu defect khác (vd thiếu chat template, một cấp phát log-softmax 9,4~GB trong LLMLingua, một \texttt{exact\_match} so chuỗi thô luôn bằng 0 nhưng chiếm 40\% trọng số) đã sửa trước khi tin bất kỳ số chất lượng nào.
 
 
-\section{Báo Cáo Huấn Luyện và Đánh Giá Đến Thời Điểm Hiện Tại}
+\section{Kết quả}
 \label{sec:report}
 
-Chúng tôi tinh chỉnh \texttt{chronopt-research/vietnamese-gpt2-base} (125,6M tham số) bằng LoRA~\cite{hu2021lora} ($r{=}8$, $\alpha{=}16$; 1,18M tham số huấn luyện, 0,94\%), tối thiểu hóa causal-LM loss cộng $\lambda_{\text{tone}}{=}0.1$ lần Phonological Consistency Loss, trên một GPU NVIDIA GTX~1060 (6~GB), batch size 1, độ dài chuỗi 128, gradient accumulation 8, FP16.
+\subsection{Huấn luyện hoạt động: thang scorer}
 
-\textbf{Run~1 (vì sao phải mở rộng corpus).} Chỉ dùng corpus gốc 393 đoạn (3 epoch, mặc định), đánh giá trên 40 văn bản hold-out, tone accuracy trên token có dấu thanh chỉ đạt 16,6--19,6\% --- không phân biệt được với mức ngẫu nhiên $\sim$20\% cho 5 lớp thanh khác-\tone{ngang} (perplexity 51,57). Chúng tôi coi Run~1 là một phép chẩn đoán, không phải kết quả: 393 đoạn là corpus quá nhỏ để học thanh điệu vượt quá ngẫu nhiên.
-
-\textbf{Run 2--3 (mở rộng corpus).} Chúng tôi xây một corpus lớn hơn (UVW-2026, CC-BY-SA~4.0, + một tuyển tập thơ tiếng Việt, MIT) với split 90/10 cố định (seed 42). Run~2 dùng tỉ lệ mặc định 5.000 UVW-2026/556 thơ (5.556 đoạn); Run~3 mở rộng UVW-2026 gấp 10 lần ($\sim$22.200 đoạn tổng), giảm epoch từ 3 xuống 2 để giữ thời gian huấn luyện hợp lý. Bảng~\ref{tab:slm_train}--\ref{tab:slm_eval} báo cáo cấu hình và đánh giá hold-out, mỗi cột trên đúng split validation đã lưu của lần chạy đó.
+Chúng tôi tinh chỉnh bốn base Qwen3 (0.6B--8B) bằng LoRA~\cite{hu2021lora} ($r{=}8$, $\alpha{=}16$, dropout 0,05, bảy target module; 0,27--0,84\% tham số huấn luyện) cộng Phonological Consistency Loss ($\lambda_{\text{tone}}{=}0.1$), bf16, độ dài chuỗi 1024, effective batch 32, 1.200 optimizer step, seed 42, trên cụm 6$\times$H100. Cả bốn dùng \emph{cùng} một split hold-out (14.970 văn bản, 2.712.768 token được chấm thanh điệu) từ corpus Wikipedia tiếng Việt 149.693 đoạn (UVW-2026, CC~BY-SA~4.0; split 90/10, seed 42), nên Bảng~\ref{tab:ladder} là một đường scaling so sánh được, không phải bốn lần chạy rời rạc.
 
 \begin{table}[H]
 \centering
-\caption{Cấu hình huấn luyện SLM, Run 2--3 (mô hình gốc: \texttt{vietnamese-gpt2-base}, 125,6M).}
-\label{tab:slm_train}
-\begin{tabular}{lcc}
+\caption{Thang scorer: LoRA + Phonological Consistency Loss so với base đóng băng, trên cùng một split hold-out. Tỉ số perplexity (LoRA/base) với CI 95\% paired-bootstrap (2.000 resample, seed 42). Độ đo thanh điệu trên token có dấu; baseline majority 55,0\%, ngẫu nhiên cho 5 lớp khác-\tone{ngang} $\approx$20\%.}
+\label{tab:ladder}
+\begin{tabular}{lccccccc}
 \toprule
-\textbf{Tham số} & \textbf{Run 2} & \textbf{Run 3} \\
+\textbf{Base} & \textbf{PPL base} & \textbf{PPL LoRA} & \textbf{tỉ số} & \textbf{95\% CI} & \textbf{$\Delta$} & \textbf{Tone acc} & \textbf{Macro-F1} \\
 \midrule
-Corpus (UVW-2026 / thơ, split 90/10) & 5.000 / 556 & 20.000 / $\sim$2.200 \\
-Số văn bản train / validation & $\sim$5.000 / 555 & $\sim$20.000 / 2.218 \\
-Epochs (batch 1, len 128, accum.\ 8) & 3 & 2 \\
+Qwen3-0.6B & 26,00 & 16,28 & 0,6259 & [0,624, 0,628] & $-37{,}4\%$ & 0,8638 & 0,8626 \\
+Qwen3-1.7B & 17,85 & 11,07 & 0,6198 & [0,618, 0,622] & $-38{,}0\%$ & 0,9410 & 0,9401 \\
+Qwen3-4B   & 14,95 & 9,15  & 0,6116 & [0,610, 0,614] & $-38{,}8\%$ & \textbf{0,9629} & \textbf{0,9587} \\
+Qwen3-8B   & 11,71 & 7,75  & 0,6616 & [0,660, 0,663] & $-33{,}8\%$ & \textbf{0,9789} & \textbf{0,9757} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+LoRA giảm perplexity 34--39\% ở mọi thang, và macro-F1 thanh điệu tăng theo cỡ mô hình, cao hơn hẳn ngẫu nhiên và majority baseline; \tone{tone\_loss} rơi từ 0,22 xuống 0,007--0,024. Lỗi của probe không đều: nó tập trung ở cặp \tone{hỏi}$\leftrightarrow$\tone{ngã} (bị nhập trong phương ngữ Trung/Nam) và \tone{sắc}$\leftrightarrow$\tone{nặng} (cùng thanh cao/tắc thanh hầu), và \tone{ngã} --- lớp thưa nhất (2,7\% support) --- khó nhất, recall cải thiện nhiều nhất khi scale (0,908 ở 4B $\to$ 0,946 ở 8B). Model khôi phục một hiện tượng âm vị học thật, không phải bảng tra.
+
+\subsection{Lợi ích huấn luyện đặc hiệu cho tone (đối chứng probe)}
+
+Để tách ``học được thanh điệu'' khỏi ``ghi nhớ token identity,'' chúng tôi chạy một nghiên cứu $2{\times}2$ trên Qwen3-4B ($\{$LoRA, frozen base$\}\times\{$task thật, task đối chứng$\}$), trong đó task đối chứng gán nhãn thanh điệu ngẫu-nhiên-nhưng-nhất-quán theo mỗi \emph{loại} token, giải được chỉ bằng ghi nhớ identity (Bảng~\ref{tab:probe}).
+
 \begin{table}[H]
 \centering
-\caption{Đánh giá hold-out SLM (base và LoRA chỉ so sánh trong cùng split của một run).}
-\label{tab:slm_eval}
+\caption{Đối chứng probe (Qwen3-4B): macro-F1 trên token có dấu, 14.970 văn bản hold-out.}
+\label{tab:probe}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Biểu diễn} & \textbf{Task thật} & \textbf{Task đối chứng} & \textbf{Selectivity} \\
+\midrule
+Frozen base & 0,8601 & 0,7530 & $+0{,}1071$ \\
+$+$ LoRA ($\lambda_{\text{tone}}{=}0.1$) & \textbf{0,9226} & 0,7383 & \textbf{$+0{,}1843$} \\
+\textit{LoRA thêm vào} & \textbf{$+0{,}0625$} & \textbf{$-0{,}0147$} & $+0{,}0772$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+LoRA thêm cấu trúc đặc hiệu về tone (nó \emph{tăng} task thật và \emph{giảm} task đối chứng). Nhưng hai caveat giới hạn tuyên bố. Base đóng băng đã đạt 0,8601 trước mọi huấn luyện tone, và đối chứng đạt 0,7530 --- nên phần lớn thứ probe đọc là token identity. Và, về bản chất, nhãn thanh điệu là \emph{hàm tất định của token id}: một predictor tra bảng đạt 100\%. Nên probe đo ``còn bao nhiêu thông tin thanh điệu sót trong hidden state,'' không phải ``model có suy ra được thanh điệu không''; và ta vẫn thiếu ô $\lambda_{\text{tone}}{=}0$ cần để tách hoàn toàn công của tone loss khỏi domain adaptation tiếng Việt thông thường (Mục~6).
+
+\subsection{Downstream: giả thuyết thất bại}
+
+Bảng~\ref{tab:downstream} là phép đo cốt lõi --- metric headline mỗi task (QA: token-F1; Needle: recall; Cross-lingual: ROUGE-L; Agent: token-F1), generator Qwen2.5-7B-Instruct.
+
+\begin{table}[H]
+\centering
+\caption{Chất lượng downstream trên \method{VCC-Bench} (generator Qwen2.5-7B-Instruct). Method nén tốt nhất mỗi cột in \textbf{đậm}. $^{*}$ Dòng \texttt{none} trung bình trên 92 mẫu needle vừa cửa sổ; 28/120 vượt cửa sổ engine 32K (chỉ nhánh không nén), nên giá trị needle của nó trên subset dễ hơn --- so sánh method-với-method không bị ảnh hưởng.}
+\label{tab:downstream}
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Độ đo} & \textbf{R2 Base} & \textbf{R2 LoRA} & \textbf{R3 Base} & \textbf{R3 LoRA} \\
+\textbf{Method} & \textbf{QA} & \textbf{Needle} & \textbf{Cross-ling.} & \textbf{Agent} \\
 \midrule
-Perplexity $\downarrow$ & 159,81 & 124,26 & 148,10 & 110,76 \\
-$\Delta$ so với base (cùng split) & \multicolumn{2}{c}{$-22,2\%$} & \multicolumn{2}{c}{$-25,2\%$} \\
-Tone acc., token có dấu thanh $\uparrow$ & -- & \textbf{82,24\%} & -- & \textbf{92,94\%} \\
-Baseline majority-class & -- & 44,93\% & -- & 46,15\% \\
+\multicolumn{5}{l}{\emph{Nén 2$\times$}} \\
+Không nén & 0,634 & 0,993$^{*}$ & 0,390 & 0,260 \\
+LLMLingua & \textbf{0,442} & \textbf{0,742} & \textbf{0,326} & 0,262 \\
+SnapKV & 0,371 & 0,573 & 0,297 & 0,251 \\
+LACC-Morph & 0,277 & 0,296 & 0,249 & \textbf{0,280} \\
+LACC-Combined & 0,212 & 0,051 & 0,270 & 0,130 \\
+LACC-Tone & 0,122 & 0,023 & 0,292 & 0,194 \\
+Random dropout & 0,168 & 0,119 & 0,210 & 0,230 \\
+\midrule
+\multicolumn{5}{l}{\emph{Nén 4$\times$}} \\
+Không nén & 0,635 & 0,993$^{*}$ & 0,389 & 0,256 \\
+LLMLingua & \textbf{0,259} & \textbf{0,403} & 0,230 & 0,223 \\
+SnapKV & 0,222 & 0,353 & \textbf{0,237} & 0,104 \\
+LACC-Morph & 0,124 & 0,071 & 0,192 & 0,144 \\
+LACC-Combined & 0,105 & 0,018 & 0,154 & 0,141 \\
+LACC-Tone & 0,027 & 0,000 & 0,186 & 0,149 \\
+Random dropout & 0,044 & 0,007 & 0,162 & 0,097 \\
+\midrule
+\multicolumn{5}{l}{\emph{Nén 8$\times$}} \\
+Không nén & 0,635 & 0,993$^{*}$ & 0,389 & 0,256 \\
+LLMLingua & 0,145 & 0,199 & \textbf{0,157} & \textbf{0,233} \\
+SnapKV & \textbf{0,161} & \textbf{0,250} & 0,153 & 0,217 \\
+LACC-Morph & 0,080 & 0,046 & 0,114 & 0,117 \\
+LACC-Combined & 0,063 & 0,010 & 0,112 & 0,182 \\
+LACC-Tone & 0,014 & 0,000 & 0,119 & 0,157 \\
+Random dropout & 0,026 & 0,000 & 0,109 & 0,136 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Tone accuracy trên token có dấu thanh tăng đơn điệu theo quy mô corpus --- 16,6--19,6\% (Run~1, 393 văn bản) $\to$ 82,24\% (Run~2, 5.556 văn bản) $\to$ 92,94\% (Run~3, $\sim$22.200 văn bản) --- luôn cao hơn hẳn cả mức ngẫu nhiên ($\sim$20\%) lẫn baseline majority-class ($\sim$45--46\%), và LoRA mang lại cải thiện perplexity có thể tái lập so với base đóng băng, xác nhận độc lập trên hai split ($-22,2\%$, $-25,2\%$). Lưu ý: \texttt{trained\_slm/final} bị ghi đè giữa các lần chạy, nên Run~2 và Run~3 dùng \emph{hai} split validation khác nhau --- chỉ so sánh base-với-LoRA trong cùng run là hợp lệ, và chênh lệch perplexity base (159,81 so với 148,10) phản ánh split khác nhau, không phải mô hình gốc (đã đóng băng) thay đổi; công cụ xây corpus ghép các bài thơ ngắn để thỏa ngưỡng lọc độ dài, có thể thổi phồng perplexity tuyệt đối không liên quan chất lượng mô hình; và số optimizer step cùng VRAM tối đa của Run~3 không được ghi lại, một khoảng trống công cụ đo cho lần chạy tiếp theo.
-
-\textbf{Thử nghiệm sơ bộ trên VCC-Bench.} Tách biệt với phần trên, một pilot ba tầng sớm hơn (2026-07-07, trước cả cấu hình thống nhất ở trên lẫn bản sửa ROUGE-L) đã kiểm tra sơ bộ khả năng bảo toàn thanh điệu từ đầu đến cuối trên một tập con nhỏ (3--5 mẫu/tác vụ, chỉ tỉ lệ $\{2\times,4\times\}$), báo cáo Tone Preservation Rate (TPR) và tỉ lệ nén thực tế (CR) nhưng không có ROUGE-L/BLEU. Bảng~\ref{tab:pilot} lấy trung bình TPR trên cả 5 tác vụ; số liệu rule-based nhất quán (trong sai số) ở cả ba tầng phần cứng no-model, lightweight (+Qwen2.5-0.5B FP16), và full/INT4, nên chỉ hiển thị một giá trị đại diện mỗi phương pháp.
+Ba điều nổi bật. Thứ nhất, \textbf{LLMLingua và SnapKV thắng mọi biến thể \method{LACC}} trên task retrieval và QA ở mọi tỉ lệ. Thứ hai, \textbf{LACC-Tone ngang hoặc dưới ngẫu nhiên} trên QA và needle ở mọi nơi --- recall 0,000 trên needle ở 4$\times$ và 8$\times$. Thứ ba, cái dương còn lại là \textbf{LACC-Morph}, thắng ngẫu nhiên đáng kể (Bảng~\ref{tab:morph}); nó thậm chí dẫn đầu mọi method trên task agent 8 mẫu, dù $n$ đó không đỡ được kết luận nào. Chiến thắng thật duy nhất của tone là cross-lingual ở 2$\times$ (0,292, biến thể \method{LACC} tốt nhất) --- task duy nhất mà chuỗi bề mặt \emph{chính là} output, nên giữ dấu là phần của task chứ không phải chi phí.
 
 \begin{table}[H]
 \centering
-\caption{Thử nghiệm sơ bộ: TPR trung bình trên 5 tác vụ VCC-Bench (2026-07-07; tập con nhỏ).}
-\label{tab:pilot}
-\begin{tabular}{lcc}
+\caption{Ngân sách theo lớp hình thái vs.\ random dropout (generator Qwen2.5-7B-Instruct). Dấu được giữ trên generator thứ hai (Qwen3-8B): QA $+29/+37/+56\%$, needle $+119/+327/+516\%$, agent âm ở mọi tỉ lệ.}
+\label{tab:morph}
+\begin{tabular}{llccc}
 \toprule
-\textbf{Phương pháp} & \textbf{TPR @ 2$\times$} & \textbf{TPR @ 4$\times$} \\
+\textbf{Tỉ lệ} & \textbf{Task} & \textbf{Morph} & \textbf{Random} & \textbf{Gain} \\
 \midrule
-Không nén / baseline ngẫu nhiên & 0,51--0,52 & 0,29 \\
-Chỉ morphology (tầng no-model) & 0,474 & 0,249 \\
-Chỉ perplexity ngoài (tầng lightweight) & 0,545 & 0,316 \\
-Model-based tone (tầng full/INT4)$^{*}$ & 0,609 & 0,394 \\
-\textbf{Rule-based tone (\method{LACC})} & \textbf{0,960--0,963} & \textbf{0,538--0,541} \\
-\textbf{Rule-based combined (tone+morph)} & \textbf{0,768--0,772} & \textbf{0,533--0,541} \\
+2$\times$ & QA     & 0,277 & 0,168 & \textbf{$+65\%$} \\
+2$\times$ & Needle & 0,296 & 0,119 & \textbf{$+150\%$} \\
+4$\times$ & QA     & 0,124 & 0,044 & \textbf{$+182\%$} \\
+4$\times$ & Needle & 0,071 & 0,007 & $+924\%$ \\
+8$\times$ & QA     & 0,080 & 0,026 & $+211\%$ \\
+8$\times$ & Agent  & 0,117 & 0,136 & $-14\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-{\small $^{*}$Tỉ lệ nén thực tế thấp hơn mục tiêu (1,81$\times$/3,43$\times$), hoàn toàn do tác vụ needle-in-haystack, nơi bộ tính điểm cửa sổ trượt nén chưa đủ với ngữ cảnh rất dài ($\ge$32K token) trong pilot này --- một vấn đề kỹ thuật còn mở, không phải đặc tính chung của model-based scoring.}
 
-Tín hiệu thanh điệu rule-based đơn lẻ gần như tăng gấp đôi TPR trung bình so với baseline không nén/ngẫu nhiên ở 2$\times$ (0,96 so với 0,51--0,52) và ở 4$\times$ (0,54 so với 0,29), với 0 VRAM thêm; morphology đơn lẻ không giúp ích cho TPR (nó tối ưu nội dung ngữ nghĩa, không phải ngữ âm), vì vậy \emph{combined} thấp hơn chỉ-tone dưới trọng số mặc định bằng nhau của Công thức~\ref{eq:combined}.
+\subsection{Ablation và calibration: blend làm hại, trọng số tone về 0}
 
-\textbf{Các mốc kỹ thuật.} Song song với các kết quả trên: một pipeline CI (lint $\to$ test $\to$ CPU smoke test $\to$ checksum dataset) chạy trên mọi push/PR, hoàn toàn CPU; \texttt{ExperimentConfig} thống nhất và lưu config/environment (Mục~4); một cài đặt Tone Preservation Rate duy nhất, chuẩn hóa, thay cho công thức tạm bợ của pilot tháng 7; tài liệu nguồn gốc dữ liệu và checksum đầy đủ; bản sửa ROUGE-L (Mục~4); một công cụ xây corpus huấn luyện lớn hơn và một tác vụ QA downstream thật từ UIT-ViQuAD2.0, cả hai đã cài đặt nhưng chưa có số liệu báo cáo; và một nghiên cứu đối chứng tone probe (frozen-base so với LoRA) để tách bạch tín hiệu thanh điệu LoRA thực sự thêm được bao nhiêu, chưa chạy xong.
+Tách blend thành các tín hiệu ở 4$\times$ (Bảng~\ref{tab:ablation}) cho thấy điểm combined thua tín hiệu perplexity \emph{đơn lẻ} trên mọi task trừ task agent 8 mẫu. Một sweep calibration 30 nhánh trên dev split đặt điểm tối ưu tại $w_{\text{tone}}{=}0$, $\alpha{=}0{,}25$, $\gamma{=}0{,}2$: chất lượng cao nhất (0,134) đúng ở $w_{\text{tone}}{=}0$, còn TPR cao nhất (0,493) trùng với chất lượng \emph{thấp nhất} (0,050). Metric mà paper đề xuất tối ưu bị chính sweep của paper đẩy về trọng số 0.
+
+\begin{table}[H]
+\centering
+\caption{Ablation tín hiệu ở 4$\times$ (generator Qwen2.5-7B-Instruct).}
+\label{tab:ablation}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{QA} & \textbf{Needle} & \textbf{Cross-ling.} & \textbf{Agent} \\
+\midrule
+LACC-Combined & 0,118 & 0,214 & 0,145 & \textbf{0,244} \\
+Chỉ $w_{\text{ppl}}$ & \textbf{0,253} & \textbf{0,494} & 0,226 & 0,236 \\
+Chỉ $w_{\text{tone}}$ & 0,113 & 0,010 & 0,189 & 0,163 \\
+Chỉ $w_{\text{morph}}$ & 0,184 & 0,216 & \textbf{0,226} & 0,177 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{A/B có kiểm soát: tín hiệu tone học-được vs.\ rule}
+
+Bằng chứng sắc nhất giữ nguyên SLM (Qwen3-4B) và chỉ đổi \emph{nguồn} tín hiệu thanh điệu --- probe đã train vs.\ rule tra từ điển --- trên 120 mẫu, paired bootstrap (Bảng~\ref{tab:ab}).
+
+\begin{table}[H]
+\centering
+\caption{A/B có kiểm soát: probe đã train $-$ rule tra từ điển, cùng SLM, paired bootstrap.}
+\label{tab:ab}
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Tỉ lệ} & \textbf{Metric} & \textbf{$\Delta$ (probe$-$rule)} & \textbf{95\% CI} & \textbf{$p$} & \textbf{win-rate} & \textbf{sig.} \\
+\midrule
+2$\times$ & TPR      & $-0{,}246$ & [$-0{,}251,-0{,}241$] & 0,000 & 0\% & \textbf{yes} \\
+2$\times$ & token-F1 & $+0{,}086$ & [$+0{,}028,+0{,}146$] & 0,003 & 76\% & \textbf{yes} \\
+2$\times$ & ROUGE-L  & $+0{,}082$ & [$+0{,}024,+0{,}142$] & 0,004 & 75\% & \textbf{yes} \\
+4$\times$ & TPR      & $-0{,}136$ & [$-0{,}140,-0{,}133$] & 0,000 & 0\% & \textbf{yes} \\
+4$\times$ & token-F1 & $+0{,}016$ & [$-0{,}026,+0{,}060$] & 0,459 & 86\% & $\cdot$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Probe học được giữ tone \emph{kém hơn} heuristic (mọi delta TPR âm và significant, win-rate 0\%) nhưng trả lời \emph{tốt hơn} ở 2$\times$ (cả hai delta chất lượng significant, CI loại trừ 0). Ở 4$\times$ hiệu ứng chất lượng nhỏ và không còn significant dù win-rate 86\% --- nhất quán về dấu, phương sai lớn. Đây là phát biểu sạch nhất của nghịch lý: thành phần tối đa hóa bảo toàn thanh điệu chính là thành phần trả giá bằng chất lượng.
+
+\subsection{Chi phí}
+
+Ở 4$\times$ (trung bình benchmark), tỉ lệ nén thực tế, latency, và VRAM ở Bảng~\ref{tab:cost}. Các tầng \method{LACC} chạy ở 0~GB VRAM, nhưng cấu hình cửa sổ trượt hiện tại (window 512, stride 256) tự làm hại: trên needle 32K, nhánh tone-probe đã train mất tới 18,4~s một mẫu, và việc nén tốn nhiều thời gian hơn phần generator tiết kiệm được khi đọc full context. Latency LACC-Morph bị chi phối bởi word segmenter pure-Python, nên chưa phải phép đo hiệu năng công bằng, và chưa claim lợi thế chi phí.
+
+\begin{table}[H]
+\centering
+\caption{Chi phí ở 4$\times$ (trung bình benchmark).}
+\label{tab:cost}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{CR thực tế} & \textbf{Latency} & \textbf{VRAM} \\
+\midrule
+Không nén & 1,00$\times$ & 2,4~ms & --- \\
+Random dropout & 4,00$\times$ & 3,5~ms & 0~GB \\
+LLMLingua & 4,70$\times$ & 73,8~ms & $\sim$1~GB \\
+SnapKV & 4,00$\times$ & 503,8~ms & $\sim$1~GB \\
+LACC-Tone & 4,00$\times$ & 105,5~ms & \textbf{0~GB} \\
+LACC-Morph & 4,02$\times$ & 234,6~ms & \textbf{0~GB} \\
+LACC-Combined & 4,00$\times$ & 179,2~ms & \textbf{0~GB} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 
 \section{Thảo luận, Hạn chế và Hướng phát triển}
 
-Kết quả pilot (Bảng~\ref{tab:pilot}) minh họa cụ thể cho vấn đề P1: nén mù ngôn ngữ loại token có dấu thanh với tỉ lệ gần như chọn ngẫu nhiên (TPR $\approx$0,51--0,52), trong khi tín hiệu thanh điệu bảo toàn ở mức $\approx$0,96. Với vấn đề P2, ngân sách theo tỉ lệ lớp chỉ giữ 30\% token hư từ so với 85\% token thực từ --- với văn bản 1.000 token (350/500/150 hư từ/thực từ/khác) nén xuống 250 token, một phương pháp mù ngôn ngữ giữ $\sim$87 hư từ trong khi \method{LACC} chỉ giữ $\sim$35, chuyển $\sim$52 token sang thực từ; đây là lập luận toán ngân sách, chưa phải hiệu ứng đầu-cuối đã đo trên VCC-Bench. Kiến trúc được thiết kế để mở rộng (ma trận thanh điệu cho các ngôn ngữ có thanh khác, vd tiếng Trung/Thái; bộ phân loại hình thái cho các ngôn ngữ đơn lập khác), nhưng chưa được kiểm chứng ngoài tiếng Việt.
+\textbf{Vì sao P1 thất bại.} Một mẫu làm rõ điều này. Trên \texttt{viquad\_qa\_0002} ở 2$\times$, LACC-Tone giữ 93,2\% token có dấu --- gần đúng mục tiêu của nó --- nhưng xóa câu chứa đáp án và trả lời ``Không đủ thông tin'' (token-F1 0,000), trong khi LLMLingua trả lời đúng. Trên 300 mẫu QA, 53 mẫu cùng dạng (không-nén $>$0,9, LLMLingua $>$0,5, tone-aware $\to$ 0). ``Giữ được dấu'' và ``giữ được thông tin cần thiết'' là hai mục tiêu khác nhau, và wave 1 tối ưu cái thứ nhất. Hai tín hiệu gộp dưới một cái tên ``language-aware'' hành xử trái ngược: morphology (hạ trọng số hư từ) giúp ở 0~GB, còn tone-contrast làm hại trên mọi task định vị thông tin. Tiền đề đúng một nửa, và đúng ở nửa không ai đặt cược.
 
-Hạn chế chính, theo mức độ cấp thiết: (1) đánh giá chất lượng VCC-Bench đầy đủ (243 mẫu $\times\{2,4,8\}\times$, ROUGE-L/BLEU/EM) chưa chạy lại kể từ bản sửa ROUGE-L, nên được báo cáo là đang chờ, không bịa số liệu; (2) bộ tính điểm SLM thuần Việt đã huấn luyện và probe nhưng chưa thay thế vào pipeline \method{LACC} thật, nên chưa có hiệu ứng chất lượng đầu-cuối đã đo; (3) pilot (Bảng~\ref{tab:pilot}) quy mô nhỏ, đã cũ, dùng công thức TPR thô hơn độ đo canonical; (4) bộ tính điểm model-based nén chưa đủ với ngữ cảnh dài trong pilot (một lỗi còn mở); (5) tín hiệu thanh điệu/hình thái phụ thuộc từ điển đóng, sẽ phân loại sai từ mới hoặc từ mượn; (6) 243 mẫu VCC-Bench nghiêng về Long-Document QA, needle-in-haystack (9) và agent tool-calling (8) cần mở rộng; (7) thuật toán cần thấy toàn bộ ngữ cảnh trước khi nén, chưa có biến thể streaming. Ưu tiên ngắn hạn: chạy lại đánh giá VCC-Bench đầy đủ và ablation study dưới pipeline đã sửa lỗi; cắm tone probe SLM đã tinh chỉnh LoRA vào bộ nén thật và đo tác động lên chất lượng nén; hoàn thành nghiên cứu đối chứng tone probe; mở rộng các tác vụ còn thiếu mẫu; và sửa vấn đề nén chưa đủ của bộ tính điểm model-based với ngữ cảnh dài.
+\textbf{Đối chiếu với tuyên bố gốc.} Bảng~\ref{tab:reconcile} ánh xạ giả thuyết và đóng góp ban đầu với những gì đo được.
+
+\begin{table}[H]
+\centering
+\caption{Tuyên bố gốc vs.\ kết quả wave 1.}
+\label{tab:reconcile}
+\begin{tabular}{p{0.10\linewidth}p{0.44\linewidth}p{0.38\linewidth}}
+\toprule
+\textbf{Claim} & \textbf{Tuyên bố} & \textbf{Kết quả} \\
+\midrule
+P1 & Mất thông tin thanh điệu là vấn đề của nén & \textbf{Bác bỏ.} TPR nghịch biến với chất lượng \\
+P2 & Lãng phí budget cho hư từ & \textbf{Xác nhận.} Morph thắng random 65--182\% \\
+P3 & Token inflation (1.5--2.0$\times$) & \textbf{Chưa đo} trong wave 1 \\
+C1 & LACC blend 3 tín hiệu & \textbf{Blend thua} tín hiệu perplexity đơn; calibration đặt $w_{\text{tone}}{=}0$ \\
+C2 & Phonological Consistency Loss & \textbf{Học cấu trúc thật, đặc hiệu tone}, nhưng thiếu ô control $\lambda{=}0$ \\
+C3 & VCC-Bench & \textbf{Đóng góp còn lại mạnh nhất} \\
+C4 & Báo cáo train/eval & \textbf{Hoàn thành} 4 thang, có CI \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Bài học rộng hơn.} (i) Scorer tốt hơn không phải compressor tốt hơn: scorer 4B đã fine-tune đạt QA 0,239 ở 2$\times$ trong khi scorer 0,5B của LLMLingua đạt 0,442 --- đòn bẩy nằm ở thuật toán chọn token (perplexity theo cửa sổ, phân bổ budget lặp), không ở kích thước hay chất lượng scorer. (ii) Xếp hạng bất biến theo generator: hai generator cho cùng thứ tự, nên kết luận không phải artifact một bộ giải mã. (iii) Nén tiếng Việt long-context chỉ dùng được ở 2$\times$; ở 4$\times$ method tốt nhất còn 0,259 QA-F1 so với 0,635 không nén, và không method nào thoát vách này. (iv) Kỷ luật đo lường, không phải method, tạo ra kết quả: invariant độ dài reference và cơ chế đếm failure riêng biệt vừa bắt được defect v1 vừa caveat \texttt{none}-needle; benchmark cũ \emph{không thể} phát hiện gì vì 86\% mẫu chấm điểm tái tạo input.
+
+\textbf{Hạn chế.} (1) Ô control $\lambda_{\text{tone}}{=}0$ chưa chạy, nên chưa quy hoàn toàn gain $+0{,}0625$ của probe cho tone loss thay vì domain adaptation tiếng Việt --- và vì \tone{tone\_loss} rơi xuống $\sim$0,020 ở step 300, tone term chỉ đóng góp $\sim$0,09\% tổng loss cho $\sim$75\% cuối quá trình train, nên phần lớn ``tone-aware training'' là domain adaptation. (2) $\lambda_{\text{tone}}$ chưa từng được sweep (cố định 0,1 ở cả bốn thang). (3) Task phụ của probe giải được tầm thường bằng tra token-id (control đạt 0,7530). (4) Lệch train/eval về độ dài: train ở seq 1024, eval ở 2K--32K. (5) Baseline needle không-nén trên subset 92 mẫu dễ hơn (28/120 vượt cửa sổ 32K). (6) Agent tool-calling chỉ 8 mẫu. (7) Nhánh probe đã train trên full 614 mẫu bị cắt giữa chừng, nên method đó chỉ có headline trên A/B 120 mẫu. Tín hiệu tone/morphology cũng phụ thuộc từ điển đóng, phân loại sai từ mới hoặc từ mượn.
+
+\textbf{Hướng phát triển.} Hai tín hiệu mạnh nhất nằm ở hai method khác nhau --- perplexity (LLMLingua) và morphology --- và chưa ai đo cùng nhau; scorer perplexity với phân bổ budget theo tỉ lệ lớp là method hiển nhiên tiếp theo. Query-conditioning (perplexity có nhận thức câu hỏi/contrastive) nhắm trực tiếp thất bại ``mất câu chứa đáp án'' và vắng mặt ở mọi nhánh hiện tại. Nếu giữ hướng tone, nên scope về task bề mặt (dịch, chuyển tự, trích dẫn nguyên văn, sinh danh từ riêng) --- nơi duy nhất tone không đứng cuối.
 
 
 \section{Kết luận}
 
-Chúng tôi trình bày \method{LACC}, một khung nén ngữ cảnh có nhận thức ngôn ngữ kết hợp tín hiệu tương phản thanh điệu, lớp hình thái, và perplexity tùy chọn từ mô hình ngoài để bảo vệ thông tin đặc thù tiếng Việt khi nén, từ 0~GB VRAM đến sinh văn bản INT4 7B đầy đủ. Chúng tôi báo cáo, đầy đủ, hiện trạng của hai nỗ lực đi kèm: \method{VCC-Bench} --- bộ benchmark nén tiếng Việt 243 mẫu, 5 tác vụ, có tài liệu nguồn gốc dữ liệu; và một báo cáo huấn luyện/đánh giá cho một bộ tính điểm SLM tiếng Việt có nhận thức thanh điệu, trong đó mở rộng corpus huấn luyện $\sim$56 lần (393$\to$22.200 văn bản) đã đưa độ chính xác trên token có dấu thanh từ mức ngẫu nhiên (16,6\%) lên 92,9\%, cùng cải thiện perplexity 22--25\% có thể tái lập so với base đóng băng. Chúng tôi cũng phát hiện và sửa một lỗi ROUGE-L khiến mọi đánh giá chất lượng trước đó mù trước dấu thanh tiếng Việt --- một phát hiện chúng tôi cho là quan trọng để báo cáo không kém một kết quả tích cực. Tín hiệu thanh điệu rule-based đơn lẻ gần như tăng gấp đôi Tone Preservation Rate trung bình so với baseline không nén/ngẫu nhiên trong một thử nghiệm sơ bộ (0,96 so với 0,51--0,52 ở 2$\times$). Bước tiếp theo là một đánh giá VCC-Bench quy mô đầy đủ đã sửa lỗi và việc cắm bộ tính điểm SLM đã huấn luyện vào pipeline nén thật.
+Chúng tôi đề xuất \method{LACC}, một khung nén ngữ cảnh có nhận thức ngôn ngữ, và kiểm định tiền đề trung tâm --- rằng bảo toàn thanh điệu tiếng Việt giúp nén tốt hơn --- bằng thí nghiệm có kiểm soát trên \method{VCC-Bench} v2 (614 mẫu, hai generator, CI bootstrap). Tiền đề không đứng được: bảo toàn thanh điệu nghịch biến với chất lượng câu trả lời, nén tone-aware thấp hơn ngẫu nhiên trên task định vị thông tin, calibration đẩy trọng số tone về 0, và LLMLingua/SnapKV thắng mọi biến thể \method{LACC}. Cái còn lại đáng báo cáo tự thân --- ngân sách theo lớp hình thái (thắng ngẫu nhiên 65--182\% ở 0~GB VRAM), \method{VCC-Bench} như một benchmark nén tiếng Việt có tài liệu nguồn gốc, và một phương pháp huấn luyện chứng minh được học cấu trúc đặc hiệu tone (giảm perplexity 34--39\% ở bốn thang; $+0{,}0625$ macro-F1 task thật vs.\ $-0{,}0147$ task đối chứng) dù cấu trúc đó không phải thứ cải thiện nén. Một A/B có kiểm soát làm nghịch lý chính xác: probe học được giữ tone kém hơn heuristic nhưng trả lời tốt hơn. Chúng tôi cũng phát hiện và sửa một lỗi ROUGE-L mù trước dấu thanh tiếng Việt --- một phát hiện chúng tôi cho là quan trọng để báo cáo không kém một kết quả tích cực. Bước tiếp theo là kết hợp perplexity với ngân sách hình thái, thêm chấm điểm có điều kiện câu hỏi, và hoàn thành ô control $\lambda_{\text{tone}}{=}0$ còn thiếu.
 
 
 \begin{credits}

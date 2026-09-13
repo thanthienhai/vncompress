@@ -358,11 +358,21 @@ def load_scorer(
     device: str = 'cuda',
     dtype: torch.dtype = torch.float32,
     load_4bit: bool = False,
+    probe_kind: str = 'tone',
 ):
     """Load the SLM that supplies LACC's perplexity signal, and -- if
-    `tone_probe_path` is given -- the trained tone probe (see
-    linguistics.PhonologicalConsistencyLoss) that supplies its trained-model
-    tone signal (compression.LACCScorer wraps the result).
+    `tone_probe_path` is given -- a trained probe that supplies its
+    trained-model signal (compression.LACCScorer wraps the result, storing the
+    probe in its `tone_probe` slot regardless of kind).
+
+    `probe_kind` selects the probe class: 'tone'
+    (linguistics.PhonologicalConsistencyLoss, the wave-1 tone probe) or
+    'relevance' (linguistics.RelevanceConsistencyLoss, the wave-2 E4
+    query-relevance probe). It is auto-upgraded to 'relevance' when the probe's
+    sidecar meta json says `probe_kind: relevance`, so passing a
+    `relevance_probe.pt` Just Works. Both classes share the same
+    `.tone_classifier` / `.score_importance` surface, so LACC consumes either
+    through the identical `tone_source='model'` path.
 
     `adapter_dir` is a LoRA adapter directory produced by
     `train.py --mode slm` (e.g. `models/slm/final`), or a plain HuggingFace
@@ -412,9 +422,16 @@ def load_scorer(
 
     tone_probe = None
     if tone_probe_path:
-        from .linguistics import PhonologicalConsistencyLoss
+        from .linguistics import PhonologicalConsistencyLoss, RelevanceConsistencyLoss
 
-        meta_path = _os.path.join(_os.path.dirname(_os.path.abspath(tone_probe_path)), 'tone_probe_meta.json')
+        # Meta sidecar sits next to the probe: '<name>.pt' -> '<name>_meta.json'
+        # (covers both tone_probe.pt/tone_probe_meta.json and
+        # relevance_probe.pt/relevance_probe_meta.json).
+        probe_base = _os.path.splitext(_os.path.basename(tone_probe_path))[0]
+        meta_dir = _os.path.dirname(_os.path.abspath(tone_probe_path))
+        meta_path = _os.path.join(meta_dir, f'{probe_base}_meta.json')
+        if not _os.path.exists(meta_path):  # back-compat with the original fixed name
+            meta_path = _os.path.join(meta_dir, 'tone_probe_meta.json')
         if _os.path.exists(meta_path):
             import json as _json
 
@@ -422,18 +439,24 @@ def load_scorer(
                 meta = _json.load(_f)
             if meta.get('base_model') and base_name and meta['base_model'] != base_name:
                 raise ValueError(
-                    f"tone_probe_meta.json says this probe was trained on "
+                    f"{_os.path.basename(meta_path)} says this probe was trained on "
                     f"{meta['base_model']!r}, but adapter_dir resolves to base model "
                     f"{base_name!r}. Pair the probe with its own adapter."
                 )
-        tone_probe = PhonologicalConsistencyLoss(hidden_dim=model.config.hidden_size, lambda_tone=0.0)
+            if meta.get('probe_kind') == 'relevance':
+                probe_kind = 'relevance'
+
+        if probe_kind == 'relevance':
+            tone_probe = RelevanceConsistencyLoss(hidden_dim=model.config.hidden_size, lambda_relevance=0.0)
+        else:
+            tone_probe = PhonologicalConsistencyLoss(hidden_dim=model.config.hidden_size, lambda_tone=0.0)
         state = torch.load(tone_probe_path, map_location='cpu', weights_only=True)
         probe_dim = state['tone_classifier.0.weight'].shape[1]
         if probe_dim != model.config.hidden_size:
             raise ValueError(
-                f"Tone probe hidden dim ({probe_dim}) does not match the SLM's hidden "
+                f"Probe hidden dim ({probe_dim}) does not match the SLM's hidden "
                 f"size ({model.config.hidden_size}). This probe was trained on a "
-                f"different base model -- pass the tone_probe.pt that belongs to {base_name}."
+                f"different base model -- pass the probe .pt that belongs to {base_name}."
             )
         tone_probe.load_state_dict(state)
         tone_probe = tone_probe.to(device=device, dtype=dtype).eval()
