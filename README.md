@@ -71,8 +71,9 @@ Sau khi wave 1 bác bỏ giả thuyết tone-aware, wave 2 thêm hai hướng hu
 
 ```bash
 # E4 — probe dự đoán liên-quan-câu-hỏi (thay cho probe thanh điệu), freeze base, chỉ train probe
+# --data-path phải là corpus TRAIN (không phải vcc_bench_v1/v2.json -- đó là benchmark đánh giá)
 python scripts/train_relevance_probe.py --adapter-dir models/qwen3/final \
-    --data-path data/benchmark/vcc_bench_v2.json --output-dir models/qwen3 --load-4bit
+    --data-path data/benchmark/training_corpus_v1.json --output-dir models/qwen3 --load-4bit
 #   -> models/qwen3/relevance_probe.pt (+ relevance_probe_meta.json), cắm vào LACC qua tone_source='model'
 
 # E6 — encoder token-classification compressor (LLMLingua-2 / PhoBERT), distill nhãn keep/drop từ teacher

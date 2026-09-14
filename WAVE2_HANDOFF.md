@@ -67,8 +67,10 @@ probe nên cắm thẳng vào `LACCCompressor(tone_source='model')`.
 
 ```bash
 python scripts/train_relevance_probe.py \
-  --adapter-dir models/qwen3/final --data-path data/benchmark/vcc_bench_v2.json \
+  --adapter-dir models/qwen3/final --data-path data/benchmark/training_corpus_v1.json \
   --output-dir models/qwen3 --load-4bit        # freeze base, chỉ train probe (rẻ)
+  # KHÔNG trỏ --data-path vào vcc_bench_v1/v2.json ở đây -- đó là benchmark đánh giá
+  # (dùng ở §1 phía trên), train trên chính benchmark là nhiễm chéo train/test.
 ```
 
 Rồi A/B đúng khuôn wave 1 (probe-relevance vs probe-tone vs rule) bằng

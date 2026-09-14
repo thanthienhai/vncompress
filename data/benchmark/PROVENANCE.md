@@ -8,13 +8,18 @@ Resolves P1 issue "data: document dataset provenance và versioning".
 |---|---|---|
 | **Raw** | `wikipedia_vi_raw.json` | `scripts/fetch_vietnamese_data.py` (fetches live from Wikimedia API) |
 | **Derived** | `vcc_bench_agent_tool_calling.json`, `vcc_bench_cross_lingual.json`, `vcc_bench_long_document_qa.json`, `vcc_bench_multi_turn_conversation.json`, `vcc_bench_needle_in_haystack.json`, `vcc_bench_v1.json` (merge of the five task files) | `scripts/build_vcc_bench.py`, from `wikipedia_vi_raw.json` + embedded legal texts + generated synthetic templates |
+| **Derived (v2)** | `vcc_bench_v2.json` | `scripts/build_vcc_bench_v2.py`, from `vcc_bench_v1.json` (carries over long_document_qa/multi_turn_conversation/agent_tool_calling/cross_lingual) + `wikipedia_vi_raw.json` (new needle-in-haystack + multi_hop/referential long_document_qa) — see dedicated section below |
 | **Derived (training)** | `training_corpus_v1.json` (not committed by default -- generated on demand, see below) | `scripts/build_training_corpus.py`, from `undertheseanlp/UVW-2026` + `bigscience-data/roots_vi_vietnamese_poetry` (both external HF datasets, not derived from `wikipedia_vi_raw.json`) |
 | **Derived (eval)** | `vcc_bench_uit_viquad_qa.json` (not committed by default -- generated on demand) | `scripts/build_viquad_eval.py`, from `taidng/UIT-ViQuAD2.0` (external HF dataset) |
 
 `vcc_bench_v1.json` is the file the evaluation scripts (`run_benchmark.py`,
 `run_ablation.py`) load by default; the five per-task files are the same
 samples split out individually and are useful for running/inspecting a
-single task in isolation.
+single task in isolation. `vcc_bench_v2.json` (see below) is available for
+explicit use via `--data-path data/benchmark/vcc_bench_v2.json`; the
+default was deliberately left at v1 (this rebuild's scope was fixing the
+needle confound and adding QA subsets, not migrating every script's
+default eval file).
 
 ## Sources, license, and snapshot date per file
 
@@ -111,6 +116,85 @@ single task in isolation.
   `CHECKSUMS.json` in the **same commit** -- CI runs
   `scripts/checksum_datasets.py` in verify mode, which fails if
   `CHECKSUMS.json` references a file that isn't actually tracked in git.
+
+### `vcc_bench_v2.json` (derived, frozen)
+
+Fixes the confound documented in `docs/build_VCC-Bench v2.md`: v1's 9-sample
+needle-in-haystack set was entirely alphanumeric payloads (tone density
+rho=0 for every needle), so it could not separate "compression drops
+undiacriticized tokens" from "tone hurts retrieval in general" — there was
+no diacritic-bearing needle to compare against.
+
+- **Version**: `2.0.0` (`metadata.version`). **Built by**:
+  `python scripts/build_vcc_bench_v2.py`.
+- **Total samples**: 414 (`metadata.total_samples`), across the same 5
+  tasks as v1.
+- **`needle_in_haystack`: 120 samples (up from 9)**, fully regenerated —
+  40 haystacks (`haystack_id`, `hay_0000`..`hay_0039`) x 3 controlled needle
+  groups:
+  - **A — no diacritic** (codes/IPs/dates/amounts; reproduces the v1
+    condition): 40 samples, `needle_has_diacritic=false` for all.
+  - **B — has diacritic** (Vietnamese person names / place names / idiomatic
+    phrases — independently authored content, *not* group-A strings with
+    diacritics stripped back on): 40 samples, `needle_has_diacritic=true`.
+  - **C — mixed** (one sentence carrying both a code and a name/place): 40
+    samples, `needle_has_diacritic=true`.
+  - Each haystack's base text (built once, before any needle is inserted)
+    is shared verbatim across its A/B/C triple, and insert position
+    (beginning/middle/end, split 14/13/13) is likewise fixed per
+    `haystack_id` — only the needle sentence differs within a triple. Every
+    payload's diacritic status is measured with
+    `vncompress.linguistics.VietnameseToneAnalyzer.compute_tone_density`
+    (the actual w_tone input), not assumed from category.
+  - Context length: target 30,000 chars per haystack (`TARGET_CONTEXT_LEN`
+    in the build script); actual spread across all 120 samples was 0.19%
+    (min 30,033 / max 30,089 chars) — well under the <5% requirement.
+  - **Determinism / seed**: a single `random.Random(20260914)` instance
+    (module constant `SEED` in `scripts/build_vcc_bench_v2.py`; the digits
+    are the authoring date), never the global `random` module — re-running
+    the script reproduces this exact file (modulo `metadata.date`, stamped
+    at build time). This is a separate RNG stream from
+    `build_vcc_bench.py`'s `random.seed(42)`, so this build never depends on
+    what that module's `main()` did or didn't consume first.
+  - **PII**: all names/places/codes/accounts are fabricated for this
+    benchmark; every needle sample carries `synthetic_pii: true`.
+  - **Excluded from any future training corpus**: `metadata.needle_haystack_ids`
+    lists all 40 `haystack_id` values built from `wikipedia_vi_raw.json`
+    paragraphs — if that raw file (or a superset of it) is ever used to
+    build a *training* corpus, cross-reference this list so no needle
+    haystack leaks into train (the doc's Việc 5 requirement).
+- **`long_document_qa`: 220 samples (up from 160)**:
+  - 160 are the original v1 samples, loaded byte-for-byte from
+    `vcc_bench_v1.json` (not regenerated) and tagged `qa_subset='standard'`.
+  - `qa_subset='multi_hop'` (30): context is a bounded excerpt (≤20
+    paragraphs, always including both evidence paragraphs, from the same
+    Wikipedia article) built by `build_multi_hop()`; `evidence_paragraph_indices`
+    (local to that sample's `context`, `'\n\n'`-split) names the two
+    paragraphs the query's answer requires.
+  - `qa_subset='referential'` (30): same construction, but one evidence
+    paragraph is always the article's own introduction (index 0 pre-bound)
+    and the other is a later paragraph selected because it contains a
+    referential marker ("Ông/Bà ...", "Điều này/đó", "Do đó", "Vì vậy",
+    "Nhờ đó", "Trong khi đó", "Tuy nhiên") rather than repeating the
+    subject's name — built by `build_referential()`.
+  - Both subsets cap context at 20 paragraphs per sample (`LONG_DOC_QA_PARAGRAPH_CAP`
+    in the build script) specifically so a large article (e.g. `Ha_Noi`,
+    69 paragraphs) doesn't produce a context an order of magnitude longer
+    than every other task's — one sample still lands at ~54k chars (over
+    `validate_dataset()`'s 50k "very long" warning threshold) because some
+    individual Wikipedia paragraphs run to ~10k chars; this is a soft
+    warning, not a schema violation.
+- **`multi_turn_conversation`, `agent_tool_calling`, `cross_lingual`**:
+  unchanged from v1 (loaded, not regenerated) — the rebuild doc only asked
+  for changes to `needle_in_haystack` and `long_document_qa`.
+- **`vcc_bench_v1.json` and the five v1 per-task files are left untouched** —
+  v1 stays available at its own filename so the confound analysis in
+  `docs/build_VCC-Bench v2.md` §1 (which names `vcc_bench_needle_in_haystack.json`
+  specifically) stays reproducible against the exact file it was written
+  against. v2 exists only as the single combined `vcc_bench_v2.json` (no
+  per-task breakout files) — nothing in the codebase requires per-task
+  files (`VCCBench.load_from_json` reads one combined file), so none were
+  generated to avoid an unused/unmaintained set of files.
 
 ### `vcc_bench_uit_viquad_qa.json` (derived, eval-only, not committed)
 

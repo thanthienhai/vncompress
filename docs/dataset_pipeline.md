@@ -93,7 +93,7 @@ Chi tiết hợp đồng input xem §2.5.
 
 **B. Cặp (context, reference_answer) — cho E4 relevance probe** (`vncompress.training.load_relevance_samples`)
 
-- File: VCC-Bench JSON, `--data-path data/benchmark/vcc_bench_v2.json` trong handoff (hiện repo mới có `vcc_bench_v1.json`, cùng schema — xem cảnh báo §12).
+- File: VCC-Bench JSON. Cả `vcc_bench_v1.json` và `vcc_bench_v2.json` (cùng schema — xem `docs/build_VCC-Bench v2.md`) đều có trong repo. **`--data-path` ở đây phải là một corpus TRAIN** (ví dụ `training_corpus_v1.json`, mặc định hiện tại của `train_relevance_probe.py`), **không phải** `vcc_bench_v1/v2.json` — hai file đó là benchmark đánh giá; train trên benchmark là nhiễm chéo train/test (xem `docs/build_VCC-Bench v2.md` §5 Việc 4).
 - Shape: `{"samples": [{"context", "reference_answer", "task"}]}`.
 - **Lọc bắt buộc:** chỉ giữ sample có `task ∈ {long_document_qa, needle_in_haystack}` (task mà câu trả lời là span/needle nằm trong context, để span-overlap có nghĩa), `context` > 100 ký tự, và `reference_answer` khác rỗng. Sample không có token dương nào sau khi gán nhãn sẽ bị bỏ.
 - Không cần bất kỳ trường nào khác trong canonical schema §5.
@@ -437,7 +437,7 @@ data/benchmark/
 └── (vcc_bench_uit_viquad_qa.json) # sinh bởi build_viquad_eval.py khi cần eval QA thật
 ```
 
-> **Cảnh báo file:** handoff wave-2 và các mục dưới trỏ tới `data/benchmark/vcc_bench_v2.json`, nhưng repo **hiện chỉ có `vcc_bench_v1.json`** (cùng schema). Cho tới khi có v2, hãy chạy E4/benchmark với `--data-path data/benchmark/vcc_bench_v1.json`, hoặc tạo v2 rồi cập nhật lại. `load_relevance_samples`/`VCCBench` không tự đổi tên file — sai tên sẽ rơi về fallback demo (E4) hoặc báo không thấy dataset (benchmark).
+> **File benchmark:** `vcc_bench_v2.json` (xem `docs/build_VCC-Bench v2.md`) đã được sinh và tồn tại trong repo, cùng schema với `vcc_bench_v1.json`. Dùng `--data-path data/benchmark/vcc_bench_v2.json` cho `benchmark.py` (đánh giá). **Không** dùng file này cho `--data-path` của `train_relevance_probe.py` — đó là train trên benchmark, xem cảnh báo ở §2.5 phía trên. `load_relevance_samples`/`VCCBench` không tự đổi tên file — sai tên sẽ rơi về fallback demo (E4) hoặc báo không thấy dataset (benchmark).
 
 **Đề xuất (`ROADMAP`)** — chỉ cần khi triển khai teacher-distillation §4/§5:
 

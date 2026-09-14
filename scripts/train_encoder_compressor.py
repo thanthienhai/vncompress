@@ -32,6 +32,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from vncompress.config import PHOBERT_MAX_ENCODER_LEN  # noqa: E402
+
 
 def build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, ratio, max_len):
     """Return (encoder_input_ids, encoder_labels) for one text.
@@ -78,7 +80,10 @@ def main():
     ap.add_argument('--epochs', type=int, default=2)
     ap.add_argument('--batch-size', type=int, default=8)
     ap.add_argument('--lr', type=float, default=2e-5)
-    ap.add_argument('--max-length', type=int, default=256)
+    ap.add_argument('--max-length', type=int, default=PHOBERT_MAX_ENCODER_LEN,
+                    help='Must match EncoderClassifierCompressor.max_encoder_len at inference '
+                         '(vncompress.config.PHOBERT_MAX_ENCODER_LEN) -- a mismatch here silently '
+                         'trains/serves the checkpoint at two different window sizes.')
     ap.add_argument('--max-texts', type=int, default=-1, help='Cap number of training texts (-1 = all).')
     ap.add_argument('--output-dir', default='models/encoder_compressor')
     ap.add_argument('--device', default='cuda')

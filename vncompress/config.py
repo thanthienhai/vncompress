@@ -43,6 +43,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
+# Single source of truth for the encoder-classifier compressor's token
+# window (vncompress.encoder_compression.EncoderClassifierCompressor,
+# scripts/train_encoder_compressor.py). PhoBERT's learned position
+# embeddings top out at 256 -- previously the compressor's default
+# (max_encoder_len=512) and the training script's default (--max-length 256)
+# disagreed, so a checkpoint trained at 256 was silently windowed at 512 at
+# inference (a no-op stride/window mismatch, not a crash, so it went
+# unnoticed). See docs/build_VCC-Bench v2.md §4 for how this was found.
+PHOBERT_MAX_ENCODER_LEN = 256
+
+
 @dataclass
 class ExperimentConfig:
     """Single source of truth for the settings every evaluation/training

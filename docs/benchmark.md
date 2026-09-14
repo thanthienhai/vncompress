@@ -14,6 +14,13 @@ for full source/license/regeneration details and
 [`data/benchmark/CHECKSUMS.json`](../data/benchmark/CHECKSUMS.json) for the exact file hashes a
 result should be compared against (`python scripts/checksum_datasets.py` to verify).
 
+**v2 available:** `data/benchmark/vcc_bench_v2.json` — version `2.0.0`, 414 samples — fixes the
+v1 needle-in-haystack confound (all-alphanumeric payloads, 9 samples, no diacritic control group)
+with a controlled 120-sample A/B/C needle design, and adds multi_hop/referential subsets to
+long_document_qa. See [`docs/build_VCC-Bench v2.md`](build_VCC-Bench%20v2.md) for the rationale and
+the "`vcc_bench_v2.json` (derived, frozen)" section of PROVENANCE.md for construction details. Not
+yet the default `--data-path` for any script above; pass it explicitly to evaluate against v2.
+
 Results are only directly comparable across runs that used the **same** dataset checksum and the
 **same** git commit — both are captured automatically per-run (see "Run metadata" below).
 

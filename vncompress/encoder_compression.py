@@ -39,6 +39,7 @@ from .compression import (
     _pool_char_to_token,
     _token_spans,
 )
+from .config import PHOBERT_MAX_ENCODER_LEN
 
 
 class EncoderClassifierCompressor(BaseCompressor):
@@ -80,7 +81,7 @@ class EncoderClassifierCompressor(BaseCompressor):
         encoder_id: Optional[str] = None,
         encoder_path: Optional[str] = None,
         keep_label: int = 1,
-        max_encoder_len: int = 512,
+        max_encoder_len: int = PHOBERT_MAX_ENCODER_LEN,
         stride: int = 128,
     ):
         super().__init__(tokenizer, model, config)

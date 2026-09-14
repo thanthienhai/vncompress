@@ -15,11 +15,19 @@ VCC-Bench's existing (context, reference_answer) pairs -- so no new annotation.
 Usage:
   # On the trained SLM adapter (uses its LoRA-adapted hidden states):
   python scripts/train_relevance_probe.py --adapter-dir models/qwen3/final \\
-      --data-path data/benchmark/vcc_bench_v2.json --output-dir models/qwen3 --load-4bit
+      --data-path data/benchmark/training_corpus_v1.json --output-dir models/qwen3 --load-4bit
 
   # Or on a plain base model:
   python scripts/train_relevance_probe.py --base-model Qwen/Qwen3-4B \\
-      --data-path data/benchmark/vcc_bench_v2.json --output-dir models/qwen3_relevance
+      --data-path data/benchmark/training_corpus_v1.json --output-dir models/qwen3_relevance
+
+Never point --data-path at data/benchmark/vcc_bench_v2.json (or v1): that is
+the evaluation benchmark (see WAVE2_HANDOFF.md / benchmark.py), and training
+the probe on it is a train/test leak -- the default below is a training
+corpus instead. --data-path only needs a VCC-Bench-shaped JSON (see
+`vncompress.training.load_relevance_samples`); if none is available at that
+path, this falls back to a small built-in demo corpus rather than reading
+the benchmark.
 
 Then A/B it against the tone probe with the SAME SLM (this is the headline E4
 measurement -- expect it to reverse the wave-1 A/B, preserving tone worse but
@@ -46,8 +54,10 @@ def main():
                     help='Base model when --adapter-dir is not given.')
     ap.add_argument('--no-adapter', action='store_true',
                     help='Load only the adapter dir base model (isolates what fine-tuning added).')
-    ap.add_argument('--data-path', default='data/benchmark/vcc_bench_v2.json',
-                    help='VCC-Bench-shaped JSON with (context, reference_answer, task) samples.')
+    ap.add_argument('--data-path', default='data/benchmark/training_corpus_v1.json',
+                    help='VCC-Bench-shaped JSON with (context, reference_answer, task) samples. '
+                         'Must be a TRAINING corpus, never a benchmark/eval file '
+                         '(data/benchmark/vcc_bench_v1.json or vcc_bench_v2.json) -- see module docstring.')
     ap.add_argument('--output-dir', default='./models/relevance')
     ap.add_argument('--epochs', type=int, default=3)
     ap.add_argument('--batch-size', type=int, default=8)

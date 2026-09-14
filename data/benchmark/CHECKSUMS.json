@@ -23,6 +23,10 @@
     "sha256": "1ce094d15b1667ed7594822e682cd9bc13dab63c6152948222631dc21943f081",
     "size_bytes": 1757975
   },
+  "vcc_bench_v2.json": {
+    "sha256": "2053d42a6594500b1fbd158d7604c5d7584746d00f754b46dcd712dd8e1a82d3",
+    "size_bytes": 8382703
+  },
   "wikipedia_vi_raw.json": {
     "sha256": "460238a39cb6f25693c4863631b448c4c024889e59cfe1e213c15edb4b5df7b9",
     "size_bytes": 1719393
