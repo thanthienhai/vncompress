@@ -1,0 +1,26 @@
+{
+  "seed": 42,
+  "method": "sha256(seed:document_key(doc_id)), 80/10/10",
+  "document_key": "source prefix stripped, NFC, case-folded -- one Wikipedia article gets one split across all sources",
+  "long_context_chars": 24000,
+  "split_counts": {
+    "corpus": {
+      "train": 58815,
+      "test": 6766,
+      "validation": 6720
+    },
+    "poetry": {},
+    "qa": {
+      "train": 5482,
+      "validation": 518
+    },
+    "eval": {
+      "test": 1000
+    }
+  },
+  "raw_sources": [
+    "legal.jsonl",
+    "uvw.jsonl",
+    "viquad.jsonl"
+  ]
+}

@@ -25,7 +25,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vncompress.compression import METHODS, create_compressor
 from vncompress.config import ExperimentConfig, load_experiment_config, save_run_metadata, set_seed
-from vncompress.evaluation import VCCBench, VCCBenchConfig, VCCBenchSample, evaluate_compression
+from vncompress.evaluation import (
+    RANDOM_SEED_ARM_RE,
+    VCCBench,
+    VCCBenchConfig,
+    VCCBenchSample,
+    evaluate_compression,
+)
 from vncompress.linguistics import get_tone_analyzer, is_vietnamese
 from vncompress.models import load_model, load_scorer
 
@@ -56,6 +62,11 @@ WAVE2_ARMS = {
     'lacc_classprop': ('lacc', dict(budget_mode='class_proportional', use_tone=False)),
     # E8: tone kept only for surface tasks.
     'lacc_tone_gated': ('lacc', dict(tone_task_gate=True)),
+    # A9 (docs/eval_sweep_gate1.md SS2): the wave-1 arm, ppl + tone + morphology.
+    # Same config as bare 'lacc'; named explicitly because the gate-1 needle
+    # analysis is about *this* arm and a results table reading 'lacc' does not
+    # say "the arm whose 2.3% number we are re-examining".
+    'lacc_tone': ('lacc', dict()),
     # E6/E11: encoder token-classification compressor (LLMLingua-2 / PhoBERT-style).
     'encoder': ('encoder', dict()),
 }
@@ -161,11 +172,22 @@ def _default_data_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'benchmark', 'vcc_bench_v1.json')
 
 
-def _load_dataset(config: VCCBenchConfig, data_path, tokenizer, quick: bool) -> VCCBench:
+def _load_dataset(config: VCCBenchConfig, data_path, tokenizer, quick: bool,
+                  limit_samples: int = None) -> VCCBench:
     json_path = data_path or _default_data_path()
     if os.path.exists(json_path):
         print(f"\nLoading VCC-Bench dataset: {json_path}")
-        return VCCBench.load_from_json(json_path, config)
+        bench = VCCBench.load_from_json(json_path, config)
+        if limit_samples:
+            # Head of each task, not a random sample: a smoke run has to be
+            # byte-identical between invocations so a difference in output means
+            # a difference in code. NOT a valid benchmark -- results from a
+            # limited run are for checking the pipeline, never for reporting.
+            for task, samples in bench.samples.items():
+                bench.samples[task] = samples[:limit_samples]
+            print(f"  [LIMITED] first {limit_samples} sample(s) per task -> "
+                  f"{bench.total_samples} total. Smoke run only, not reportable.")
+        return bench
     print(f"\n[WARN] Dataset not found at {json_path}, using demo samples")
     bench = VCCBench(config)
     samples = VIETNAMESE_DEMO_SAMPLES[:2] if quick else VIETNAMESE_DEMO_SAMPLES
@@ -215,6 +237,9 @@ def run_benchmark(
     encoder_path: str = None,
     encoder_id: str = None,
     ablation: bool = False,
+    random_seeds: list = None,
+    prompt_style: str = 'chat',
+    limit_samples: int = None,
 ):
     """Run VCC-Bench evaluation (or, with ablation=True, the signal-isolation
     ablation study). Writes config.json + environment.json into `output_dir`
@@ -237,13 +262,21 @@ def run_benchmark(
     scorer = load_scorer(scorer_adapter_dir, tone_probe_path=tone_probe_path, device=device) if scorer_adapter_dir else None
 
     method_names = ABLATION_METHODS if ablation else (methods or list(dict.fromkeys(['none', 'random', 'llmlingua', 'lacc'])))
+    # SS4 rule 3: one seed of `random` is a sample, not a floor. Expand the arm
+    # into one virtual arm per seed; analyze_gate1.py averages them back.
+    if not ablation and random_seeds and 'random' in method_names:
+        i = method_names.index('random')
+        method_names = method_names[:i] + [f'random_s{s}' for s in random_seeds] + method_names[i + 1:]
+
     config = VCCBenchConfig(
         methods=method_names,
         compression_ratios=ratios or ([2.0] if quick else [2.0, 4.0, 8.0]),
         output_dir=output_dir, device=device,
         max_new_tokens=128 if quick else 256,
+        prompt_style=prompt_style,
+        seed=exp_config.seed if exp_config is not None else 42,
     )
-    bench = _load_dataset(config, data_path, tokenizer, quick)
+    bench = _load_dataset(config, data_path, tokenizer, quick, limit_samples=limit_samples)
 
     print("\nBenchmark Configuration:")
     print(f"  Model: {model_name}")
@@ -265,6 +298,10 @@ def run_benchmark(
     def make_compressor(method_name: str):
         if ablation:
             return create_compressor('lacc', tokenizer, model, config=None, device=device, scorer=scorer, **ABLATION_KWARGS[method_name])
+        seeded = RANDOM_SEED_ARM_RE.fullmatch(method_name)
+        if seeded:
+            return create_compressor('random', tokenizer, model, config=None, device=device,
+                                     seed=int(method_name.rsplit('_s', 1)[1]))
         if method_name in WAVE2_ARMS:
             base, kw = WAVE2_ARMS[method_name]
             if base == 'lacc':
@@ -348,6 +385,18 @@ def main():
     parser.add_argument('--demo', action='store_true', help='Single-sample per-method detail, not a comparable run')
     parser.add_argument('--ablation', action='store_true', help='Isolate perplexity/tone/morphology signals (see docs/benchmark.md)')
     parser.add_argument('--list-methods', action='store_true')
+    parser.add_argument('--limit-samples', type=int, default=None,
+                        help='Keep only the first N samples per task. For smoke-testing the '
+                             'pipeline before a full sweep -- results from a limited run are '
+                             'not reportable.')
+    parser.add_argument('--random-seeds', default=None,
+                        help="Comma-separated seeds for the 'random' floor arm (e.g. 1,2,3). "
+                             "Each becomes its own arm random_s<seed>; a single seed of random is "
+                             "one sample, not a lower bound (docs/eval_sweep_gate1.md SS4 rule 3).")
+    parser.add_argument('--prompt-style', default='chat', choices=['chat', 'raw'],
+                        help="'chat' (default) wraps compressed context + query in the generator's "
+                             "chat template with an answer-only Vietnamese instruction; 'raw' is the "
+                             "bare concatenation wave-1 used. Changing this changes the numbers.")
     parser.add_argument('--data-path', default=None, help='Default: data/benchmark/vcc_bench_v1.json')
     parser.add_argument('--scorer-adapter-dir', default=None,
                          help="LACC scorer: a LoRA adapter dir from 'train.py --mode slm' (e.g. models/slm/final) "
@@ -399,13 +448,21 @@ def main():
         quick_demo(exp_config.model, exp_config.device)
         return
 
+    random_seeds = None
+    if args.random_seeds:
+        try:
+            random_seeds = [int(x) for x in args.random_seeds.split(',')]
+        except ValueError:
+            parser.error(f"Invalid --random-seeds: '{args.random_seeds}'. Use comma-separated integers, e.g. 1,2,3")
+
     run_benchmark(
         model_name=exp_config.model, device=exp_config.device, methods=exp_config.methods,
         ratios=exp_config.compression_ratios, output_dir=exp_config.output_dir, quick=args.quick,
         data_path=exp_config.data_path, exp_config=exp_config,
         scorer_adapter_dir=args.scorer_adapter_dir, tone_probe_path=args.tone_probe_path,
         encoder_path=args.encoder_path, encoder_id=args.encoder_id,
-        ablation=args.ablation,
+        ablation=args.ablation, random_seeds=random_seeds, prompt_style=args.prompt_style,
+        limit_samples=args.limit_samples,
     )
 
 

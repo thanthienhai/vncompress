@@ -1,0 +1,14 @@
+{
+  "data/vncompress_vi_v2/corpus.jsonl": {
+    "sha256": "5c89167268c511408350b708ba37f8744aa6dce15fc3a5efa03ef824687c91a2",
+    "size_bytes": 78724921
+  },
+  "data/vncompress_vi_v2/qa.jsonl": {
+    "sha256": "d67c25d3b8ea1c8cfb00365f0f004cb10cb196007757e5f52b1767cfafb61b89",
+    "size_bytes": 128127277
+  },
+  "data/vncompress_vi_v2/eval/test.jsonl": {
+    "sha256": "ebd9f84ae4eab91ff64bc295f7dacde79e5119e5a7736c42926710a706fa4df1",
+    "size_bytes": 22920810
+  }
+}

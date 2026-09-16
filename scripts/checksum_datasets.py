@@ -22,12 +22,24 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 MANIFEST_PATH = os.path.join(DATA_DIR, 'CHECKSUMS.json')
 
 
-def _sha256(path: str) -> str:
-    h = hashlib.sha256()
+def _normalized_bytes(path: str) -> bytes:
+    """Read a dataset file as bytes with line endings normalized to LF.
+
+    The manifest must identify dataset *content*, not the line-ending
+    convention of whichever machine last checked the repo out. Hashing raw
+    bytes made every hash written on Windows (CRLF) mismatch on Linux (LF)
+    even though the JSON was byte-for-byte identical after normalization --
+    which is exactly the silent-staleness failure this manifest exists to
+    prevent, inverted into a permanent false alarm. `size_bytes` is likewise
+    the normalized length, so the two fields always describe the same bytes.
+    """
     with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1 << 20), b''):
-            h.update(chunk)
-    return h.hexdigest()
+        data = f.read()
+    return data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+
+
+def _sha256(path: str) -> str:
+    return hashlib.sha256(_normalized_bytes(path)).hexdigest()
 
 
 # Artifacts the documentation tells users to build locally
@@ -56,7 +68,8 @@ def compute_manifest(include_generated: bool = True) -> dict:
         and (include_generated or f not in LOCALLY_GENERATED)
     )
     return {
-        f: {'sha256': _sha256(os.path.join(DATA_DIR, f)), 'size_bytes': os.path.getsize(os.path.join(DATA_DIR, f))}
+        f: {'sha256': _sha256(os.path.join(DATA_DIR, f)),
+            'size_bytes': len(_normalized_bytes(os.path.join(DATA_DIR, f)))}
         for f in files
     }
 

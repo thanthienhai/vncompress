@@ -26,11 +26,14 @@ from vncompress.compression import (
     NoCompressor,
     RandomCompressor,
     SemanticQualityGate,
+    SentenceRetrievalCompressor,
+    TranslateThenCompressCompressor,
     _default_stride,
     compute_query_relevance_weights,
     contrastive_perplexity,
     create_compressor,
     question_conditioned_perplexity,
+    sentence_spans,
     sliding_window_perplexity,
 )
 
@@ -460,7 +463,10 @@ class TestQueryRelevanceWeights:
 
 
 def test_registry_lists_expected_methods():
-    assert set(METHODS) == {"none", "random", "llmlingua", "snapkv", "selective", "lacc"}
+    assert set(METHODS) == {
+        "none", "random", "llmlingua", "snapkv", "selective", "lacc",
+        "sentence_retrieval", "translate_then_compress",
+    }
 
 
 def test_create_compressor_none(tokenizer):
@@ -644,3 +650,97 @@ class TestTaskGatedTone:
         result = comp.compress(list(vi_ids), task="long_document_qa")
         assert result.metadata["tone_gated_off"] is False
         assert result.metadata["tone_source"] == "rule"
+
+
+# ============================================================================
+# Gate-1 baselines (docs/eval_sweep_gate1.md SS3)
+# ============================================================================
+
+
+NEEDLE_CONTEXT = (
+    "Hôm nay trời rất đẹp và nắng vàng trải khắp sân trường rộng lớn. "
+    "Mã kích hoạt sản phẩm là VNC-2029-7YAY. "
+    "Chúng tôi đã chuẩn bị kỹ càng cho buổi lễ khai giảng vào sáng mai. "
+    "Gió thổi nhè nhẹ qua khung cửa sổ của lớp học trong buổi sáng mùa thu."
+)
+
+
+class TestSentenceRetrievalCompressor:
+    def test_get_name(self, tokenizer):
+        assert "BM25" in SentenceRetrievalCompressor(tokenizer).get_name()
+
+    def test_keeps_the_sentence_the_query_asks_about(self, tokenizer):
+        # The whole point of B1: at a budget that cannot hold the context,
+        # query-relevant sentence survives intact. If this ever fails, the
+        # baseline is not doing retrieval and any comparison against it is void.
+        ids = tokenizer.encode(NEEDLE_CONTEXT)
+        comp = SentenceRetrievalCompressor(tokenizer, config=CompressionConfig(target_ratio=4.0))
+        result = comp.compress(ids, query="Mã kích hoạt sản phẩm là gì?")
+        assert "VNC-2029-7YAY" in result.compressed_text
+
+    def test_token_order_is_preserved(self, tokenizer):
+        ids = tokenizer.encode(NEEDLE_CONTEXT)
+        result = SentenceRetrievalCompressor(tokenizer).compress(ids, query="mã kích hoạt")
+        assert _is_subsequence(result.compressed_ids, ids)
+
+    def test_respects_the_token_budget(self, tokenizer):
+        ids = tokenizer.encode(NEEDLE_CONTEXT)
+        comp = SentenceRetrievalCompressor(tokenizer, config=CompressionConfig(target_ratio=4.0))
+        result = comp.compress(ids, query="mã kích hoạt")
+        # Whole sentences are kept, so the budget is a floor that may be
+        # overshot by at most the last sentence -- never by the whole context.
+        assert result.compressed_length < len(ids)
+
+    def test_empty_query_does_not_crash(self, tokenizer):
+        ids = tokenizer.encode(NEEDLE_CONTEXT)
+        result = SentenceRetrievalCompressor(tokenizer).compress(ids, query="")
+        assert 0 < result.compressed_length <= len(ids)
+        assert result.metadata["query_conditioned"] is False
+
+    def test_registered_in_factory(self, tokenizer):
+        assert isinstance(create_compressor("sentence_retrieval", tokenizer, device="cpu"),
+                          SentenceRetrievalCompressor)
+
+
+class TestTranslateThenCompressCompressor:
+    def test_get_name(self, tokenizer):
+        assert TranslateThenCompressCompressor(tokenizer).get_name() == "TranslateThenCompress"
+
+    def test_uses_injected_translator_and_reports_vietnamese_ratio(self, tokenizer, vi_ids):
+        # compression_ratio must be ORIGINAL VIETNAMESE tokens / compressed
+        # English tokens -- that is the "half the token cost" quantity from
+        # Lost in Compression, not the rate applied to the English text.
+        english = " ".join(f"word{i}" for i in range(40))
+        comp = TranslateThenCompressCompressor(
+            tokenizer, model=None, config=CompressionConfig(target_ratio=4.0),
+            device="cpu", translator=lambda _text: english, inner_method="random",
+        )
+        result = comp.compress(list(vi_ids), query="câu hỏi")
+        assert result.original_length == len(vi_ids)
+        assert result.compression_ratio == pytest.approx(len(vi_ids) / result.compressed_length)
+        assert result.metadata["translated_tokens"] == 40
+        assert result.metadata["translation_time_ms"] >= 0
+
+    def test_registered_in_factory(self, tokenizer):
+        assert isinstance(create_compressor("translate_then_compress", tokenizer, device="cpu"),
+                          TranslateThenCompressCompressor)
+
+
+def test_sentence_spans_cover_input_exactly(tokenizer):
+    # LACC's E5 selection and the retrieval baseline must cut at the same
+    # boundaries, so they share this one definition.
+    ids = tokenizer.encode(NEEDLE_CONTEXT)
+    spans = sentence_spans(tokenizer, ids)
+    assert spans[0][0] == 0 and spans[-1][1] == len(ids)
+    assert all(a < b for a, b in spans)
+    assert [b for _, b in spans[:-1]] == [a for a, _ in spans[1:]]
+
+
+def test_sentence_retrieval_never_overshoots_the_budget(tokenizer):
+    # A baseline that quietly spends more tokens than the arms it is compared
+    # against wins for the wrong reason (docs/eval_sweep_gate1.md SS4 rule 1).
+    ids = tokenizer.encode(NEEDLE_CONTEXT)
+    for ratio in (2.0, 4.0, 8.0):
+        comp = SentenceRetrievalCompressor(tokenizer, config=CompressionConfig(target_ratio=ratio))
+        result = comp.compress(ids, query="Mã kích hoạt sản phẩm là gì?")
+        assert result.compressed_length <= comp.target_length(len(ids))

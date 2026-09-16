@@ -1,0 +1,5 @@
+# Dataset JSON is hashed by scripts/checksum_datasets.py over LF-normalized
+# bytes; keep the working tree LF so the two never disagree.
+*.json text eol=lf
+*.py text eol=lf
+*.md text eol=lf

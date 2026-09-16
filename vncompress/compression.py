@@ -40,11 +40,14 @@ Hardware tiers, all through the same LACCCompressor:
 from __future__ import annotations
 
 import itertools
+import math
 import random
+import re
 import time
+import unicodedata
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -200,6 +203,51 @@ class NoCompressor(BaseCompressor):
 
     def get_name(self) -> str:
         return "NoCompression"
+
+
+SENTENCE_ENDERS = ('.', '!', '?', '\n', '。', '！', '？', ';')
+
+
+def token_surface_strings(tokenizer, input_ids: Sequence[int]) -> List[str]:
+    """Surface string of each token, as one cheap call where possible.
+
+    `convert_ids_to_tokens` is a single vectorized lookup; decoding ids one at a
+    time is ~n tokenizer calls, which on a 30k-character needle context costs
+    more than the compression being measured. Falls back to per-id decode for
+    tokenizers that lack the fast path.
+    """
+    try:
+        toks = tokenizer.convert_ids_to_tokens(list(input_ids))
+        # Strip the leading word-boundary marker BPE/sentencepiece prepend
+        # ("Ġxin" / "▁xin"), so callers see human text.
+        return [t.replace('\u0120', '').replace('\u2581', '') if isinstance(t, str) else '' for t in toks]
+    except Exception:
+        return [tokenizer.decode([tid]).strip() for tid in input_ids]
+
+
+def sentence_spans(tokenizer, input_ids: List[int], max_span: int = 200) -> List[Tuple[int, int]]:
+    """Split a token sequence into (start, end) sentence spans on Vietnamese
+    sentence-final punctuation (or every `max_span` tokens as a hard cap).
+
+    Module-level so sentence-unit arms share one definition of "a sentence":
+    LACC's E5 selection and the retrieval baseline must cut at the same
+    boundaries, or a win could just be a difference in segmentation.
+
+    A boundary is any token whose surface form ENDS with sentence-final
+    punctuation, not only a token that is punctuation by itself. Matching whole
+    punctuation tokens alone silently found one giant "sentence" on any
+    tokenizer that keeps "lớn." together -- and a sentence-unit arm that sees
+    one sentence is not doing sentence selection at all.
+    """
+    surfaces = token_surface_strings(tokenizer, input_ids)
+    spans, start = [], 0
+    for i, surface in enumerate(surfaces):
+        if (surface and surface.rstrip()[-1:] in SENTENCE_ENDERS) or (i - start) >= max_span:
+            spans.append((start, i + 1))
+            start = i + 1
+    if start < len(input_ids):
+        spans.append((start, len(input_ids)))
+    return spans or [(0, len(input_ids))]
 
 
 class RandomCompressor(BaseCompressor):
@@ -1234,22 +1282,7 @@ class LACCCompressor(BaseCompressor):
     # ------------------------------------------------------------------------
 
     def _sentence_spans(self, input_ids: List[int]) -> List[Tuple[int, int]]:
-        """Split a token sequence into (start, end) sentence spans on Vietnamese
-        sentence-final punctuation (or every ~200 tokens as a hard cap)."""
-        enders: set = set()
-        for tok in ('.', '!', '?', '\n', '。', '！', '？', ';'):
-            try:
-                enders.update(self.tokenizer.encode(tok, add_special_tokens=False))
-            except Exception:
-                pass
-        spans, s = [], 0
-        for i, tid in enumerate(input_ids):
-            if tid in enders or (i - s) >= 200:
-                spans.append((s, i + 1))
-                s = i + 1
-        if s < len(input_ids):
-            spans.append((s, len(input_ids)))
-        return spans or [(0, len(input_ids))]
+        return sentence_spans(self.tokenizer, input_ids)
 
     def _select_sentences(self, input_ids: List[int], scores: Sequence[float], n: int) -> List[int]:
         """E5: keep whole sentences (ranked by mean token score) until the token
@@ -1330,6 +1363,218 @@ def _load_encoder_compressor_cls() -> type:
     return EncoderClassifierCompressor
 
 
+
+# ============================================================================
+# Gate-1 baselines (docs/eval_sweep_gate1.md SS3)
+# ============================================================================
+#
+# These two are the dangerous baselines: the ones that, if they win, mean the
+# LACC line of work needs rethinking. Cheap to run, so run them at week 4
+# rather than week 11.
+
+
+def _syllables(text: str) -> List[str]:
+    """Lowercased, punctuation-stripped syllables with tone marks intact.
+
+    Matches evaluation._normalize_answer so retrieval scores the same units the
+    quality metrics do -- a BM25 that silently folded 'bàn'/'bán'/'bạn'
+    together would be scoring a different language than the metrics reward.
+    """
+    text = unicodedata.normalize('NFC', text).lower()
+    return re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE).split()
+
+
+class SentenceRetrievalCompressor(BaseCompressor):
+    """B1 -- pick whole sentences by BM25 relevance to the query.
+
+    What an engineer builds first, and usually strong on QA. Split the context
+    into sentences, score each against the query, keep the best ones IN
+    ORIGINAL ORDER until the token budget is full.
+
+    docs/eval_sweep_gate1.md SS3: "If VQLC cannot beat it at the same budget,
+    the paper has no reason to exist." No model, no GPU.
+    """
+
+    def __init__(self, tokenizer, model=None, config: Optional[CompressionConfig] = None,
+                 device: str = 'cuda', k1: float = 1.5, b: float = 0.75):
+        super().__init__(tokenizer, model, config)
+        self.device = device
+        self.k1, self.b = k1, b
+
+    def get_name(self) -> str:
+        return "SentenceRetrieval(BM25)"
+
+    def _bm25_scores(self, docs: List[List[str]], query_terms: List[str]) -> List[float]:
+        """Standard Okapi BM25 over the context's own sentences as the corpus."""
+        n_docs = len(docs)
+        if not n_docs or not query_terms:
+            return [0.0] * n_docs
+        lengths = [len(d) for d in docs]
+        avgdl = sum(lengths) / n_docs or 1.0
+        df: Counter = Counter()
+        for d in docs:
+            df.update(set(d))
+        scores = []
+        for d, dl in zip(docs, lengths):
+            tf = Counter(d)
+            score = 0.0
+            for term in set(query_terms):
+                f = tf.get(term, 0)
+                if not f:
+                    continue
+                # +0.5/+0.5 smoothing keeps idf positive for terms in every sentence
+                idf = math.log(1 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
+                score += idf * (f * (self.k1 + 1)) / (f + self.k1 * (1 - self.b + self.b * dl / avgdl))
+            scores.append(score)
+        return scores
+
+    def compress(self, input_ids: List[int], query: str = '', **kwargs) -> CompressionResult:
+        start = time.time()
+        if not self.validate_input(input_ids):
+            return self._build_result(list(input_ids), len(input_ids), 0.0)
+        n = len(input_ids)
+        spans = sentence_spans(self.tokenizer, input_ids)
+        target_len = min(self.target_length(n), n)
+
+        docs = [_syllables(self.tokenizer.decode(input_ids[a:b], skip_special_tokens=True)) for a, b in spans]
+        scores = self._bm25_scores(docs, _syllables(query))
+
+        # Greedy by score, keeping each sentence WHOLE -- the failure mode this
+        # baseline exists to avoid is keeping the answer token while deleting the
+        # phrase that makes it interpretable.
+        #
+        # A sentence is taken only if it still FITS. Taking whichever sentence
+        # crosses the budget overshoots it by up to a full sentence -- measured
+        # at 2x on cross-lingual samples -- and an arm that quietly spends twice
+        # the tokens looks better for a reason that has nothing to do with its
+        # selection rule. docs/eval_sweep_gate1.md SS4 rule 1: same budget, not
+        # same configured ratio.
+        ranked = sorted(range(len(spans)), key=lambda i: scores[i], reverse=True)
+        kept: set = set()
+        for idx in ranked:
+            a, b = spans[idx]
+            if len(kept) + (b - a) <= target_len:
+                kept.update(range(a, b))
+        if not kept:
+            # Every sentence is longer than the whole budget: keep a prefix of
+            # the best-scoring one rather than returning nothing.
+            a, b = spans[ranked[0]]
+            kept = set(range(a, min(b, a + target_len)))
+        compressed = [input_ids[i] for i in sorted(kept)]
+        metadata = {
+            'num_sentences': len(spans),
+            'num_sentences_kept': sum(1 for a, b in spans if a in kept),
+            'max_bm25': max(scores) if scores else 0.0,
+            'query_conditioned': bool(query),
+            'budget_used': len(kept) / max(target_len, 1),
+        }
+        return self._build_result(compressed, n, (time.time() - start) * 1000, metadata)
+
+
+class TranslateThenCompressCompressor(BaseCompressor):
+    """B2 -- translate Vietnamese to English, then compress in English.
+
+    *Lost in Compression* (arXiv 2608.26175) reports this matching or beating
+    native compression at roughly half the token cost in 3/5 languages tested;
+    Vietnamese was not among them. A win here is still publishable -- it just
+    changes the paper's message -- and a loss is a rebuttal no competing paper
+    has. Either way it has to be measured before week 11.
+
+    Cost accounting: `compression_ratio` is ORIGINAL VIETNAMESE tokens over
+    COMPRESSED ENGLISH tokens, both in the generator's tokenizer. That is the
+    quantity the "half the token cost" claim is about, and it is not the same
+    as the compression rate applied to the English text. `translation_time_ms`
+    is reported separately because translation is a real cost this arm pays and
+    the others do not.
+    """
+
+    def __init__(self, tokenizer, model=None, config: Optional[CompressionConfig] = None,
+                 device: str = 'cuda', translator: Optional[Callable[[str], str]] = None,
+                 translator_id: str = 'VietAI/envit5-translation', inner_method: str = 'llmlingua'):
+        super().__init__(tokenizer, model, config)
+        self.device = device
+        self.translator_id = translator_id
+        self.inner_method = inner_method
+        self._translate = translator     # injectable, so tests need no MT model
+        self._mt = None
+
+    def get_name(self) -> str:
+        return "TranslateThenCompress"
+
+    def _load_translator(self) -> Callable[[str], str]:
+        if self._translate is not None:
+            return self._translate
+        if self._mt is None:
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(self.translator_id)
+            mdl = AutoModelForSeq2SeqLM.from_pretrained(self.translator_id).to(self.device).eval()
+            self._mt = (tok, mdl)
+
+        def translate(text: str) -> str:
+            tok, mdl = self._mt
+            # envit5 is prefix-driven; chunk so long contexts don't blow the
+            # 512-token encoder limit and silently return only the first chunk.
+            out_parts = []
+            for chunk in _chunk_text(text, max_chars=1200):
+                enc = tok(f"vi: {chunk}", return_tensors='pt', truncation=True, max_length=512).to(self.device)
+                with torch.no_grad():
+                    gen = mdl.generate(**enc, max_length=512)
+                out_parts.append(tok.decode(gen[0], skip_special_tokens=True).removeprefix('en: ').strip())
+            return ' '.join(out_parts)
+
+        self._translate = translate
+        return translate
+
+    def compress(self, input_ids: List[int], query: str = '', **kwargs) -> CompressionResult:
+        start = time.time()
+        if not self.validate_input(input_ids):
+            return self._build_result(list(input_ids), len(input_ids), 0.0)
+        n = len(input_ids)
+        vi_text = self.tokenizer.decode(input_ids, skip_special_tokens=True)
+
+        t0 = time.time()
+        en_text = self._load_translator()(vi_text)
+        translate_ms = (time.time() - t0) * 1000
+
+        en_ids = self.tokenizer.encode(en_text, add_special_tokens=False)
+        # Budget is set against the ORIGINAL Vietnamese length: the arm is
+        # allowed the same absolute token budget as every other arm, and any
+        # saving translation already bought shows up as a better realized ratio.
+        target_len = min(self.target_length(n), len(en_ids))
+        inner_config = CompressionConfig(**{**asdict(self.config)})
+        inner_config.target_ratio = max(len(en_ids) / max(target_len, 1), 1.0)
+        inner = create_compressor(
+            self.inner_method, self.tokenizer, self.model, config=inner_config, device=self.device,
+        )
+        inner_result = inner.compress(en_ids, query=query, **kwargs)
+        compressed = inner_result.compressed_ids
+
+        metadata = {
+            'translation_time_ms': translate_ms,
+            'translated_tokens': len(en_ids),
+            'translation_inflation': len(en_ids) / max(n, 1),
+            'inner_method': self.inner_method,
+            'translator_id': self.translator_id,
+        }
+        # original_length = the Vietnamese length, so compression_ratio answers
+        # "how many Vietnamese tokens did this replace?"
+        return self._build_result(compressed, n, (time.time() - start) * 1000, metadata)
+
+
+def _chunk_text(text: str, max_chars: int) -> List[str]:
+    """Split on sentence boundaries into chunks of at most `max_chars`."""
+    parts, buf = [], ''
+    for piece in re.split(r'(?<=[.!?\n])\s+', text):
+        if len(buf) + len(piece) + 1 > max_chars and buf:
+            parts.append(buf)
+            buf = piece
+        else:
+            buf = f"{buf} {piece}".strip()
+    if buf:
+        parts.append(buf)
+    return parts or ['']
+
+
 # 'encoder' (wave-2 E6, LLMLingua-2 / PhoBERT-style token classification) is
 # registered lazily -- its class lives in vncompress/encoder_compression.py and
 # is only imported when requested (see _load_encoder_compressor_cls).
@@ -1340,6 +1585,9 @@ METHODS: Dict[str, type] = {
     'snapkv': SnapKVCompressor,
     'selective': SelectiveContextCompressor,
     'lacc': LACCCompressor,
+    # Gate-1 baselines (docs/eval_sweep_gate1.md SS3)
+    'sentence_retrieval': SentenceRetrievalCompressor,
+    'translate_then_compress': TranslateThenCompressCompressor,
 }
 
 # Methods whose class is resolved lazily (not eagerly importable at module load).
@@ -1421,9 +1669,15 @@ def _content_word_retention(orig_tokens: List[str], comp_tokens: List[str], morp
     return min(1.0, comp_content / orig_content)
 
 
-def _approx_tone_preservation_rate(orig_tokens: List[str], comp_tokens: List[str], tone_analyzer: VietnameseToneAnalyzer) -> float:
+def approx_tone_preservation_rate(orig_tokens: List[str], comp_tokens: List[str], tone_analyzer: VietnameseToneAnalyzer) -> float:
     """Multiset-based fallback when a result doesn't carry an exact,
-    index-based tone_preservation_rate in its metadata."""
+    index-based tone_preservation_rate in its metadata.
+
+    Public because the benchmark harness needs a TPR for arms that produce no
+    tone metadata of their own (llmlingua, random, the retrieval baselines) --
+    without it the TPR-vs-token-F1 analysis in docs/eval_sweep_gate1.md SS5 can
+    only ever see LACC.
+    """
     orig_infos = tone_analyzer.analyze_tokens(orig_tokens)
     tone_bearing_orig = [t for t, info in zip(orig_tokens, orig_infos) if info.tones_present]
     if not tone_bearing_orig:
@@ -1436,6 +1690,11 @@ def _approx_tone_preservation_rate(orig_tokens: List[str], comp_tokens: List[str
             preserved += 1
             remaining[t] -= 1
     return preserved / len(tone_bearing_orig)
+
+
+# Back-compat alias: the calibration code below and the tests refer to the
+# original private name.
+_approx_tone_preservation_rate = approx_tone_preservation_rate
 
 
 class CalibrationObjective:

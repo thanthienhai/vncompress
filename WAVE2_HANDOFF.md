@@ -2,6 +2,13 @@
 
 **Ngày:** 2026-09-05 · **Nguồn đề xuất:** [`research/wave2_proposals.md`](research/wave2_proposals.md) · **Trạng thái:** code đã implement + test (CPU), **chưa chạy GPU**
 
+> **Đọc [`WAVE2_DATA_NOTES.md`](WAVE2_DATA_NOTES.md) trước khi train (2026-09-16).**
+> Dataset v2 đã được rà soát và pipeline đã sửa. Ba điều ảnh hưởng trực tiếp:
+> `compression` hiện tại **chưa train được E5/E6** (gold là văn viết lại, phải
+> sinh lại), có **đường rò `viquad:Hà_Nội` sang VCC-Bench v2** phải chặn trước
+> khi chạy E4/E6, và tập test 1.000 dòng chỉ trải trên **14 tài liệu** nên
+> đừng báo CI trên nó.
+
 Tất cả thay đổi ở đây là **code không cần GPU để viết/test**; việc còn lại là các
 bạn **chạy lại benchmark/train** trên cluster. `python -m pytest -q` phải xanh
 trước khi chạy (CPU-only, ~20s).

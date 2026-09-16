@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
@@ -59,6 +60,9 @@ class CompressionMetrics:
     bert_score_f1: Optional[float] = None
     exact_match: bool = False
     token_f1: Optional[float] = None
+    # Needle-retrieval recall -- only filled for the needle_in_haystack task
+    # (see compute_needle_recall); None elsewhere so it never dilutes a mean.
+    needle_recall: Optional[float] = None
 
     tone_preservation_rate: Optional[float] = None
     function_word_keep_ratio: Optional[float] = None
@@ -66,6 +70,11 @@ class CompressionMetrics:
 
     prefill_time_ms: Optional[float] = None
     decode_time_ms: Optional[float] = None
+    # Wall-clock of the generation call alone (processing_time_ms is compression
+    # alone) and CUDA peak allocation across compress+generate -- docs/eval_sweep_gate1.md
+    # SS4 rule 4 requires re-measuring cost after the 2048/256 perplexity window.
+    generation_time_ms: Optional[float] = None
+    peak_vram_bytes: Optional[int] = None
     memory_saved_bytes: int = 0
 
     quality_score: float = 0.0
@@ -212,6 +221,67 @@ def compute_token_f1(predictions: List[str], references: List[str]) -> float:
 
 
 # ============================================================================
+# Run-level instrumentation (cost + tone diagnostics for every arm)
+# ============================================================================
+
+
+def _cuda_available() -> bool:
+    return torch is not None and torch.cuda.is_available()
+
+
+def _reset_peak_vram() -> None:
+    if _cuda_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _peak_vram() -> Optional[int]:
+    """Peak CUDA allocation since the last reset, or None off GPU.
+
+    docs/eval_sweep_gate1.md SS4 rule 4: the wave-1 cost table predates the
+    2048/256 perplexity window and cannot be reused, so every run has to carry
+    its own cost measurement rather than citing the old one.
+    """
+    return int(torch.cuda.max_memory_allocated()) if _cuda_available() else None
+
+
+def _resolve_tone_preservation_rate(result, tokenizer, input_ids: List[int]) -> Optional[float]:
+    """Tone preservation rate for ANY arm, not just LACC.
+
+    LACC reports an exact index-based rate in its own metadata. Every other arm
+    reported nothing, which made the TPR-vs-token-F1 correlation in
+    docs/eval_sweep_gate1.md SS5 impossible to compute across arms -- the
+    comparison needs `llmlingua` and `random` to have a TPR too. Fall back to
+    the surface approximation over decoded tokens for those.
+    """
+    if 'tone_preservation_rate' in result.metadata:
+        return result.metadata['tone_preservation_rate']
+    try:
+        from .compression import approx_tone_preservation_rate, token_surface_strings
+        from .linguistics import get_tone_analyzer
+
+        # token_surface_strings, not a per-id decode loop: on a 30k-character
+        # needle context the latter costs more than the compression it is
+        # annotating, across 12 arms x 3 ratios x 414 samples.
+        orig = token_surface_strings(tokenizer, input_ids)
+        comp = token_surface_strings(tokenizer, result.compressed_ids)
+        return approx_tone_preservation_rate(orig, comp, get_tone_analyzer())
+    except Exception:
+        return None
+
+
+# The instruction the generator sees alongside the compressed context. Bare
+# `context + query` concatenation (the original behaviour) leaves an
+# instruction-tuned model free to continue the text instead of answering, which
+# makes exact-match and token-F1 measure formatting luck rather than whether the
+# answer survived compression. Answer-only, grounded, Vietnamese.
+ANSWER_INSTRUCTION_VI = (
+    "Dựa CHỈ vào ngữ cảnh dưới đây, trả lời câu hỏi thật ngắn gọn. "
+    "Chỉ đưa ra đáp án, không giải thích, không lặp lại câu hỏi. "
+    "Nếu ngữ cảnh không chứa đáp án, trả lời: KHÔNG CÓ THÔNG TIN."
+)
+
+
+# ============================================================================
 # VCC-Bench
 # ============================================================================
 
@@ -230,6 +300,29 @@ class VCCBenchConfig:
     output_dir: str = './results'
     save_predictions: bool = True
     device: str = 'cuda'
+    # 'chat' wraps the compressed context + query in the generator's own chat
+    # template with an explicit Vietnamese answer-only instruction; 'raw' is the
+    # original bare `compressed_ids + query_ids` concatenation, kept so wave-1
+    # numbers stay reproducible. See docs/eval_sweep_gate1.md SS6.
+    prompt_style: str = 'chat'
+    # Stamped into every per-sample record and into the result filename, so
+    # multi-seed arms (the `random` floor, SS4 rule 3) never overwrite each other.
+    seed: int = 42
+
+
+# Dataset fields copied verbatim into every per-sample metric record. Without
+# these, a finished GPU sweep cannot answer the question the sweep exists to
+# answer -- docs/eval_sweep_gate1.md SS5 splits needle results by `needle_group`,
+# and SS5's secondary analyses need `insert_position` / `qa_subset`. Add keys
+# here rather than post-hoc joining results back onto the dataset by row order.
+ANALYSIS_METADATA_KEYS = (
+    'sample_id',
+    'source', 'domain', 'title',
+    'needle_group', 'insert_position', 'needle_category', 'needle_has_diacritic',
+    'haystack_id', 'synthetic_pii',
+    'qa_subset', 'law_id', 'chapter',
+    'cross_config', 'num_turns', 'scenario',
+)
 
 
 @dataclass
@@ -310,8 +403,12 @@ class VCCBench:
                 task_results = {}
                 for ratio in self.config.compression_ratios:
                     print(f"  Task: {task_name}, Ratio: {ratio}x")
-                    metrics_list = self._evaluate_task(compressor, model, tokenizer, samples, ratio, task_name, generation_fn)
+                    metrics_list = self._evaluate_task(
+                        compressor, model, tokenizer, samples, ratio, task_name, generation_fn,
+                        method_name=method_name,
+                    )
                     task_results[f'ratio_{ratio}'] = self._aggregate_metrics(metrics_list)
+                    self._warn_on_generation_errors(method_name, task_name, ratio, metrics_list)
                     if self.config.save_predictions:
                         self._save_results(method_name, task_name, ratio, metrics_list)
                 method_results[task_name] = task_results
@@ -319,11 +416,30 @@ class VCCBench:
         all_results['summary'] = self._compute_summary(all_results)
         return all_results
 
-    def _evaluate_task(self, compressor, model, tokenizer, samples, ratio, task_name, generation_fn) -> List[CompressionMetrics]:
+    @staticmethod
+    def _warn_on_generation_errors(method_name, task_name, ratio, metrics_list) -> None:
+        """Say it out loud, at the point it happens.
+
+        Failed generations produce empty predictions, which score 0 -- visually
+        identical to an arm that genuinely lost the answer. Anyone reading a
+        results table has no way to tell the two apart, so the run itself has to.
+        """
+        errors = [m.metadata.get('generation_error') for m in metrics_list if m.metadata.get('generation_error')]
+        if not errors:
+            return
+        kinds = Counter(e.split(':', 1)[0] for e in errors)
+        print(f"    [WARN] {len(errors)}/{len(metrics_list)} generations FAILED for "
+              f"{method_name}/{task_name}@{ratio}x -- {dict(kinds)}. "
+              f"First: {errors[0][:200]}")
+        print("           These score 0 and are NOT evidence about the compressor. Fix before reporting.")
+
+    def _evaluate_task(self, compressor, model, tokenizer, samples, ratio, task_name, generation_fn,
+                       method_name: str = 'unknown') -> List[CompressionMetrics]:
         metrics_list = []
         compressor.config.target_ratio = ratio
         for sample in tqdm(samples, desc=f"  {task_name} @ {ratio}x"):
             input_ids = tokenizer.encode(sample.context, add_special_tokens=False)
+            _reset_peak_vram()
             start_time = time.time()
             # `query`: without it, LACC's query-relevance boost and
             # SelectiveContext's embedding path never run in any benchmark.
@@ -337,13 +453,18 @@ class VCCBench:
                 token_savings_pct=result.token_savings_pct,
                 processing_time_ms=comp_time,
             )
-            if 'tone_preservation_rate' in result.metadata:
-                metric.tone_preservation_rate = result.metadata['tone_preservation_rate']
+            metric.tone_preservation_rate = _resolve_tone_preservation_rate(
+                result, tokenizer, input_ids,
+            )
 
+            gen_start = time.time()
             output = (generation_fn or self._default_generate)(
                 model, tokenizer, compressed_ids=result.compressed_ids, query=sample.query,
                 max_new_tokens=self.config.max_new_tokens, temperature=self.config.temperature,
             ) if generation_fn else self._default_generate(model, tokenizer, result.compressed_ids, sample.query)
+            metric.generation_time_ms = (time.time() - gen_start) * 1000
+            metric.peak_vram_bytes = _peak_vram()
+            gen_error = getattr(self, '_last_generation_error', None)
 
             if output:
                 rouge = compute_rouge_l([output], [sample.reference_answer])
@@ -353,18 +474,67 @@ class VCCBench:
                 metric.bleu_score = compute_bleu([output], [sample.reference_answer])
                 metric.exact_match = output.strip().lower() == sample.reference_answer.strip().lower()
                 metric.token_f1 = compute_token_f1([output], [sample.reference_answer])
+                if task_name == 'needle_in_haystack':
+                    metric.needle_recall = compute_needle_recall([output], [sample.reference_answer])
 
             metric.quality_score = (
                 (metric.rouge_l_f1 or 0) * 0.4 + (metric.bleu_score or 0) * 0.2 + float(metric.exact_match) * 0.4
             )
             metric.efficiency_score = metric.token_savings_pct / 100.0
+
+            # Per-sample provenance. `compression_ratio` above is the REALIZED
+            # ratio; `requested_ratio` is what was configured. Reporting at the
+            # configured ratio compares arms at different operating points --
+            # docs/eval_sweep_gate1.md SS4 rule 1 -- so both must survive to the
+            # analysis stage, along with the prediction text (re-scoring a run
+            # with a new metric must not require re-running the GPU sweep).
+            metric.metadata.update({
+                'method': method_name,
+                'task': task_name,
+                'requested_ratio': float(ratio),
+                'seed': self.config.seed,
+                'original_tokens': len(input_ids),
+                'compressed_tokens': len(result.compressed_ids),
+                'prediction': output or '',
+                'generation_error': gen_error,
+                'reference_answer': sample.reference_answer,
+                'query': sample.query,
+            })
+            for key in ANALYSIS_METADATA_KEYS:
+                if key in sample.metadata:
+                    metric.metadata[key] = sample.metadata[key]
+            # Whatever the compressor itself reported (budget_used,
+            # translation_time_ms, num_sentences_kept, ...). Prefixed so an arm
+            # can never shadow a provenance key, and kept because these are the
+            # diagnostics that explain WHY an arm landed where it did -- and the
+            # cost table owes translation time to the translate-then-compress arm.
+            for key, value in result.metadata.items():
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    metric.metadata[f'arm_{key}'] = value
             metrics_list.append(metric)
         return metrics_list
 
+    def _build_prompt_ids(self, tokenizer, compressed_ids: List[int], query: str) -> List[int]:
+        """Token ids for the generation call.
+
+        'raw' reproduces the original bare concatenation; 'chat' (default) wraps
+        the same compressed context in the generator's own chat template with
+        ANSWER_INSTRUCTION_VI. Falls back to 'raw' when the tokenizer has no
+        chat template, so non-instruct generators still run.
+        """
+        if self.config.prompt_style == 'chat' and getattr(tokenizer, 'chat_template', None):
+            context = tokenizer.decode(compressed_ids, skip_special_tokens=True)
+            messages = [{
+                'role': 'user',
+                'content': f"{ANSWER_INSTRUCTION_VI}\n\n### Ngữ cảnh:\n{context}\n\n### Câu hỏi:\n{query}\n\n### Đáp án:",
+            }]
+            return tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        return compressed_ids + tokenizer.encode(query, add_special_tokens=False)
+
     def _default_generate(self, model, tokenizer, compressed_ids: List[int], query: str) -> Optional[str]:
+        self._last_generation_error = None
         try:
-            query_ids = tokenizer.encode(query, add_special_tokens=False)
-            full_input = compressed_ids + query_ids
+            full_input = self._build_prompt_ids(tokenizer, compressed_ids, query)
             input_tensor = torch.tensor([full_input]).to(model.device)
             with torch.no_grad():
                 outputs = model.generate(
@@ -373,7 +543,13 @@ class VCCBench:
                     pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
                 )
             return tokenizer.decode(outputs[0][len(full_input):], skip_special_tokens=True)
-        except Exception:
+        except Exception as exc:
+            # Record it. A swallowed OOM/context-overflow used to be
+            # indistinguishable from "compression destroyed the answer": both
+            # produced an empty prediction and a quality score of 0. A broken
+            # run that reads as a bad arm is the one failure mode a gate
+            # decision cannot survive.
+            self._last_generation_error = f"{type(exc).__name__}: {exc}"
             return None
 
     def _aggregate_metrics(self, metrics_list: List[CompressionMetrics]) -> Dict[str, float]:
@@ -387,7 +563,11 @@ class VCCBench:
             'mean_bleu': _mean_or_none([m.bleu_score for m in metrics_list]),
             'exact_match_rate': np.mean([float(m.exact_match) for m in metrics_list]),
             'mean_token_f1': _mean_or_none([m.token_f1 for m in metrics_list]),
+            'mean_needle_recall': _mean_or_none([m.needle_recall for m in metrics_list]),
+            'mean_generation_time_ms': _mean_or_none([m.generation_time_ms for m in metrics_list]),
+            'peak_vram_bytes': max((m.peak_vram_bytes or 0) for m in metrics_list) or None,
             'num_generated': sum(1 for m in metrics_list if m.rouge_l_f1 is not None),
+            'num_generation_errors': sum(1 for m in metrics_list if m.metadata.get('generation_error')),
             'mean_quality_score': np.mean([m.quality_score for m in metrics_list]),
             'mean_efficiency_score': np.mean([m.efficiency_score for m in metrics_list]),
             'num_samples': len(metrics_list),
@@ -423,7 +603,10 @@ class VCCBench:
         return summary
 
     def _save_results(self, method_name: str, task_name: str, ratio: float, metrics_list: List[CompressionMetrics]):
-        path = os.path.join(self.config.output_dir, f"{method_name}_{task_name}_ratio{ratio:.1f}.json")
+        path = os.path.join(
+            self.config.output_dir,
+            f"{method_name}_{task_name}_ratio{ratio:.1f}_seed{self.config.seed}.json",
+        )
         with open(path, 'w', encoding='utf-8') as f:
             json.dump([m.to_dict() for m in metrics_list], f, indent=2, ensure_ascii=False)
 
@@ -554,6 +737,9 @@ def paired_bootstrap_delta(
 #   - "ablation": the isolated-signal arms (ppl_only/tone_only/morph_only/lacc).
 
 
+RANDOM_SEED_ARM_RE = re.compile(r'random_s\d+')
+
+
 class MethodCategory(str, Enum):
     BASELINE = "baseline"
     PROPOSED = "proposed"
@@ -568,6 +754,10 @@ REGISTRY_METHOD_CATEGORY: Dict[str, MethodCategory] = {
     "snapkv": MethodCategory.BASELINE,
     "selective": MethodCategory.BASELINE,
     "encoder": MethodCategory.BASELINE,                # LLMLingua-2 / PhoBERT-style (wave-2 E6/E11)
+    # Gate-1 baselines (docs/eval_sweep_gate1.md SS3) -- the two arms that, if
+    # they win, change what the paper claims.
+    "sentence_retrieval": MethodCategory.BASELINE,
+    "translate_then_compress": MethodCategory.BASELINE,
     "lacc": MethodCategory.PROPOSED,
     # wave-2 LACC arms (E1/E2/E5/E7): proposed variants of the LACC method
     "lacc_ppl_contrastive": MethodCategory.PROPOSED,
@@ -599,6 +789,11 @@ def categorize(method_name: str, context: str = "registry") -> MethodCategory:
     if context not in ("registry", "ablation"):
         raise ValueError(f"Unknown context: {context!r}. Expected 'registry' or 'ablation'.")
     table = REGISTRY_METHOD_CATEGORY if context == "registry" else ABLATION_ARM_CATEGORY
+    # `random_s1`/`random_s2`/... are the same baseline run under different
+    # seeds (docs/eval_sweep_gate1.md SS4 rule 3: one seed of random is a
+    # sample, not a floor), so they inherit `random`'s category.
+    if context == "registry" and RANDOM_SEED_ARM_RE.fullmatch(method_name):
+        return MethodCategory.BASELINE
     if method_name not in table:
         raise ValueError(
             f"Method {method_name!r} is not classified in evaluation.py's method taxonomy "
