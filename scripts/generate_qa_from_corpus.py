@@ -57,6 +57,11 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Same reasoning as generate_compression_pairs.py: cp1252 (Windows console
+# default) cannot encode Vietnamese text, so make stdout UTF-8 defensively.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from vncompress.dataset_build import (
     assign_split,
     count_tokens,
@@ -391,7 +396,7 @@ def main():
         print("Nothing to do.")
         return 0
 
-    api_keys = ['dry-run'] if args.dry_run else collect_api_keys()
+    api_keys = ['dry-run'] if args.dry_run else collect_api_keys('VNCOMPRESS_TEACHER_API_KEY')
     if not api_keys:
         raise SystemExit("No API key. Set VNCOMPRESS_TEACHER_API_KEY or use --dry-run.")
     pool = KeyPool(api_keys, rpm=args.rpm, ccu_per_key=args.ccu_per_key)

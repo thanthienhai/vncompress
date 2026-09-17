@@ -5,14 +5,18 @@
   "long_context_chars": 24000,
   "split_counts": {
     "corpus": {
-      "train": 58815,
-      "test": 6766,
-      "validation": 6720
+      "train": 58781,
+      "test": 6763,
+      "validation": 6718
     },
-    "poetry": {},
+    "poetry": {
+      "train": 2250,
+      "validation": 350,
+      "test": 400
+    },
     "qa": {
-      "train": 5482,
-      "validation": 518
+      "train": 5480,
+      "validation": 520
     },
     "eval": {
       "test": 1000
@@ -20,6 +24,7 @@
   },
   "raw_sources": [
     "legal.jsonl",
+    "poetry.jsonl",
     "uvw.jsonl",
     "viquad.jsonl"
   ]

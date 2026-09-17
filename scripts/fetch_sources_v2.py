@@ -19,6 +19,7 @@ Sources:
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -85,7 +86,13 @@ def fetch_uvw(target_articles: int, seed: int, shuffle_buffer: int):
         category = article.get('main_category') or ''
         if any(m in category for m in WIKI_INTERNAL_MARKERS):
             continue
-        content = article.get('content') or ''
+        # UVW-2026 ships some articles (heavy on tables/formulas, e.g. domain
+        # or math topics) with HTML entities never decoded back to text --
+        # '&minus;', '&nbsp;', '&pi;' land in `content` literally. Unescaping
+        # here, before segmentation, is a no-op on the ~95% of articles that
+        # are already clean and fixes the rest at the one place all of them
+        # pass through.
+        content = html.unescape(article.get('content') or '')
         if looks_like_wiki_markup(content):
             continue
         paragraphs = segment_paragraphs(content)

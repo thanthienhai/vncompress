@@ -18,6 +18,9 @@
 #   probe    train_relevance_probe.py (E4)  -> models/relevance/relevance_probe.pt
 #   encoder  train_encoder_compressor.py    -> models/encoder_compressor
 #   validate train.py --mode slm --validate
+#   bench    VCC-Bench v2 sweep (E1/E2/E5/E7/E6) + tone-probe and E4
+#            relevance-probe A/Bs, all against data already on disk --
+#            no LLM-generated gold needed (see WAVE2_DATA_NOTES.md ss1)
 #
 # Everything below is overridable from the environment, e.g.
 #   GPU=2 SLM_EPOCHS=5 ./run_pipeline.sh
@@ -43,7 +46,7 @@ DATA_DIR="${DATA_DIR:-data/vncompress_vi_v2}"
 # Only these two feed training: corpus.jsonl for the LM/encoder arms, qa.jsonl
 # for the E4 relevance probe. --all-data adds the compression/eval/extras files.
 DATA_FILES="${DATA_FILES:-corpus.jsonl qa.jsonl}"
-DATA_FILES_ALL="corpus.jsonl qa.jsonl compression.jsonl eval/test.jsonl extras/compression_unanswerable.jsonl README.md"
+DATA_FILES_ALL="corpus.jsonl qa.jsonl qa_synthetic.jsonl compression.jsonl eval/test.jsonl extras/compression_unanswerable.jsonl README.md"
 
 SLM_EPOCHS="${SLM_EPOCHS:-3}"
 SLM_BATCH="${SLM_BATCH:-8}"
@@ -64,7 +67,23 @@ ENCODER_BATCH="${ENCODER_BATCH:-8}"
 ENCODER_MAX_TEXTS="${ENCODER_MAX_TEXTS:--1}"
 ENCODER_OUT="${ENCODER_OUT:-models/encoder_compressor}"
 
-ALL_STAGES="check venv deps data slm probe encoder validate"
+# bench: VCC-Bench v2 sweep (arms that need no trained probe -- E1/E2/E5/E7 --
+# plus the E6 encoder arm) and the two probe A/Bs (verify_tone_probe_e2e.py),
+# one with the SLM's own tone_probe.pt, one with the E4 relevance_probe.pt
+# swapped into the same slot (probe_kind is auto-detected from its sidecar
+# meta json -- see scripts/train_relevance_probe.py's docstring). Everything
+# here reads data already on disk; it does not touch compression.jsonl and
+# does not need an LLM API key.
+BENCH_MODEL="${BENCH_MODEL:-$ENCODER_TEACHER}"  # generation model for downstream QA; override for a stronger one
+BENCH_METHODS="${BENCH_METHODS:-none,random,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop,encoder}"
+BENCH_RATIOS="${BENCH_RATIOS:-2,4,8}"
+BENCH_DATA_PATH="${BENCH_DATA_PATH:-data/benchmark/vcc_bench_v2.json}"
+BENCH_OUT="${BENCH_OUT:-results/bench_wave2}"
+PROBE_AB_RATIOS="${PROBE_AB_RATIOS:-2,4,8}"
+PROBE_AB_MAX_SAMPLES="${PROBE_AB_MAX_SAMPLES:-100}"
+BENCH_ABLATION="${BENCH_ABLATION:-1}"        # 0 to skip the ppl/tone/morph isolation sweep
+
+ALL_STAGES="check venv deps data slm probe encoder validate bench"
 STAGES="${STAGES:-$ALL_STAGES}"
 QUICK=0
 DRY_RUN=0
@@ -88,7 +107,7 @@ run() {
 
 wants() { [[ " $STAGES " == *" $1 "* ]]; }
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -122,8 +141,10 @@ RUN_LOG="$LOG_DIR/pipeline_$(date +%Y%m%d_%H%M%S).log"
 if [ "$QUICK" = 1 ]; then
     SLM_EPOCHS=1; PROBE_EPOCHS=1; ENCODER_EPOCHS=1; ENCODER_MAX_TEXTS=200
     QUICK_SLM_ARGS=(--max-steps 30); QUICK_PROBE_ARGS=(--max-steps 30 --min-samples 8)
+    PROBE_AB_MAX_SAMPLES=8
+    QUICK_BENCH_ARGS=(--quick --limit-samples 20)
 else
-    QUICK_SLM_ARGS=(); QUICK_PROBE_ARGS=()
+    QUICK_SLM_ARGS=(); QUICK_PROBE_ARGS=(); QUICK_BENCH_ARGS=()
 fi
 
 # --- stages ------------------------------------------------------------------
@@ -265,8 +286,24 @@ stage_probe() {
     else
         warn "$SLM_OUT/final not found -- training the probe on the plain base model"
     fi
+    local data_path="$DATA_DIR/qa.jsonl"
+    if [ -s "$DATA_DIR/qa_synthetic.jsonl" ]; then
+        # E4's document coverage is the scarce thing (WAVE2_DATA_NOTES.md):
+        # qa.jsonl alone is ~142 documents; qa_synthetic.jsonl (stage 2b)
+        # adds ~3,393 more, teacher-generated but span-verified. Same row
+        # shape (context/query/answer/answer_span/task/doc_id/split), so a
+        # plain concat is a valid combined source -- the benchmark holdout is
+        # re-derived downstream by document_key regardless of which file a
+        # row came from.
+        data_path="$DATA_DIR/qa_combined.jsonl"
+        [ "$DRY_RUN" = 1 ] || cat "$DATA_DIR/qa.jsonl" "$DATA_DIR/qa_synthetic.jsonl" > "$data_path"
+        log "training on qa.jsonl + qa_synthetic.jsonl combined ($data_path)"
+    else
+        warn "$DATA_DIR/qa_synthetic.jsonl not found -- training on qa.jsonl alone (limited document coverage)"
+    fi
     run python scripts/train_relevance_probe.py \
         "${adapter_args[@]}" \
+        --data-path "$data_path" \
         --output-dir "$PROBE_OUT" \
         --epochs "$PROBE_EPOCHS" \
         --batch-size "$PROBE_BATCH" \
@@ -307,6 +344,87 @@ stage_validate() {
     ok "validation done"
 }
 
+stage_bench() {
+    log "Stage: bench -> $BENCH_OUT"
+
+    # --- VCC-Bench v2 sweep: arms that need no trained probe (E1/E2/E5/E7) ---
+    # plus 'encoder' (E6) when a checkpoint exists. None of this reads
+    # compression.jsonl or needs an LLM to generate anything.
+    local methods="$BENCH_METHODS"
+    local encoder_args=()
+    if [ -f "$ENCODER_OUT/config.json" ]; then
+        encoder_args=(--encoder-path "$ENCODER_OUT")
+    else
+        warn "$ENCODER_OUT/config.json not found -- dropping 'encoder' from --methods (run the encoder stage first)"
+        methods="$(echo ",$methods," | sed 's/,encoder,/,/' | sed 's/^,//; s/,$//')"
+    fi
+    if [ -n "$methods" ]; then
+        run python benchmark.py \
+            --model "$BENCH_MODEL" \
+            --methods "$methods" \
+            --ratios "$BENCH_RATIOS" \
+            --data-path "$BENCH_DATA_PATH" \
+            --output-dir "$BENCH_OUT/sweep" \
+            "${encoder_args[@]}" \
+            "${QUICK_BENCH_ARGS[@]}"
+    else
+        warn "no bench methods left to run -- skipping the VCC-Bench sweep"
+    fi
+
+    # --- Probe A/Bs (verify_tone_probe_e2e.py): same SLM, same perplexity/
+    # morphology signals, only the tone-term source differs (rule vs trained
+    # probe). Run once per probe checkpoint that exists.
+    if [ -f "$SLM_OUT/final/adapter_config.json" ] || [ -d "$SLM_OUT/final" ]; then
+        if [ -f "$SLM_OUT/tone_probe.pt" ]; then
+            run python scripts/verify_tone_probe_e2e.py \
+                --generation-model "$BENCH_MODEL" \
+                --scorer-adapter-dir "$SLM_OUT/final" \
+                --tone-probe-path "$SLM_OUT/tone_probe.pt" \
+                --ratios "$PROBE_AB_RATIOS" --max-samples "$PROBE_AB_MAX_SAMPLES" \
+                --bertscore \
+                --output-dir "$BENCH_OUT/tone_probe_ab"
+        else
+            warn "$SLM_OUT/tone_probe.pt not found -- skipping the tone-probe A/B"
+        fi
+
+        if [ -f "$PROBE_OUT/relevance_probe.pt" ]; then
+            # Same script, relevance_probe.pt in the tone-probe slot: probe_kind
+            # is auto-detected from relevance_probe_meta.json (see
+            # scripts/train_relevance_probe.py docstring). This is the headline
+            # E4 measurement -- expect worse tone preservation, better answers.
+            run python scripts/verify_tone_probe_e2e.py \
+                --generation-model "$BENCH_MODEL" \
+                --scorer-adapter-dir "$SLM_OUT/final" \
+                --tone-probe-path "$PROBE_OUT/relevance_probe.pt" \
+                --ratios "$PROBE_AB_RATIOS" --max-samples "$PROBE_AB_MAX_SAMPLES" \
+                --bertscore \
+                --output-dir "$BENCH_OUT/relevance_probe_ab"
+        else
+            warn "$PROBE_OUT/relevance_probe.pt not found -- skipping the E4 relevance-probe A/B"
+        fi
+
+        # --- Ablation: isolate perplexity/tone/morphology as three single-
+        # signal arms plus the combined 'lacc', all against VCC-Bench v2. Not
+        # gated on the encoder checkpoint -- this is purely about the LACC
+        # scorer's three signals, 'encoder' plays no part in it.
+        if [ "$BENCH_ABLATION" = 1 ]; then
+            run python benchmark.py \
+                --ablation \
+                --model "$BENCH_MODEL" \
+                --scorer-adapter-dir "$SLM_OUT/final" \
+                --tone-probe-path "$SLM_OUT/tone_probe.pt" \
+                --ratios "$BENCH_RATIOS" \
+                --data-path "$BENCH_DATA_PATH" \
+                --output-dir "$BENCH_OUT/ablation" \
+                "${QUICK_BENCH_ARGS[@]}"
+        fi
+    else
+        warn "$SLM_OUT/final not found -- skipping both probe A/Bs and the ablation sweep (run the slm stage first)"
+    fi
+
+    ok "bench sweep + probe A/Bs + ablation done"
+}
+
 # --- run ---------------------------------------------------------------------
 
 main() {
@@ -324,7 +442,7 @@ main() {
         "stage_${stage}"
     done
     ok "pipeline finished in $(( (SECONDS - started) / 60 ))m $(( (SECONDS - started) % 60 ))s"
-    log "artifacts: $SLM_OUT/final, $PROBE_OUT/relevance_probe.pt, $ENCODER_OUT"
+    log "artifacts: $SLM_OUT/final, $PROBE_OUT/relevance_probe.pt, $ENCODER_OUT, $BENCH_OUT"
 }
 
 main 2>&1 | tee -a "$RUN_LOG"

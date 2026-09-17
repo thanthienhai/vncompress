@@ -1,14 +1,34 @@
 {
   "data/vncompress_vi_v2/corpus.jsonl": {
-    "sha256": "5c89167268c511408350b708ba37f8744aa6dce15fc3a5efa03ef824687c91a2",
-    "size_bytes": 78724921
+    "sha256": "9cb0bac88b4df0c0cacaf4fd73affc89272a269af759f523dade431df66853e8",
+    "size_bytes": 78654914
   },
   "data/vncompress_vi_v2/qa.jsonl": {
-    "sha256": "d67c25d3b8ea1c8cfb00365f0f004cb10cb196007757e5f52b1767cfafb61b89",
-    "size_bytes": 128127277
+    "sha256": "da19059f63e889cef90389ae04431c9a983799aa9b2eb4b0cfd113594fce9e2a",
+    "size_bytes": 128175061
   },
   "data/vncompress_vi_v2/eval/test.jsonl": {
-    "sha256": "ebd9f84ae4eab91ff64bc295f7dacde79e5119e5a7736c42926710a706fa4df1",
-    "size_bytes": 22920810
+    "sha256": "9571872a5be7edc3672268b9d17a79c2e85ebbd1fb829fd89a7a60241b1bd9ad",
+    "size_bytes": 22948810
+  },
+  "data/vncompress_vi_v2/poetry.jsonl": {
+    "sha256": "443d6f259f473124f4abc436cf5b107cb643bad418447a955e1380eade564a63",
+    "size_bytes": 2544962
+  },
+  "data/vncompress_vi_v2/compression.jsonl": {
+    "sha256": "800c2c94eaaa56c6763598306d9eb3a6b119bfc0c36b9012d92a38c44878b916",
+    "size_bytes": 11685305
+  },
+  "data/vncompress_vi_v2/extras/compression_unanswerable.jsonl": {
+    "sha256": "2a7ceb6af6efe057fffd49af8af7ddaa879cdc0bcee28dbbc9ab05946207f745",
+    "size_bytes": 453847
+  },
+  "data/vncompress_vi_v2/_dryrun/compression.jsonl": {
+    "sha256": "4f85df1be10abc8ffc269d685c31d4376e086529db09e0afb54a0bfe9f15acc3",
+    "size_bytes": 90003
+  },
+  "data/vncompress_vi_v2/_dryrun/extras/compression_unanswerable.jsonl": {
+    "sha256": "994b871b371757aecce60d1fc83b4885f035f0fb51c94c927b0afa05e82d28ce",
+    "size_bytes": 121549
   }
 }

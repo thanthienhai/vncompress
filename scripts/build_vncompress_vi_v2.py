@@ -20,12 +20,19 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import html
 import json
 import os
 import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# A Windows console's default codepage (cp1252) cannot encode most Vietnamese
+# document titles (e.g. the overlap warning below quotes them), and this
+# script prints many. UTF-8 stdout is a no-op on Linux/macOS terminals.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from vncompress.dataset_build import (
     assign_split,
@@ -73,7 +80,14 @@ def write_jsonl(path, rows):
 
 def _corpus_row(record, seed):
     """One raw-text row: provenance, no task label whatsoever (B3/P7)."""
-    text, _ = sanitize_identifiers(record.get('text'))
+    # Defense in depth: fetch_sources_v2.py now unescapes UVW-2026 content at
+    # the source, but this also cleans a `raw_v2/uvw.jsonl` fetched before
+    # that fix without requiring a re-fetch from the Hub. No answer_span
+    # math depends on `text` (that is the QA path, built separately in
+    # build_qa from ViQuAD's own -- already clean -- `context`), so
+    # unescaping here has no offsets to break.
+    text = html.unescape(record.get('text') or '') or None
+    text, _ = sanitize_identifiers(text)
     if not text:
         return None
     doc_id = record['doc_id']

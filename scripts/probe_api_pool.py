@@ -33,6 +33,12 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Replies come back in Vietnamese; a Windows console's default codepage
+# (cp1252) can't encode most of it and print() would crash after the probe
+# already succeeded. UTF-8 stdout is a no-op on Linux/macOS terminals.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from vncompress.api_pool import (
     DEFAULT_CCU_PER_KEY,
     DEFAULT_RPM,

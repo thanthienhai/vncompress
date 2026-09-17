@@ -45,6 +45,13 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# A Windows console's default codepage (cp1252) cannot encode most Vietnamese
+# text; nothing here prints raw teacher output today, but a future debug print
+# or error message quoting the context would otherwise crash after the API
+# call already succeeded. UTF-8 stdout is a no-op on Linux/macOS terminals.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from vncompress.dataset_schema import MIN_SENTENCE_EXTRACTIVE
 from vncompress.dataset_build import (
     budget_compliance,

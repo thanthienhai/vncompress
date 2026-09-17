@@ -17,6 +17,8 @@ import pytest
 from vncompress.api_pool import (
     describe_exception,
     AUTH_STATUS,
+    CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN,
+    CLOUDFLARE_GATEWAY_TIMEOUT_STATUS,
     RATE_LIMIT_COOLDOWN,
     RETRYABLE_STATUS,
     TIMEOUT_COOLDOWN,
@@ -193,7 +195,14 @@ class TestClassify:
         assert classify(FakeHttpError(499))[1] == 'timeout'
         assert set(TIMEOUT_STATUS) == {499}
 
-    @pytest.mark.parametrize("status", [500, 502, 503, 504, 408, 522, 524, 400, 404, 422])
+    def test_524_is_a_gateway_timeout_and_is_retried(self):
+        # Cloudflare giving up waiting on the origin -- the origin is likely
+        # overloaded, not broken, so the request is worth sending again after
+        # a real wait rather than being given up on like a genuine 5xx.
+        assert classify(FakeHttpError(524))[1] == 'gateway_timeout'
+        assert set(CLOUDFLARE_GATEWAY_TIMEOUT_STATUS) == {524}
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 504, 408, 522, 400, 404, 422])
     def test_everything_else_is_logged_not_retried(self, status):
         # "fatal" is narrower than it sounds: logged and not retried in THIS
         # run. A failed item is never checkpointed, so a later run picks it up.
@@ -283,6 +292,12 @@ class TestClassify:
         delays = [ApiKey('k', 0).cool_down(429) for _ in range(3)]
         assert all(RATE_LIMIT_COOLDOWN <= d <= RATE_LIMIT_COOLDOWN * 1.25 for d in delays)
 
+    def test_a_524_waits_90_seconds_not_the_3s_given_to_a_499(self):
+        key = ApiKey('k', 0)
+        delay = key.cool_down(524, kind='gateway_timeout')
+        assert CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN <= delay <= CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN * 1.25
+        assert key.stats['cooldown_524'] == 1
+
     def test_a_timed_out_item_is_requeued_and_completes(self):
         pool = KeyPool(['a', 'b'], rpm=10 ** 6, ccu_per_key=2, account_rpm=0)
         state, lock = {'n': 0}, threading.Lock()
@@ -309,6 +324,24 @@ class TestClassify:
         _, stats = run_pool(range(3), work, pool, max_item_retries=5, log=quiet)
         assert stats['gave_up'] == 3
         assert all(count == 1 for count in attempts.values())
+
+    def test_a_524_is_requeued_and_completes(self):
+        # gateway_timeout_wait overridden to keep the test fast -- production
+        # is 90s, and this only needs to prove the item comes back, not that
+        # it waits the full window (that is test_a_524_waits_90_seconds...).
+        pool = KeyPool(['a', 'b'], rpm=10 ** 6, ccu_per_key=2, account_rpm=0,
+                       gateway_timeout_wait=0.05)
+        state, lock = {'n': 0}, threading.Lock()
+
+        def work(item, api_key, stop):
+            with lock:
+                state['n'] += 1
+                if state['n'] <= 3:
+                    raise FakeHttpError(524)
+            return item
+
+        results, stats = run_pool(range(15), work, pool, log=quiet)
+        assert len(results) == 15 and stats['gave_up'] == 0
 
 
 class TestApiKeyHealth:

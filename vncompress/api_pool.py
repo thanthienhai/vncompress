@@ -128,6 +128,14 @@ RATE_LIMIT_COOLDOWN = 60.0
 # blip pass, then the key is back in rotation.
 TIMEOUT_COOLDOWN = 3.0
 
+# 524 is Cloudflare's own "the origin took too long to answer" -- distinct
+# from a 499, which is a routine ~40s proxy timeout on a normal-length call.
+# A 524 means Cloudflare's edge (~100s budget) ran out waiting, which points
+# at the origin being genuinely overloaded, not a blip -- so this gets a real
+# wait, not the 3s given to a 499, before the same request is sent again.
+CLOUDFLARE_GATEWAY_TIMEOUT_STATUS = (524,)
+CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN = 90.0
+
 # A stale pooled connection is not the key's fault AT ALL, so the key is not
 # parked for it -- the item is simply requeued.
 #
@@ -231,7 +239,8 @@ class ApiKey:
                  ccu: int = DEFAULT_CCU_PER_KEY,
                  rate_limit_wait: float = RATE_LIMIT_COOLDOWN,
                  timeout_wait: float = TIMEOUT_COOLDOWN,
-                 disconnect_wait: float = DISCONNECT_COOLDOWN):
+                 disconnect_wait: float = DISCONNECT_COOLDOWN,
+                 gateway_timeout_wait: float = CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN):
         self.key = key
         self.index = index
         self.label = f"key{index + 1}"
@@ -243,6 +252,7 @@ class ApiKey:
         self.rate_limit_wait = rate_limit_wait
         self.timeout_wait = timeout_wait
         self.disconnect_wait = disconnect_wait
+        self.gateway_timeout_wait = gateway_timeout_wait
         self.limiter = RateLimiter(rpm)
         self.semaphore = threading.BoundedSemaphore(max(1, ccu))
         self.stats = Counter()
@@ -296,6 +306,9 @@ class ApiKey:
                 # minutes over a stale socket.
                 delay = self.timeout_wait
                 self.stats[f'timeout_{status or "conn"}'] += 1
+            elif kind == 'gateway_timeout' or status in CLOUDFLARE_GATEWAY_TIMEOUT_STATUS:
+                delay = self.gateway_timeout_wait
+                self.stats['cooldown_524'] += 1
             else:
                 delay = min(cap, base * (2 ** (self._consecutive_failures - 1)))
                 self.stats[f'cooldown_{status or "error"}'] += 1
@@ -325,9 +338,10 @@ class KeyPool:
                  account_rpm: int = DEFAULT_ACCOUNT_RPM,
                  rate_limit_wait: float = RATE_LIMIT_COOLDOWN,
                  timeout_wait: float = TIMEOUT_COOLDOWN,
-                 disconnect_wait: float = DISCONNECT_COOLDOWN):
+                 disconnect_wait: float = DISCONNECT_COOLDOWN,
+                 gateway_timeout_wait: float = CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN):
         self.keys = [ApiKey(k, i, rpm, ccu_per_key, rate_limit_wait, timeout_wait,
-                            disconnect_wait)
+                            disconnect_wait, gateway_timeout_wait)
                      for i, k in enumerate(keys)]
         if not self.keys:
             raise ValueError("KeyPool needs at least one key")
@@ -379,14 +393,16 @@ def describe_exception(exc, limit: int = 4) -> str:
 
 
 def classify(exc) -> tuple:
-    """(status, kind) where kind is 'retry' | 'timeout' | 'auth' | 'fatal'.
+    """(status, kind) where kind is 'retry' | 'timeout' | 'gateway_timeout' | 'auth' | 'fatal'.
 
-    Only 429 and 499 come back retryable. A transport failure with no status
-    (APIConnectionError, APITimeoutError, a bare reset) is `fatal` here, which
-    reads harsher than it is: fatal means "logged, not retried in THIS run",
-    and since a failed item is never checkpointed, the next run retries it
-    anyway. The trade is deliberate -- absorbing those failures into eventual
-    success is precisely what hides how often they happen.
+    Only 429, 499 and 524 come back retryable. A transport failure with no
+    status (APIConnectionError, APITimeoutError, a bare reset) is `fatal` here,
+    which reads harsher than it is: fatal means "logged, not retried in THIS
+    run", and since a failed item is never checkpointed, the next run retries
+    it anyway. The trade is deliberate -- absorbing those failures into
+    eventual success is precisely what hides how often they happen. 524 is the
+    one deliberate exception, on its own cooldown -- see
+    CLOUDFLARE_GATEWAY_TIMEOUT_COOLDOWN above.
     """
     status = getattr(exc, 'status_code', None) or getattr(
         getattr(exc, 'response', None), 'status_code', None)
@@ -394,6 +410,8 @@ def classify(exc) -> tuple:
         return status, 'auth'
     if status in TIMEOUT_STATUS:
         return status, 'timeout'
+    if status in CLOUDFLARE_GATEWAY_TIMEOUT_STATUS:
+        return status, 'gateway_timeout'
     if status in RETRYABLE_STATUS:
         return status, 'retry'
     if status is None and _transport_kind(exc):
@@ -515,7 +533,7 @@ def run_pool(items, work, pool: KeyPool, on_result=None, on_giveup=None, on_erro
                     if not pool.live_keys:
                         stop.set()
                     return
-                if kind in ('retry', 'timeout') and attempts + 1 < max_item_retries:
+                if kind in ('retry', 'timeout', 'gateway_timeout') and attempts + 1 < max_item_retries:
                     delay = api_key.cool_down(status, kind=kind)
                     stats[f'retry_{status or "conn"}'] += 1
                     if delay > 0:
