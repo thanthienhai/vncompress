@@ -55,6 +55,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from .linguistics import (
+    QUERY_PREFIX_TEMPLATE,
     MorphologyAnalyzer,
     MorphologyConfig,
     VietnameseToneAnalyzer,
@@ -887,10 +888,30 @@ class LACCScorer:
         self.window_size = window_size
         self.stride = stride if stride is not None else _default_stride(window_size)
 
+    def _probe_prefix_ids(self, question: Optional[str]) -> List[int]:
+        """Question ids to prepend before the probe reads a window, or [].
+
+        Only a probe whose meta declares `query_conditioned` was trained behind
+        this prefix (models.load_scorer sets the flag). Prepending it for any
+        other probe would feed it a format it never saw; omitting it for this
+        one would hide the question the probe exists to condition on.
+        """
+        if not question or not getattr(self.tone_probe, 'query_conditioned', False):
+            return []
+        template = getattr(self.tone_probe, 'query_template', None) or QUERY_PREFIX_TEMPLATE
+        return self.tokenizer.encode(template.format(query=question), add_special_tokens=False)
+
     @torch.no_grad()
-    def _token_signals(self, ids: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _token_signals(self, ids: Sequence[int], question: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-SLM-token (perplexity, model-tone) computed in a single
-        sliding-window pass -- tone defaults to neutral 1.0 where no probe is set."""
+        sliding-window pass -- tone defaults to neutral 1.0 where no probe is set.
+
+        `question` is used only by a query-conditioned relevance probe: it is
+        prepended to each window and sliced back off, so the probe scores the
+        same context tokens it would have scored anyway, but from hidden states
+        that have attended to the question. The perplexity channel is untouched
+        (its query-aware variant is the contrastive path in `char_signals`).
+        """
         n = len(ids)
         ppl, tone = torch.zeros(n), torch.ones(n)
         if n == 0:
@@ -898,6 +919,7 @@ class LACCScorer:
         device = next(self.model.parameters()).device
         window = self.window_size
         stride = max(1, min(self.stride, window - 1)) if window > 1 else 1
+        prefix = self._probe_prefix_ids(question)
 
         begin, prev_end = 0, 0
         while begin < max(n - 1, 1):
@@ -906,7 +928,7 @@ class LACCScorer:
             if len(chunk) < 2:
                 break
             tensor = torch.tensor([chunk], device=device)
-            out = self.model(tensor, output_hidden_states=self.tone_probe is not None)
+            out = self.model(tensor, output_hidden_states=self.tone_probe is not None and not prefix)
             log_probs = F.log_softmax(out.logits.float()[:, :-1, :], dim=-1)
             token_lp = log_probs.gather(-1, tensor[:, 1:].unsqueeze(-1)).squeeze(-1)
             importance = (-token_lp[0]).cpu()
@@ -919,7 +941,13 @@ class LACCScorer:
                     ppl[pos] = importance[k]
 
             if self.tone_probe is not None:
-                h = out.hidden_states[-1].to(self.tone_probe.tone_classifier[0].weight.dtype)
+                if prefix:
+                    conditioned = torch.tensor([prefix + chunk], device=device)
+                    hidden = self.model(conditioned, output_hidden_states=True).hidden_states[-1]
+                    hidden = hidden[:, len(prefix):, :]
+                else:
+                    hidden = out.hidden_states[-1]
+                h = hidden.to(self.tone_probe.tone_classifier[0].weight.dtype)
                 tone_imp = self.tone_probe.score_importance(h)[0].cpu()
                 tone_start = 0 if begin == 0 else prev_end
                 for j in range(tone_imp.numel()):
@@ -965,13 +993,19 @@ class LACCScorer:
             self.model, list(ids), list(question_ids), window_size=self.window_size, stride=self.stride,
         )
 
-    def char_signals(self, text: str, question: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def char_signals(self, text: str, question: Optional[str] = None,
+                     probe_question: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-character (perplexity, model-tone); NaN where no scorer token
         covers the character, so the caller can distinguish that from a real 0.
 
         When `question` is given, the perplexity channel carries the LongLLMLingua
         contrastive score plain_ppl - conditioned_ppl (higher = more relevant to
-        the question) instead of plain perplexity."""
+        the question) instead of plain perplexity.
+
+        `probe_question` conditions only the PROBE channel. A caller that wants
+        query-conditioned relevance but not contrastive perplexity passes this
+        instead of `question`, and so does not pay for the second sliding-window
+        pass `_conditioned_ppl` costs."""
         ppl_char = torch.full((len(text),), float('nan'))
         tone_char = torch.full((len(text),), float('nan'))
         if not text:
@@ -979,7 +1013,7 @@ class LACCScorer:
         ids, offsets = self._offsets(text)
         if not ids:
             return ppl_char, tone_char
-        ppl, tone = self._token_signals(ids)
+        ppl, tone = self._token_signals(ids, question=probe_question or question)
         if question:
             question_ids = self.tokenizer.encode(question, add_special_tokens=False)
             if question_ids:
@@ -1127,13 +1161,23 @@ class LACCCompressor(BaseCompressor):
             suffix += '|classprop'
         return 'LACC[' + '+'.join(parts) + ']' + suffix
 
-    def _compute_model_tone_weights(self, input_ids: List[int]) -> torch.Tensor:
+    def _compute_model_tone_weights(self, input_ids: List[int], query: Optional[str] = None) -> torch.Tensor:
         """Trained tone probe scored on `model`'s own hidden states (same
         tokenizer as `self.tokenizer`) -- only meaningful when the probe was
-        trained on this exact model."""
-        input_t = torch.tensor([input_ids], device=next(self.model.parameters()).device)
+        trained on this exact model.
+
+        A query-conditioned relevance probe additionally gets the question
+        prepended and sliced back off, matching how it was trained."""
+        device = next(self.model.parameters()).device
+        prefix = []
+        if query and getattr(self._tone_probe, 'query_conditioned', False):
+            template = getattr(self._tone_probe, 'query_template', None) or QUERY_PREFIX_TEMPLATE
+            prefix = self.tokenizer.encode(template.format(query=query), add_special_tokens=False)
+        input_t = torch.tensor([prefix + list(input_ids)], device=device)
         with torch.no_grad():
             hidden_states = self.model(input_t, output_hidden_states=True).hidden_states[-1]
+        if prefix:
+            hidden_states = hidden_states[:, len(prefix):, :]
         self._tone_probe.to(hidden_states.device)
         return self._tone_probe.score_importance(hidden_states).squeeze(0).cpu()
 
@@ -1189,7 +1233,14 @@ class LACCCompressor(BaseCompressor):
             tone_scores = torch.ones(n)
         elif self.tone_source == 'model' and self.scorer is not None and self.scorer.tone_probe is not None:
             text, spans, _ = _token_spans(self.tokenizer, input_ids)
-            _, tone_char = self.scorer.char_signals(text)
+            # Same rule as the perplexity branch above: only widen the call when
+            # the extra argument would change anything, so a scorer with a plain
+            # char_signals(text) signature keeps working.
+            probe_query = query if getattr(self.scorer.tone_probe, 'query_conditioned', False) else None
+            if probe_query:
+                _, tone_char = self.scorer.char_signals(text, probe_question=probe_query)
+            else:
+                _, tone_char = self.scorer.char_signals(text)
             tone_scores = _pool_char_to_token(tone_char, spans, n, fill_neutral=False)
             # A token the scorer never covered falls back to the rule weight,
             # rather than being (wrongly) treated as tone-neutral.
@@ -1197,7 +1248,7 @@ class LACCCompressor(BaseCompressor):
             if uncovered.any():
                 tone_scores[uncovered] = rule_tone_scores[uncovered]
         elif self.tone_source == 'model' and self._tone_probe is not None and self.model is not None:
-            tone_scores = self._compute_model_tone_weights(input_ids)
+            tone_scores = self._compute_model_tone_weights(input_ids, query=query)
         else:
             tone_scores = rule_tone_scores
 

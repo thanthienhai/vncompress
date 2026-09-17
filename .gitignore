@@ -38,6 +38,8 @@ data/raw_v2/
 data/vncompress_vi_v2/*.jsonl
 data/vncompress_vi_v2/extras/
 data/vncompress_vi_v2/eval/
+# The dataset card, when the files are pulled from the Hub rather than rebuilt.
+data/vncompress_vi_v2/README.md
 # Resume state and dry-run rehearsals, not data. The rest of provenance/ IS
 # committed -- split manifest, leak check, checksums, verification report and
 # the human review queue are the evidence the build happened as described.
@@ -59,3 +61,6 @@ data/vncompress_vi_v2/provenance/api_errors*.jsonl
 # API credentials. `.env.example` is the committed template.
 .env
 .env.local
+
+# run_pipeline.sh writes one timestamped log per run.
+logs/

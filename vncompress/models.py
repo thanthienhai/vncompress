@@ -327,7 +327,12 @@ def resize_embeddings_if_needed(model, tokenizer) -> bool:
     if len(tokenizer) == model.get_input_embeddings().weight.shape[0]:
         return False
     old_rows = model.get_input_embeddings().weight.shape[0]
-    model.resize_token_embeddings(len(tokenizer))
+    # `mean_resizing=False` because the rows are zeroed two lines below anyway.
+    # The default fits a multivariate normal over the whole 50257x768 embedding
+    # matrix to initialise ONE pad row, and that covariance step segfaults the
+    # interpreter here (exit 139, before any training starts) -- paying for work
+    # that is then overwritten.
+    model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
     with torch.no_grad():
         model.get_input_embeddings().weight[old_rows:].zero_()
         out = model.get_output_embeddings()
@@ -432,6 +437,7 @@ def load_scorer(
         meta_path = _os.path.join(meta_dir, f'{probe_base}_meta.json')
         if not _os.path.exists(meta_path):  # back-compat with the original fixed name
             meta_path = _os.path.join(meta_dir, 'tone_probe_meta.json')
+        meta = {}
         if _os.path.exists(meta_path):
             import json as _json
 
@@ -460,6 +466,12 @@ def load_scorer(
             )
         tone_probe.load_state_dict(state)
         tone_probe = tone_probe.to(device=device, dtype=dtype).eval()
+        # A probe trained behind a question prefix must be READ behind the same
+        # prefix; scoring it on bare context is a format it never saw. The flag
+        # travels on the probe so LACCScorer needs no separate meta plumbing,
+        # and defaults to False so every probe trained before this stays put.
+        tone_probe.query_conditioned = bool(meta.get('query_conditioned'))
+        tone_probe.query_template = meta.get('query_template')
 
     from .compression import LACCScorer
 

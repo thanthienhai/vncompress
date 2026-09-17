@@ -9,6 +9,8 @@ See docs/dataset_rebuild_spec.md and docs/dataset_v1_baseline.md.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import unicodedata
 from typing import Optional
@@ -403,6 +405,45 @@ def document_key(doc_id: Optional[str]) -> str:
     _, separator, rest = str(doc_id).partition(':')
     body = rest if separator else str(doc_id)
     return unicodedata.normalize('NFC', body).strip().lower().replace(' ', '_')
+
+
+def external_eval_documents(paths):
+    """Document keys already used by an EXTERNAL benchmark, so training on them
+    contaminates that benchmark.
+
+    Measured case: `viquad:Hà_Nội` sits in the v2 qa TRAIN split, and 32 of the
+    414 samples in data/benchmark/vcc_bench_v2.json (7.7%) are the same
+    Wikipedia article -- 54 sentences verbatim on both sides. WAVE2_HANDOFF.md
+    already warns against training E4 on vcc_bench; the leak arrives from the
+    other direction.
+
+    Reads VCC-Bench-shaped JSON (`samples` with `title`) and the v2 JSONL
+    shape, so the same call covers a benchmark file or another dataset's eval
+    split. Titles are reduced with `document_key`, which is what makes
+    "Hà Nội" and `viquad:Hà_Nội` the same document.
+
+    A missing path is `SystemExit`, not an empty set: silently holding out
+    nothing because of a typo is the failure this mechanism exists to prevent.
+    """
+    keys = set()
+    for path in paths or ():
+        if not os.path.exists(path):
+            raise SystemExit(f"--holdout-docs-from: {path} not found")
+        with open(path, encoding='utf-8') as f:
+            if path.endswith('.jsonl'):
+                records = [json.loads(line) for line in f if line.strip()]
+            else:
+                payload = json.load(f)
+                records = payload.get('samples') if isinstance(payload, dict) else payload
+        for record in records or ():
+            if not isinstance(record, dict):
+                continue
+            for field in ('doc_id', 'title'):
+                value = record.get(field)
+                if value:
+                    keys.add(document_key(str(value).replace(' ', '_')))
+                    break
+    return keys
 
 
 def normalize_compression(text: Optional[str]) -> str:

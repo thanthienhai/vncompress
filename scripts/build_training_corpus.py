@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Build a larger Vietnamese training corpus for the SLM external-scorer +
+"""SUPERSEDED by vncompress-vi-v2's `corpus.jsonl`, which every training
+entrypoint now reads by default (vncompress.training.load_training_texts).
+That corpus is larger (56,536 training texts over 3,217 documents, against the
+22,178 texts this script produces), carries the split field that keeps the eval
+documents out of training, and is checksummed in provenance/. Keep this script
+for reproducing the v1 corpus; do not build a new one with it.
+
+Build a larger Vietnamese training corpus for the SLM external-scorer +
 tone probe (train.py --mode slm), mixing two Hugging Face sources:
 
   - undertheseanlp/UVW-2026 (Vietnamese Wikipedia, cleaned, CC BY-SA 4.0)

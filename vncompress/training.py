@@ -27,17 +27,20 @@ import hashlib
 import json
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
+from .dataset_build import document_key, external_eval_documents
 from .linguistics import (
+    QUERY_PREFIX_TEMPLATE,
     TONE_NAME_TO_ID,
     PhonologicalConsistencyLoss,
     RelevanceConsistencyLoss,
     build_relevance_labels,
+    build_relevance_labels_from_offsets,
     get_tone_analyzer,
 )
 from .models import lora_target_modules, resize_embeddings_if_needed
@@ -73,33 +76,112 @@ def _demo_texts() -> List[str]:
     ]
 
 
-def load_training_texts(data_path: Optional[str] = None) -> List[str]:
-    """Load training texts from a JSON file, falling back to the bundled
-    VCC-Bench training corpus, then to a small built-in demo corpus.
+MIN_TRAINING_CHARS = 200
 
-    Accepted JSON shapes: {"paragraphs": [{"text": ...}, ...]},
-    {"samples": [{"context": ...}, ...]}, or a flat list of strings/dicts.
+# The v2 corpus and this repo's benchmark are both Vietnamese Wikipedia, so they
+# overlap by construction. Every training entrypoint holds these documents out
+# by default and says so, because a contaminated benchmark is not detectable
+# from the score it produces.
+DEFAULT_BENCHMARK_HOLDOUT = os.path.join('data', 'benchmark', 'vcc_bench_v2.json')
+
+
+def resolve_holdout_documents(paths=None, disabled: bool = False) -> Sequence[str]:
+    """Document keys a training run must exclude, with the repo's own benchmark
+    as the default. Prints what it held out; returns () when disabled."""
+    if disabled:
+        print("Holdout disabled: training may include benchmark documents.")
+        return ()
+    paths = list(paths or [])
+    if not paths and os.path.exists(DEFAULT_BENCHMARK_HOLDOUT):
+        paths = [DEFAULT_BENCHMARK_HOLDOUT]
+    if not paths:
+        return ()
+    keys = sorted(external_eval_documents(paths))
+    print(f"Holding out {len(keys)} document(s) used by {', '.join(paths)}")
+    return keys
+
+
+def _load_corpus_jsonl(path, split, holdout_keys, min_chars, lang) -> List[str]:
+    """vncompress-vi-v2 `corpus.jsonl`: one paragraph per line.
+
+    `split` matters more here than in the old JSON corpus: 6,766 of the 72,301
+    rows are the `test` split, and `eval/test.jsonl` is drawn from those same
+    documents. Defaulting to `train` makes training on them impossible rather
+    than merely discouraged.
+    """
+    texts, documents, dropped_split, dropped_lang, dropped_holdout = [], set(), 0, 0, 0
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if split and row.get('split') != split:
+                dropped_split += 1
+                continue
+            if holdout_keys and document_key(row.get('doc_id', '')) in holdout_keys:
+                dropped_holdout += 1
+                continue
+            # 2,410 rows are labelled `en`, and sampling them shows MediaWiki
+            # timeline markup ("barset:Presidents from:1789.40 till:1797.17")
+            # and English bibliographies, not Vietnamese prose. Neither teaches
+            # a Vietnamese LM anything (dataset_v2_review.md SS5.1).
+            if lang and row.get('text_lang') != lang:
+                dropped_lang += 1
+                continue
+            text = row.get('text', '')
+            if len(text) <= min_chars:
+                continue
+            texts.append(text)
+            documents.add(document_key(row.get('doc_id', '')))
+    print(f"Training corpus: {len(texts):,} texts over {len(documents):,} documents "
+          f"from {path} (split={split!r})")
+    if dropped_split or dropped_lang or dropped_holdout:
+        print(f"  dropped: {dropped_split:,} other-split, {dropped_lang:,} non-{lang}, "
+              f"{dropped_holdout:,} held-out-document")
+    return texts
+
+
+def load_training_texts(
+    data_path: Optional[str] = None,
+    split: Optional[str] = 'train',
+    holdout_docs: Iterable[str] = (),
+    min_chars: int = MIN_TRAINING_CHARS,
+    lang: Optional[str] = 'vi',
+) -> List[str]:
+    """Load training texts, preferring vncompress-vi-v2's `corpus.jsonl`.
+
+    `.jsonl` is read as the v2 corpus shape and filtered by `split`,
+    `holdout_docs` (documents an external benchmark uses) and `lang`. `.json`
+    keeps the older shapes: {"paragraphs": [{"text": ...}]},
+    {"samples": [{"context": ...}]}, or a flat list of strings/dicts -- those
+    carry no split, so the filters do not apply to them.
     """
     if data_path and os.path.exists(data_path):
+        if data_path.endswith('.jsonl'):
+            holdout_keys = {document_key(str(d).replace(' ', '_')) for d in holdout_docs if d}
+            return _load_corpus_jsonl(data_path, split, holdout_keys, min_chars, lang)
         with open(data_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if isinstance(data, dict) and 'paragraphs' in data:
-            return [p['text'] for p in data['paragraphs'] if len(p['text']) > 200]
+            return [p['text'] for p in data['paragraphs'] if len(p['text']) > min_chars]
         if isinstance(data, dict) and 'samples' in data:
-            return [s.get('context', '') for s in data['samples'] if len(s.get('context', '')) > 200]
+            return [s.get('context', '') for s in data['samples'] if len(s.get('context', '')) > min_chars]
         if isinstance(data, list):
             return [item if isinstance(item, str) else item.get('text', item.get('context', '')) for item in data]
         return []
 
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for candidate in (
+        os.path.join(here, 'data', 'vncompress_vi_v2', 'corpus.jsonl'),
         os.path.join(here, 'data', 'benchmark', 'training_corpus_v1.json'),
         os.path.join(here, 'data', 'benchmark', 'wikipedia_vi_raw.json'),
         os.path.join(here, 'vcc_bench_data', 'training_corpus_v1.json'),
         os.path.join(here, 'vcc_bench_data', 'wikipedia_vi_raw.json'),
     ):
         if os.path.exists(candidate):
-            return load_training_texts(candidate)
+            return load_training_texts(candidate, split=split, holdout_docs=holdout_docs,
+                                       min_chars=min_chars, lang=lang)
     return _demo_texts()
 
 
@@ -252,6 +334,7 @@ def run_lacc_training(
     max_steps: int = -1,
     train_data_path: Optional[str] = None,
     device: str = 'cuda',
+    holdout_docs: Iterable[str] = (),
 ):
     """Fine-tune `model_name` with LoRA + the phonological consistency
     auxiliary loss. Saves `<output_dir>/final` (LoRA adapter + tokenizer) and
@@ -297,7 +380,7 @@ def run_lacc_training(
     ))
     model.print_trainable_parameters()
 
-    texts = load_training_texts(train_data_path)
+    texts = load_training_texts(train_data_path, holdout_docs=holdout_docs)
     dataset = ToneTrainingDataset(texts, tokenizer, max_length=max_length)
     collator = ToneDataCollator(pad_token_id=tokenizer.pad_token_id, max_length=max_length)
     print(f"  {len(dataset)} training samples from {len(texts)} texts")
@@ -388,6 +471,7 @@ def run_slm_training(
     max_steps: int = -1,
     gradient_checkpointing: bool = True,
     base_dtype: str = 'float32',
+    holdout_docs: Iterable[str] = (),
     load_4bit: bool = False,
 ):
     """LoRA fine-tune a small Vietnamese causal LM with the tone auxiliary
@@ -445,7 +529,8 @@ def run_slm_training(
     ))
     model.print_trainable_parameters()
 
-    dataset = VietnameseToneDataset(load_training_texts(train_data_path), tokenizer, max_length)
+    dataset = VietnameseToneDataset(
+        load_training_texts(train_data_path, holdout_docs=holdout_docs), tokenizer, max_length)
     if len(dataset) < 2:
         raise RuntimeError("Need at least two usable texts in the training dataset.")
     train_n = min(max(1, int(len(dataset) * 0.9)), len(dataset) - 1)
@@ -529,56 +614,220 @@ def run_slm_training(
 # probe_kind='relevance') and plugs into LACC's tone_source='model' path.
 
 
-def load_relevance_samples(data_path: Optional[str], tasks=('long_document_qa', 'needle_in_haystack')) -> List[dict]:
-    """Load (context, reference_answer) pairs from a VCC-Bench-shaped JSON
-    ({"samples": [{context, reference_answer, task}]}), keeping only tasks whose
-    answer is a span/needle in the context (so span-overlap supervision is
-    meaningful). Falls back to the built-in demo QA if no file is present."""
-    if data_path and os.path.exists(data_path):
-        with open(data_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        samples = data.get('samples', data if isinstance(data, list) else [])
-        out = [
-            {'context': s.get('context', ''), 'reference_answer': s.get('reference_answer', '')}
-            for s in samples
-            if (not tasks or s.get('task') in tasks)
-            and len(s.get('context', '')) > 100 and s.get('reference_answer')
-        ]
-        if out:
-            return out
-    # Minimal fallback so the pipeline is runnable without a dataset file.
-    return [
-        {'context': "Công ty XYZ được thành lập năm 2010 tại Thành phố Hồ Chí Minh và hoạt động "
-                    "trong lĩnh vực công nghệ. Mã kích hoạt của hệ thống là BẢO MẬT bảy ba hai. "
-                    "Công ty có hơn năm nghìn nhân viên trên toàn quốc.",
-         'reference_answer': "BẢO MẬT bảy ba hai"},
-        {'context': "Luật Bảo vệ Môi trường năm 2020 quy định nguyên tắc bảo vệ môi trường là "
-                    "quyền và trách nhiệm của mọi tổ chức, cá nhân, phải công khai, minh bạch.",
-         'reference_answer': "quyền và trách nhiệm của mọi tổ chức, cá nhân"},
-    ]
+# Tasks whose answer is a verbatim span/needle in the context, so span
+# supervision means something. `short_context_extractive_qa` is the v2 name for
+# rows under LONG_DOCUMENT_MIN_TOKENS; it is just as extractive as the long ones
+# and dropping it would throw away 2,813 of vncompress-vi-v2's 6,000 qa rows.
+RELEVANCE_TASKS = ('long_document_qa', 'needle_in_haystack', 'short_context_extractive_qa')
+
+
+def _relevance_row(context, query, answer, answer_span, task, doc_id, split) -> Optional[dict]:
+    """One normalized supervision row, or None if it cannot supervise anything."""
+    if len(context) <= 100 or not answer:
+        return None
+    span = None
+    if isinstance(answer_span, (list, tuple)) and len(answer_span) == 2:
+        start, end = int(answer_span[0]), int(answer_span[1])
+        # Trust the corpus only as far as it checks out: a span that does not
+        # quote the answer back is a broken label, not a usable one.
+        if 0 <= start < end <= len(context) and context[start:end] == answer:
+            span = (start, end)
+    return {'context': context, 'query': query or '', 'reference_answer': answer,
+            'answer_span': span, 'task': task or '', 'doc_id': doc_id or '', 'split': split or ''}
+
+
+def _load_relevance_jsonl(path, tasks, split, holdout_keys) -> List[dict]:
+    """vncompress-vi-v2 `qa.jsonl`: one JSON object per line, carrying the
+    verified `answer_span` that makes exact token labels possible."""
+    out = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if split and row.get('split') != split:
+                continue
+            if tasks and row.get('task') not in tasks:
+                continue
+            if holdout_keys and document_key(row.get('doc_id', '')) in holdout_keys:
+                continue
+            sample = _relevance_row(row.get('context', ''), row.get('query', ''), row.get('answer', ''),
+                                    row.get('answer_span'), row.get('task'), row.get('doc_id'), row.get('split'))
+            if sample:
+                out.append(sample)
+    return out
+
+
+def _load_relevance_json(path, tasks, split, holdout_keys) -> List[dict]:
+    """VCC-Bench-shaped JSON ({"samples": [{context, reference_answer, task}]}).
+    No `answer_span` here, so these rows fall back to syllable-overlap labels."""
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    records = data.get('samples', data if isinstance(data, list) else [])
+    out = []
+    for row in records or ():
+        if not isinstance(row, dict):
+            continue
+        if tasks and row.get('task') not in tasks:
+            continue
+        doc_id = row.get('doc_id') or row.get('title') or ''
+        if holdout_keys and document_key(str(doc_id).replace(' ', '_')) in holdout_keys:
+            continue
+        sample = _relevance_row(row.get('context', ''), row.get('query', '') or row.get('question', ''),
+                                row.get('reference_answer', ''), row.get('answer_span'),
+                                row.get('task'), doc_id, row.get('split'))
+        if sample:
+            out.append(sample)
+    return out
+
+
+def load_relevance_samples(
+    data_path: Optional[str],
+    tasks: Optional[Sequence[str]] = RELEVANCE_TASKS,
+    split: Optional[str] = None,
+    holdout_docs: Iterable[str] = (),
+) -> List[dict]:
+    """Load (context, query, answer, answer_span) supervision rows for E4.
+
+    `.jsonl` reads the vncompress-vi-v2 `qa` shape, `.json` the VCC-Bench shape.
+    `split` filters on the row's own split field; `holdout_docs` drops documents
+    an external benchmark already uses (reduced through `document_key`, so
+    "Hà Nội" and `viquad:Hà_Nội` are the same document).
+
+    Raises rather than substituting demo data. The previous version fell back to
+    two hardcoded sentences whenever the path did not parse, which is what the
+    shipped default did: `training_corpus_v1.json` is `{metadata, paragraphs}`,
+    has no `samples` key, and so trained -- and saved -- a probe on 2 rows while
+    looking like a normal run.
+    """
+    if not data_path:
+        raise ValueError(
+            "Relevance-probe training needs --data-path: a vncompress-vi-v2 qa.jsonl "
+            "or a VCC-Bench-shaped training JSON.")
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Relevance corpus not found: {data_path}\n"
+            "Fetch the dataset first, e.g.\n"
+            "  huggingface-cli download anhalu/vncompress-vi-v2 qa.jsonl "
+            "--repo-type dataset --local-dir data/vncompress_vi_v2")
+    holdout_keys = {document_key(str(d).replace(' ', '_')) for d in holdout_docs if d}
+    reader = _load_relevance_jsonl if data_path.endswith('.jsonl') else _load_relevance_json
+    samples = reader(data_path, tuple(tasks) if tasks else (), split, holdout_keys)
+    if not samples:
+        raise RuntimeError(
+            f"No usable relevance rows in {data_path} "
+            f"(split={split!r}, tasks={tuple(tasks) if tasks else 'any'}, "
+            f"{len(holdout_keys)} held-out document(s)). Expected rows with a context "
+            "longer than 100 chars and a non-empty answer.")
+    return samples
+
+
+def _span_window(ids, offsets, answer_span, budget: int):
+    """Token window of at most `budget` tokens that contains the answer span.
+
+    v2 contexts run to 24,000 characters and 81% of answers start past char
+    1,024, so encoding from the beginning and truncating at max_length cuts the
+    positive labels off 4,857 of 6,000 rows -- the sample then either drops out
+    or trains on whatever syllables happened to collide. Centring the window on
+    the span keeps the supervision the corpus actually paid for.
+    """
+    start_char, end_char = answer_span
+    hits = [i for i, (a, b) in enumerate(offsets)
+            if b > a and a < end_char and b > start_char]
+    if not hits:
+        return None
+    first, last = hits[0], hits[-1]
+    if last - first + 1 >= budget:
+        lo, hi = first, first + budget
+    else:
+        lo = max(0, first - (budget - (last - first + 1)) // 2)
+        hi = min(len(ids), lo + budget)
+        lo = max(0, hi - budget)
+    return list(ids[lo:hi]), list(offsets[lo:hi])
 
 
 class RelevanceDataset(Dataset):
-    """Causal-LM token ids plus a per-token answer-relevance label built by
-    span overlap with the reference answer (build_relevance_labels)."""
+    """Causal-LM token ids plus per-token answer-relevance labels.
 
-    def __init__(self, samples: List[dict], tokenizer, max_length: int):
-        self.samples = []
-        for s in samples:
-            ids = tokenizer.encode(s['context'], add_special_tokens=True, truncation=True, max_length=max_length)
+    Labels come from the corpus's verified `answer_span` when there is one
+    (exact: a token is positive iff it overlaps the span) and from
+    syllable overlap otherwise. With `query_template`, the question is prefixed
+    to the context and its tokens are labelled `ignore_index`, so the probe
+    reads question-conditioned hidden states but is scored only on the context.
+    """
+
+    def __init__(self, samples: List[dict], tokenizer, max_length: int,
+                 query_template: Optional[str] = None, ignore_index: int = -100):
+        self.samples: List[Tuple[List[int], List[int]]] = []
+        self.stats = {'span_labelled': 0, 'overlap_labelled': 0, 'dropped_no_positive': 0,
+                      'dropped_too_short': 0, 'dropped_span_untokenizable': 0}
+        can_offset = bool(getattr(tokenizer, 'is_fast', False))
+        max_prefix = max(16, max_length // 4)
+
+        for sample in samples:
+            prefix_ids: List[int] = []
+            if query_template and sample.get('query'):
+                prefix_ids = tokenizer.encode(query_template.format(query=sample['query']),
+                                              add_special_tokens=False)[:max_prefix]
+            budget = max_length - len(prefix_ids)
+            if budget < 10:
+                self.stats['dropped_too_short'] += 1
+                continue
+
+            ids, labels = None, None
+            if sample.get('answer_span') and can_offset:
+                encoded = tokenizer(sample['context'], add_special_tokens=False,
+                                    return_offsets_mapping=True)
+                window = _span_window(encoded['input_ids'], encoded['offset_mapping'],
+                                      sample['answer_span'], budget)
+                if window is None:
+                    self.stats['dropped_span_untokenizable'] += 1
+                else:
+                    ids, offsets = window
+                    labels = build_relevance_labels_from_offsets(
+                        offsets, sample['answer_span'], ignore_index=ignore_index)
+                    self.stats['span_labelled'] += 1
+            if ids is None:
+                ids = tokenizer.encode(sample['context'], add_special_tokens=True,
+                                       truncation=True, max_length=budget)
+                labels = build_relevance_labels(tokenizer, ids, sample['reference_answer'],
+                                                ignore_index=ignore_index)
+                self.stats['overlap_labelled'] += 1
+
             if len(ids) < 10:
+                self.stats['dropped_too_short'] += 1
                 continue
-            labels = build_relevance_labels(tokenizer, ids, s['reference_answer'])
-            # Skip degenerate samples where no token is positive (nothing to learn).
             if not any(lab == 1 for lab in labels):
+                self.stats['dropped_no_positive'] += 1
                 continue
-            self.samples.append((ids, labels))
+            self.samples.append((prefix_ids + ids, [ignore_index] * len(prefix_ids) + labels))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
         return self.samples[index]
+
+
+def relevance_class_weights(dataset, cap: float = 50.0) -> List[float]:
+    """Inverse-frequency CE weights [irrelevant, relevant] for a RelevanceDataset.
+
+    The answer span is a small minority of every window, so unweighted training
+    converges on "nothing is relevant" -- high accuracy, useless probe. The
+    negative class keeps weight 1 and the positive one is scaled by how much
+    rarer it is, capped so a freak batch cannot produce an enormous gradient.
+    """
+    positive = negative = 0
+    for _, labels in dataset.samples:
+        for label in labels:
+            if label == 1:
+                positive += 1
+            elif label == 0:
+                negative += 1
+    if not positive:
+        return [1.0, 1.0]
+    return [1.0, min(negative / positive, cap)]
 
 
 class RelevanceCollator:
@@ -611,12 +860,18 @@ def run_relevance_probe_training(
     use_adapter: bool = True,
     epochs: int = 3,
     batch_size: int = 8,
-    max_length: int = 256,
+    max_length: int = 512,
     lr: float = 1e-3,
     max_steps: int = -1,
     base_dtype: str = 'float32',
     load_4bit: bool = False,
     seed: int = 42,
+    split: Optional[str] = 'train',
+    val_split: Optional[str] = 'validation',
+    holdout_docs: Iterable[str] = (),
+    query_conditioned: bool = True,
+    min_samples: int = 32,
+    balance_classes: bool = True,
 ):
     """Train ONLY a query-relevance probe on a frozen SLM's hidden states (E4).
 
@@ -666,15 +921,44 @@ def run_relevance_probe_training(
     for p in model.parameters():
         p.requires_grad_(False)
 
-    samples = load_relevance_samples(train_data_path)
-    dataset = RelevanceDataset(samples, tokenizer, max_length)
-    if len(dataset) < 1:
-        raise RuntimeError("No usable relevance-labelled samples (need answers that overlap their context).")
+    query_template = QUERY_PREFIX_TEMPLATE if query_conditioned else None
+    holdout_docs = tuple(holdout_docs)
+    samples = load_relevance_samples(train_data_path, split=split, holdout_docs=holdout_docs)
+    dataset = RelevanceDataset(samples, tokenizer, max_length, query_template=query_template)
+    if len(dataset) < min_samples:
+        raise RuntimeError(
+            f"Only {len(dataset)} usable relevance-labelled sample(s) from {train_data_path} "
+            f"(split={split!r}); need at least {min_samples}. Label stats: {dataset.stats}. "
+            "Lower --min-samples only if you mean to train on that few.")
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         collate_fn=RelevanceCollator(tokenizer.pad_token_id))
-    print(f"  {len(dataset)} relevance-labelled samples")
+    train_documents = {document_key(s['doc_id']) for s in samples if s.get('doc_id')}
+    print(f"  {len(dataset)} relevance-labelled samples over {len(train_documents)} document(s)")
+    print(f"  labels: {dataset.stats}")
+    print(f"  query-conditioned: {query_conditioned}")
 
-    probe = RelevanceConsistencyLoss(model.config.hidden_size, lambda_relevance=1.0).to(device)
+    val_loader = None
+    val_dataset = None
+    if val_split:
+        try:
+            val_samples = load_relevance_samples(train_data_path, split=val_split, holdout_docs=holdout_docs)
+        except RuntimeError:
+            val_samples = []
+        if val_samples:
+            val_dataset = RelevanceDataset(val_samples, tokenizer, max_length, query_template=query_template)
+            if len(val_dataset):
+                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                                        collate_fn=RelevanceCollator(tokenizer.pad_token_id))
+                print(f"  {len(val_dataset)} validation samples")
+    if val_loader is None:
+        print("  WARNING: no validation split -- the probe will be saved without an accuracy number.")
+
+    class_weights = relevance_class_weights(dataset) if balance_classes else None
+    if class_weights:
+        print(f"  class weights [irrelevant, relevant]: "
+              f"[{class_weights[0]:.2f}, {class_weights[1]:.2f}]")
+    probe = RelevanceConsistencyLoss(model.config.hidden_size, lambda_relevance=1.0,
+                                     class_weights=class_weights).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=0.01)
     scaler = torch.amp.GradScaler('cuda')
 
@@ -702,6 +986,13 @@ def run_relevance_probe_training(
         if 0 < max_steps <= step:
             break
 
+    val_metrics = evaluate_relevance_probe(probe, model, val_loader, device) if val_loader else None
+    if val_metrics:
+        print(f"  validation: accuracy={val_metrics['accuracy']:.4f} "
+              f"P={val_metrics['precision']:.4f} R={val_metrics['recall']:.4f} "
+              f"F1={val_metrics['f1']:.4f} (positives={val_metrics['support_positive']}/"
+              f"{val_metrics['support_total']})")
+
     os.makedirs(output_dir, exist_ok=True)
     probe_path = os.path.join(output_dir, 'relevance_probe.pt')
     torch.save(probe.state_dict(), probe_path)
@@ -710,9 +1001,60 @@ def run_relevance_probe_training(
             'base_model': resolved_base, 'adapter_dir': adapter_dir, 'hidden_size': model.config.hidden_size,
             'num_classes': probe.num_classes, 'probe_kind': 'relevance', 'max_length': max_length,
             'base_dtype': '4bit-nf4' if load_4bit else base_dtype,
+            # Provenance: without these a probe trained on a toy corpus is
+            # indistinguishable from a real one once the run's stdout is gone.
+            'train_data_path': train_data_path,
+            'train_split': split,
+            'num_train_samples': len(dataset),
+            'num_train_documents': len(train_documents),
+            'num_val_samples': len(val_dataset) if val_dataset is not None else 0,
+            'label_stats': dataset.stats,
+            'holdout_docs': list(holdout_docs),
+            'epochs': epochs, 'optimizer_steps': step, 'lr': lr, 'seed': seed,
+            # Inference must rebuild this prefix or the probe is read in a
+            # format it was never trained in (compression.LACCScorer).
+            'query_conditioned': bool(query_conditioned),
+            'query_template': query_template,
+            'class_weights': class_weights,
+            'val_metrics': val_metrics,
         }, f, ensure_ascii=False, indent=2)
     print(f"Saved relevance probe: {probe_path} (+ relevance_probe_meta.json) | optimizer steps={step}")
     return probe
+
+
+@torch.no_grad()
+def evaluate_relevance_probe(probe, model, loader, device) -> Dict[str, float]:
+    """Held-out accuracy plus precision/recall/F1 on the RELEVANT class.
+
+    Accuracy alone is meaningless here: a span covers a handful of tokens in a
+    512-token window, so "everything is irrelevant" already scores ~0.98. The
+    positive-class numbers are the ones that say whether the probe learned
+    anything.
+    """
+    probe.eval()
+    true_positive = false_positive = false_negative = correct = total = 0
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        hidden = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'],
+                       output_hidden_states=True).hidden_states[-1]
+        logits = probe.tone_classifier(hidden.float())
+        predicted = logits.argmax(dim=-1)
+        labels = batch['relevance_labels']
+        scored = labels != -100
+        predicted, labels = predicted[scored], labels[scored]
+        correct += int((predicted == labels).sum())
+        total += int(labels.numel())
+        true_positive += int(((predicted == 1) & (labels == 1)).sum())
+        false_positive += int(((predicted == 1) & (labels == 0)).sum())
+        false_negative += int(((predicted == 0) & (labels == 1)).sum())
+    precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+    recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        'accuracy': correct / total if total else 0.0,
+        'precision': precision, 'recall': recall, 'f1': f1,
+        'support_positive': true_positive + false_negative, 'support_total': total,
+    }
 
 
 # ============================================================================
@@ -777,6 +1119,7 @@ def validate_slm(
     no_adapter: bool = False,
     dump_per_sample: Optional[str] = None,
     dtype: str = 'float32',
+    holdout_docs: Iterable[str] = (),
     load_4bit: bool = False,
 ) -> Dict:
     """Evaluate a trained SLM checkpoint's held-out LM loss/perplexity and
@@ -832,7 +1175,8 @@ def validate_slm(
     else:
         print("[WARN] val_split.json not found; rebuilding the split from train_data_path -- "
               "pass the SAME train_data_path/max_length used during training.")
-        ds = VietnameseToneDataset(load_training_texts(train_data_path), tokenizer, max_length)
+        ds = VietnameseToneDataset(
+            load_training_texts(train_data_path, holdout_docs=holdout_docs), tokenizer, max_length)
         if len(ds) < 2:
             raise RuntimeError("Need at least two valid texts.")
         train_n = min(max(1, int(len(ds) * 0.9)), len(ds) - 1)

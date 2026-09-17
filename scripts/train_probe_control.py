@@ -50,10 +50,13 @@ from torch.utils.data import DataLoader, random_split
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vncompress.training import SLMCollator as Collator  # noqa: E402
 from vncompress.training import VietnameseToneDataset  # noqa: E402
-from vncompress.training import load_training_texts as load_texts  # noqa: E402
+from vncompress.training import (  # noqa: E402
+    load_training_texts as load_texts,
+    resolve_holdout_documents,
+)
 
 
-def build_matching_split(corpus_path, tokenizer, max_length, expected_val):
+def build_matching_split(corpus_path, tokenizer, max_length, expected_val, holdout_docs=()):
     """Rebuild train/val exactly as vncompress.training.run_slm_training() did, and verify the val
     half matches the split saved at training time.
 
@@ -63,7 +66,8 @@ def build_matching_split(corpus_path, tokenizer, max_length, expected_val):
     split would leak training texts into the probe's evaluation, so this
     verifies rather than assumes.
     """
-    dataset = VietnameseToneDataset(load_texts(corpus_path), tokenizer, max_length)
+    dataset = VietnameseToneDataset(
+        load_texts(corpus_path, holdout_docs=holdout_docs), tokenizer, max_length)
     if len(dataset) < 2:
         raise SystemExit(f"Corpus {corpus_path} yielded <2 usable texts.")
     train_n = min(max(1, int(len(dataset) * .9)), len(dataset) - 1)
@@ -159,7 +163,13 @@ def main():
     ap.add_argument("--control-task", action="store_true",
                     help="Train on random per-token-type labels (probe selectivity control)")
     ap.add_argument("--adapter-dir", default="./models/slm/final")
-    ap.add_argument("--corpus", default="data/benchmark/training_corpus_v1.json")
+    ap.add_argument("--corpus", default="data/vncompress_vi_v2/corpus.jsonl",
+                    help="Only the `train` split is read (see load_training_texts).")
+    ap.add_argument("--holdout-docs-from", action="append", default=None, metavar="PATH",
+                    help="Exclude documents used by this external benchmark. Repeatable. "
+                         "Defaults to data/benchmark/vcc_bench_v2.json when it exists.")
+    ap.add_argument("--no-holdout", action="store_true",
+                    help="Train on benchmark documents too (contaminates that benchmark).")
     ap.add_argument("--max-length", type=int, default=128,
                     help="Must match the value used to train the adapter")
     ap.add_argument("--epochs", type=int, default=1)
@@ -214,7 +224,9 @@ def main():
 
     with open(os.path.join(args.adapter_dir, "val_split.json"), encoding="utf-8") as f:
         expected_val = [tuple(s) for s in json.load(f)["samples"]]
-    train, validation = build_matching_split(args.corpus, tokenizer, args.max_length, expected_val)
+    train, validation = build_matching_split(
+        args.corpus, tokenizer, args.max_length, expected_val,
+        resolve_holdout_documents(args.holdout_docs_from, args.no_holdout))
     print(f"[{args.mode}{'/control' if args.control_task else ''}] "
           f"train={len(train)} val={len(validation)} (val verified against val_split.json)")
 

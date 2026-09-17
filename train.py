@@ -3,7 +3,7 @@
 
     python train.py --mode lacc --config configs/training.json
     python train.py --mode lacc --model Qwen/Qwen2.5-0.5B-Instruct --quick
-    python train.py --mode slm  --train-data-path data/benchmark/training_corpus_v1.json
+    python train.py --mode slm  --train-data-path data/vncompress_vi_v2/corpus.jsonl
     python train.py --mode slm --validate --adapter-dir models/slm/final --tone-probe models/slm/tone_probe.pt
 
 See docs/training.md for the full guide (dataset building, hardware tuning,
@@ -53,7 +53,17 @@ def main():
     parser.add_argument('--no-adapter', action='store_true', help='Evaluate the raw base model (fair perplexity baseline)')
     parser.add_argument('--dump-per-sample', default=None, help='Write per-sample NLL for scripts/compare_slm_runs.py')
 
+    # Corpus selection. --train-data-path defaults to data/vncompress_vi_v2/corpus.jsonl
+    # (see vncompress.training.load_training_texts), whose `train` split is the
+    # only one any of these modes reads.
+    parser.add_argument('--holdout-docs-from', action='append', default=None, metavar='PATH',
+                        help='Exclude documents used by this external benchmark. Repeatable. '
+                             'Defaults to data/benchmark/vcc_bench_v2.json when it exists.')
+    parser.add_argument('--no-holdout', action='store_true',
+                        help='Train on benchmark documents too (contaminates that benchmark).')
+
     args = parser.parse_args()
+    holdout = training.resolve_holdout_documents(args.holdout_docs_from, args.no_holdout)
 
     if args.mode == 'slm' and args.validate:
         training.validate_slm(
@@ -65,6 +75,7 @@ def main():
             dump_per_sample=args.dump_per_sample,
             dtype=args.base_dtype,
             load_4bit=args.load_4bit,
+            holdout_docs=holdout,
         )
         return
 
@@ -91,6 +102,7 @@ def main():
             max_steps=30 if args.quick else args.max_steps,
             train_data_path=args.train_data_path,
             device=exp_config.device,
+            holdout_docs=holdout,
         )
     else:
         # ExperimentConfig's default model (a 7B instruct model) doesn't fit
@@ -114,6 +126,7 @@ def main():
             gradient_checkpointing=not args.no_gradient_checkpointing,
             base_dtype=args.base_dtype,
             load_4bit=args.load_4bit,
+            holdout_docs=holdout,
         )
 
 

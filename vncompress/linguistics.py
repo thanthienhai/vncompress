@@ -1236,6 +1236,15 @@ class PhonologicalConsistencyLoss(nn.Module):
 # existing LACCScorer / tone_source='model' path with no change to compression.py.
 
 
+# Prefix that puts the question in front of the context for a query-conditioned
+# relevance probe. Under causal attention the context tokens can then attend to
+# the question, which is the only way a probe reading context hidden states can
+# depend on the query at all. Training (training.RelevanceDataset) and scoring
+# (compression.LACCScorer) must use the identical string, so it lives here --
+# the one module both of them already import.
+QUERY_PREFIX_TEMPLATE = "Câu hỏi: {query}\nVăn bản:\n"
+
+
 def _normalize_for_overlap(text: str) -> List[str]:
     """Lowercase, NFC, strip punctuation, split on whitespace -- the same
     syllable-level tokenization evaluation._normalize_answer uses, replicated
@@ -1279,6 +1288,36 @@ def build_relevance_labels(
     return labels
 
 
+def build_relevance_labels_from_offsets(
+    offsets: Sequence[Sequence[int]], answer_span: Sequence[int], ignore_index: int = -100,
+) -> List[int]:
+    """Exact per-token relevance labels from character offsets and a gold span.
+
+    A token is RELEVANT (1) iff its `[start, end)` character range overlaps the
+    answer span, NOT-RELEVANT (0) otherwise; zero-width pieces (special tokens)
+    are `ignore_index`.
+
+    This is the precise counterpart to `build_relevance_labels`, which matches
+    the answer as a BAG OF SYLLABLES and therefore fires on every other
+    occurrence of those syllables in the context -- for the answer "Đức" that
+    includes "đạo đức" and "Đức Quốc xã", positives the probe cannot learn
+    anything consistent from. Use this whenever the corpus carries a verified
+    span (vncompress-vi-v2's `answer_span` is exact on 6000/6000 qa rows);
+    fall back to the syllable matcher only when it does not.
+    """
+    start, end = int(answer_span[0]), int(answer_span[1])
+    labels: List[int] = []
+    for offset in offsets:
+        token_start, token_end = int(offset[0]), int(offset[1])
+        if token_end <= token_start:
+            labels.append(ignore_index)
+        elif token_start < end and token_end > start:
+            labels.append(1)
+        else:
+            labels.append(0)
+    return labels
+
+
 class RelevanceConsistencyLoss(nn.Module):
     """Binary query-relevance probe: a drop-in, interface-compatible sibling of
     PhonologicalConsistencyLoss (E4).
@@ -1292,12 +1331,19 @@ class RelevanceConsistencyLoss(nn.Module):
     `.tone_classifier[0].weight` and calls `.score_importance`) work unchanged.
     """
 
-    def __init__(self, hidden_dim: int, num_classes: int = 2, lambda_relevance: float = 1.0, ignore_index: int = -100):
+    def __init__(self, hidden_dim: int, num_classes: int = 2, lambda_relevance: float = 1.0,
+                 ignore_index: int = -100, class_weights: Optional[Sequence[float]] = None):
         super().__init__()
         self.num_classes = num_classes
         self.num_tones = num_classes  # alias: keeps the tone-probe interface/loader working
         self.lambda_relevance = lambda_relevance
         self.ignore_index = ignore_index
+        # An answer span is a few percent of a training window, so unweighted CE
+        # is minimised by calling every token irrelevant -- measured: accuracy
+        # 0.96, positive-class F1 0.007. Held as a plain tensor, NOT a buffer, so
+        # state_dict stays byte-identical to what models.load_scorer expects.
+        self.class_weights = None if class_weights is None else \
+            torch.as_tensor(list(class_weights), dtype=torch.float32)
         self.tone_classifier = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 4),
             nn.GELU(),
@@ -1314,16 +1360,17 @@ class RelevanceConsistencyLoss(nn.Module):
                 f"have S={St}. Labels must align with input positions."
             )
         logits = self.tone_classifier(hidden_states)
+        weight = None if self.class_weights is None else self.class_weights.to(logits.device)
         if mask is not None:
             loss = F.cross_entropy(
                 logits.view(-1, self.num_classes), labels.view(-1),
-                reduction='none', ignore_index=self.ignore_index,
+                reduction='none', ignore_index=self.ignore_index, weight=weight,
             )
             loss = (loss * mask.view(-1)).sum() / (mask.sum() + 1e-8)
         else:
             loss = F.cross_entropy(
                 logits.view(-1, self.num_classes), labels.view(-1),
-                reduction='mean', ignore_index=self.ignore_index,
+                reduction='mean', ignore_index=self.ignore_index, weight=weight,
             )
         return self.lambda_relevance * loss
 

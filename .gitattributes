@@ -3,3 +3,7 @@
 *.json text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+# run_pipeline.sh runs on Ubuntu. A CRLF checkout makes bash read the carriage
+# return as part of every command ($'\r': command not found), so this one is
+# not a style preference.
+*.sh text eol=lf

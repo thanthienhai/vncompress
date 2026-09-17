@@ -17,7 +17,7 @@ trained, point EncoderClassifierCompressor at --output-dir via encoder_path
 
 Usage:
     python scripts/train_encoder_compressor.py \
-        --train-data-path data/benchmark/training_corpus_v1.json \
+        --train-data-path data/vncompress_vi_v2/corpus.jsonl \
         --encoder-id vinai/phobert-base \
         --teacher-model Qwen/Qwen2.5-0.5B-Instruct \
         --ratio 4 --epochs 2 --output-dir models/encoder_compressor
@@ -73,7 +73,15 @@ def build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, ratio, max_
 
 def main():
     ap = argparse.ArgumentParser(description='Distill a keep/drop encoder token classifier (wave-2 E6).')
-    ap.add_argument('--train-data-path', default=None, help='JSON corpus (see vncompress.training.load_training_texts).')
+    ap.add_argument('--train-data-path', default=None,
+                    help='Corpus for the teacher to label. Defaults to '
+                         'data/vncompress_vi_v2/corpus.jsonl (see '
+                         'vncompress.training.load_training_texts); only its `train` split is read.')
+    ap.add_argument('--holdout-docs-from', action='append', default=None, metavar='PATH',
+                    help='Exclude documents used by this external benchmark. Repeatable. '
+                         'Defaults to data/benchmark/vcc_bench_v2.json when it exists.')
+    ap.add_argument('--no-holdout', action='store_true',
+                    help='Train on benchmark documents too (contaminates that benchmark).')
     ap.add_argument('--encoder-id', default='vinai/phobert-base', help='Encoder to fine-tune (PhoBERT / XLM-R).')
     ap.add_argument('--teacher-model', default='Qwen/Qwen2.5-0.5B-Instruct', help='Causal LM whose perplexity keep-sets are distilled.')
     ap.add_argument('--ratio', type=float, default=4.0, help='Compression ratio used to derive the keep fraction (1/ratio).')
@@ -94,7 +102,7 @@ def main():
     from transformers import AutoModelForTokenClassification, AutoTokenizer
 
     from vncompress.models import load_model
-    from vncompress.training import load_training_texts
+    from vncompress.training import load_training_texts, resolve_holdout_documents
 
     device = args.device if (args.device == 'cpu' or torch.cuda.is_available()) else 'cpu'
     print(f"Teacher: {args.teacher_model} | Encoder: {args.encoder_id} | ratio={args.ratio} | device={device}")
@@ -103,7 +111,9 @@ def main():
                                             dtype='float16' if device == 'cuda' else 'float32')
     enc_tok = AutoTokenizer.from_pretrained(args.encoder_id, use_fast=True)
 
-    texts = load_training_texts(args.train_data_path)
+    texts = load_training_texts(
+        args.train_data_path,
+        holdout_docs=resolve_holdout_documents(args.holdout_docs_from, args.no_holdout))
     if args.max_texts > 0:
         texts = texts[:args.max_texts]
     print(f"Building distillation labels for {len(texts)} texts...")

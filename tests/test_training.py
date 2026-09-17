@@ -61,6 +61,72 @@ def test_load_training_texts_filters_short_paragraphs(tmp_path):
     assert load_training_texts(str(path)) == []
 
 
+# --- vncompress-vi-v2 corpus.jsonl -------------------------------------------
+
+
+def _corpus_jsonl(tmp_path, rows):
+    import json
+
+    path = tmp_path / "corpus.jsonl"
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return str(path)
+
+
+def _corpus_row(**overrides):
+    row = {
+        "id": "c1", "doc_id": "uvw:Việt_Nam", "split": "train",
+        "text": "Một đoạn văn tiếng Việt đủ dài để vượt ngưỡng lọc. " * 8,
+        "text_lang": "vi",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_load_training_texts_reads_v2_corpus_jsonl(tmp_path):
+    path = _corpus_jsonl(tmp_path, [_corpus_row()])
+    assert len(load_training_texts(path)) == 1
+
+
+def test_load_training_texts_never_returns_the_test_split(tmp_path):
+    """eval/test.jsonl is drawn from these documents; training on them is the
+    leak the split field exists to prevent."""
+    path = _corpus_jsonl(tmp_path, [
+        _corpus_row(id="a", split="train"),
+        _corpus_row(id="b", split="test"),
+        _corpus_row(id="c", split="validation"),
+    ])
+    assert len(load_training_texts(path)) == 1
+    assert len(load_training_texts(path, split="validation")) == 1
+    assert len(load_training_texts(path, split=None)) == 3
+
+
+def test_load_training_texts_drops_non_vietnamese_rows(tmp_path):
+    """The `en` rows are MediaWiki timeline markup and English bibliographies
+    (dataset_v2_review.md SS5.1), not prose to train a Vietnamese LM on."""
+    path = _corpus_jsonl(tmp_path, [
+        _corpus_row(id="a"),
+        _corpus_row(id="b", text_lang="en", text="barset:Presidents from:1789.40 till:1797.17 " * 8),
+    ])
+    assert len(load_training_texts(path)) == 1
+    assert len(load_training_texts(path, lang=None)) == 2
+
+
+def test_load_training_texts_holds_out_benchmark_documents(tmp_path):
+    path = _corpus_jsonl(tmp_path, [
+        _corpus_row(id="a", doc_id="uvw:Hà_Nội"),
+        _corpus_row(id="b", doc_id="uvw:Huế"),
+    ])
+    assert len(load_training_texts(path)) == 2
+    assert len(load_training_texts(path, holdout_docs=["Hà Nội"])) == 1
+
+
+def test_load_training_texts_filters_short_v2_rows(tmp_path):
+    path = _corpus_jsonl(tmp_path, [_corpus_row(text="ngắn")])
+    assert load_training_texts(path) == []
+
+
 # ============================================================================
 # LACC model training dataset/collator (vncompress/training.py)
 # ============================================================================
@@ -144,8 +210,9 @@ class TestResizeEmbeddingsIfNeeded:
             def get_output_embeddings(self):
                 return None
 
-            def resize_token_embeddings(self, n):
+            def resize_token_embeddings(self, n, mean_resizing=True):
                 nonlocal embedding
+                assert mean_resizing is False, "new rows are zeroed, so don't pay for mean resizing"
                 new_embedding = torch.nn.Embedding(n, hidden)
                 with torch.no_grad():
                     new_embedding.weight[:vocab_size] = embedding.weight
