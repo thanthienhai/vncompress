@@ -13,7 +13,7 @@
 #   check    host, driver and GPU sanity
 #   venv     create/reuse the virtualenv
 #   deps     install torch for this GPU's CUDA, then requirements.txt
-#   data     pull anhalu/vncompress-vi-v2 from the Hub
+#   data     pull thanthienhai/vncompress-vi-v2 from the Hub
 #   slm      train.py --mode slm            -> models/slm/final  (+ tone_probe.pt)
 #   probe    train_relevance_probe.py (E4)  -> models/relevance/relevance_probe.pt
 #   encoder  train_encoder_compressor.py    -> models/encoder_compressor
@@ -41,11 +41,20 @@ LOG_DIR="${LOG_DIR:-logs}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 TORCH_SPEC="${TORCH_SPEC:-torch>=2.7.0}"
 
-HF_DATASET="${HF_DATASET:-anhalu/vncompress-vi-v2}"
+# thanthienhai/vncompress-vi-v2 is the rebuilt, entity-clean, Ha-Noi-held-out
+# dataset (2026-09-17) -- see memory/compression-budget-miss.md and
+# e4-probe-v2-wiring.md for why the original anhalu/vncompress-vi-v2 is no
+# longer the default: it still has the corpus HTML-entity leak and Hà Nội
+# sits in its train split despite overlapping VCC-Bench v2.
+HF_DATASET="${HF_DATASET:-thanthienhai/vncompress-vi-v2}"
 DATA_DIR="${DATA_DIR:-data/vncompress_vi_v2}"
-# Only these two feed training: corpus.jsonl for the LM/encoder arms, qa.jsonl
-# for the E4 relevance probe. --all-data adds the compression/eval/extras files.
-DATA_FILES="${DATA_FILES:-corpus.jsonl qa.jsonl}"
+# corpus.jsonl for the LM/encoder arms, qa.jsonl + qa_synthetic.jsonl (stage
+# 2b, teacher-generated but span-verified) for the E4 relevance probe's
+# document coverage. --all-data adds the compression/eval/extras files.
+# NOTE: qa_synthetic.jsonl only exists on thanthienhai/vncompress-vi-v2 -- if
+# you override HF_DATASET back to a repo without it, also override DATA_FILES
+# or the download will 404.
+DATA_FILES="${DATA_FILES:-corpus.jsonl qa.jsonl qa_synthetic.jsonl}"
 DATA_FILES_ALL="corpus.jsonl qa.jsonl qa_synthetic.jsonl compression.jsonl eval/test.jsonl extras/compression_unanswerable.jsonl README.md"
 
 SLM_EPOCHS="${SLM_EPOCHS:-3}"

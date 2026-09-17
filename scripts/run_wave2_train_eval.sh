@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
-# Train E4 (relevance probe) + E6 (encoder) on the published, clean
-# thanthienhai/vncompress-vi-v2, then evaluate everything -- sweep, tone/
-# relevance probe A/Bs, and a ppl/tone/morphology ablation -- on VCC-Bench v2.
-# This is the "is the proposed training method any good" run, answered on a
-# benchmark that was never trained on (leak-check CLEAN, re-verified after
-# the data rebuild this session did).
+# Thin convenience wrapper: `run_pipeline.sh` now defaults to
+# thanthienhai/vncompress-vi-v2 (the entity-clean, Ha-Noi-held-out rebuild)
+# and downloads qa_synthetic.jsonl by default, so this script no longer needs
+# to override HF_DATASET/DATA_FILES itself -- it just picks the right stages
+# and prints where the results land.
 #
 # Run this ON THE GPU CLUSTER (pod-test / wherever the wave-2 H100 run lives),
 # NOT on the Windows dev box -- see the code-sync step below first.
@@ -17,35 +16,25 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
 
-# --- 0. Before running: sync CODE to the cluster (data is handled below) ---
+# --- Before running: sync CODE to the cluster (data downloads itself now) --
 #
-# This box's working tree has fixes the cluster's checkout does not, and none
-# of them are committed yet (deliberately left for you to review/commit --
-# see `git status`). rsync works regardless of commit state:
+# This box's working tree may have fixes the cluster's checkout does not.
+# Check `git log` on both sides first -- if the cluster already has this
+# commit (or later), skip this. Otherwise:
 #
+#   git push                                          # from this box, if not already
+#   ssh user@pod-test 'cd /path/to/vncompress && git pull'
+#
+# rsync works too if the cluster checkout isn't a clean git clone:
 #   rsync -avz vncompress/ scripts/ tests/ run_pipeline.sh requirements.txt \
 #       user@pod-test:/path/to/vncompress/
-#
-# What's in it: 524 auto-retry (vncompress/api_pool.py), html.unescape fix
-# (build_vncompress_vi_v2.py / fetch_sources_v2.py), the `bench` pipeline
-# stage + E4's qa_synthetic merge (run_pipeline.sh), openai in
-# requirements.txt.
 
 QUICK="${QUICK:-0}"
 GPU="${GPU:-0}"
 QUICK_FLAG=()
 [ "$QUICK" = 1 ] && QUICK_FLAG=(--quick)
 
-# --- 1. Data: pull straight from the published dataset, not through this box.
-#
-# HF_DATASET overrides run_pipeline.sh's default (anhalu/vncompress-vi-v2).
-# DATA_FILES adds qa_synthetic.jsonl -- off by default in run_pipeline.sh
-# because the original anhalu dataset doesn't have that file and would 404;
-# thanthienhai/vncompress-vi-v2 does.
-export HF_DATASET="${HF_DATASET:-thanthienhai/vncompress-vi-v2}"
-export DATA_FILES="${DATA_FILES:-corpus.jsonl qa.jsonl qa_synthetic.jsonl}"
-
-echo "=== data + slm + probe + encoder + bench (GPU=$GPU, quick=$QUICK, dataset=$HF_DATASET) ==="
+echo "=== data + slm + probe + encoder + bench (GPU=$GPU, quick=$QUICK) ==="
 GPU="$GPU" ./run_pipeline.sh --stages data,slm,probe,encoder,bench "${QUICK_FLAG[@]}"
 
 echo ""
