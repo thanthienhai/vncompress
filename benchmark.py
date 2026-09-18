@@ -69,6 +69,12 @@ WAVE2_ARMS = {
     'lacc_tone': ('lacc', dict()),
     # E6/E11: encoder token-classification compressor (LLMLingua-2 / PhoBERT-style).
     'encoder': ('encoder', dict()),
+    # G2 baseline (docs/lacc_coling2027_tasklist.md): VN -> EN -> LLMLingua-2.
+    # 'translate_then_compress' already defaults to a plain-LLMLingua inner
+    # step; this arm swaps the inner compressor to the encoder classifier so
+    # the "translate, then LLMLingua-2" claim from *Lost in Compression* is
+    # actually measured, not just VN->EN->LLMLingua.
+    'translate_then_compress_llmlingua2': ('translate_then_compress', dict(inner_method='encoder')),
 }
 
 DEFAULT_OUTPUT_DIR = './results'
@@ -240,6 +246,8 @@ def run_benchmark(
     random_seeds: list = None,
     prompt_style: str = 'chat',
     limit_samples: int = None,
+    nli_model: str = None,
+    phobert_tokenizer: str = 'vinai/phobert-base',
 ):
     """Run VCC-Bench evaluation (or, with ablation=True, the signal-isolation
     ablation study). Writes config.json + environment.json into `output_dir`
@@ -275,6 +283,8 @@ def run_benchmark(
         max_new_tokens=128 if quick else 256,
         prompt_style=prompt_style,
         seed=exp_config.seed if exp_config is not None else 42,
+        nli_model=nli_model,
+        phobert_tokenizer=phobert_tokenizer,
     )
     bench = _load_dataset(config, data_path, tokenizer, quick, limit_samples=limit_samples)
 
@@ -319,6 +329,15 @@ def run_benchmark(
                         "--encoder-id (a HF encoder id, e.g. vinai/phobert-base)."
                     )
                 extra = dict(encoder_path=encoder_path, encoder_id=encoder_id)
+            elif base == 'translate_then_compress' and kw.get('inner_method') == 'encoder':
+                # Same checkpoint requirement as the 'encoder' arm, passed
+                # through as the INNER compressor's kwargs, not top-level ones.
+                if not (encoder_path or encoder_id):
+                    raise ValueError(
+                        "The 'translate_then_compress_llmlingua2' arm needs a checkpoint: pass "
+                        "--encoder-path or --encoder-id (see the 'encoder' arm)."
+                    )
+                extra = dict(inner_kwargs=dict(encoder_path=encoder_path, encoder_id=encoder_id))
             else:
                 extra = {}
             return create_compressor(base, tokenizer, model, config=None, device=device, **extra, **kw)
@@ -410,6 +429,16 @@ def main():
     parser.add_argument('--encoder-id', default=None,
                          help="Raw encoder id for the 'encoder' arm when no fine-tuned checkpoint is available "
                               "(e.g. vinai/phobert-base) -- smoke-tests the wiring only.")
+    parser.add_argument('--nli-model', default=None,
+                         help="HF text-classification NLI model id (e.g. "
+                              "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7). Enables "
+                              "source_span_recoverability and unsupported_claim_rate; omit to skip both "
+                              "(no model load, no per-sample cost) -- see docs/lacc_coling2027_tasklist.md G0.")
+    parser.add_argument('--phobert-tokenizer', default='vinai/phobert-base',
+                         help="Second tokenizer for dual-tokenizer achieved-rate reporting "
+                              "(phobert_achieved_ratio, alongside the generation tokenizer's own "
+                              "compression_ratio) -- see docs/lacc_coling2027_tasklist.md G2. "
+                              "Pass '' to disable.")
     args = parser.parse_args()
 
     if args.list_methods:
@@ -462,7 +491,8 @@ def main():
         scorer_adapter_dir=args.scorer_adapter_dir, tone_probe_path=args.tone_probe_path,
         encoder_path=args.encoder_path, encoder_id=args.encoder_id,
         ablation=args.ablation, random_seeds=random_seeds, prompt_style=args.prompt_style,
-        limit_samples=args.limit_samples,
+        limit_samples=args.limit_samples, nli_model=args.nli_model,
+        phobert_tokenizer=args.phobert_tokenizer or None,
     )
 
 

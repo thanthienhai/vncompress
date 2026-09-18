@@ -48,23 +48,23 @@
         Nén Ngữ Cảnh Có Nhận Thức Ngôn Ngữ \\
         cho Mô Hình Ngôn Ngữ Lớn Tiếng Việt}}
 
-\author{
-  Thanthien\thanks{Người thực hiện nghiên cứu.} \\
-  \texttt{thanthien@example.com}
-}
-\date{\today}
+\author{Anonymous ACL submission}
+\date{}
 
 \begin{document}
 \maketitle
 
 % ============================================================================
 \begin{abstract}
-Các phương pháp nén ngữ cảnh (\textit{context compression}) hiện tại như LLMLingua, SnapKV hay Selective Context đều được thiết kế theo hướng \textbf{ngôn-ngữ-bất-khả-tri} (\textit{language-agnostic}) --- chúng đối xử mọi token như nhau mà không phân biệt đặc điểm ngôn ngữ. Điều này gây ra vấn đề nghiêm trọng với các ngôn ngữ có đặc thù riêng như tiếng Việt: (1) mất thông tin thanh điệu khi nén --- xóa dấu thanh làm thay đổi hoàn toàn nghĩa từ (\viet{má} $\neq$ \viet{ma}); (2) lãng phí ngân sách nén cho hư từ (chiếm 30--40\% token nhưng ít thông tin); và (3) không tận dụng được cấu trúc hình thái đặc thù (từ láy, từ ghép). Bài báo này đề xuất \method{LACC} (\textit{Language-Aware Context Compression}) --- một khung nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ, kết hợp ba tín hiệu: (i) \textbf{tín hiệu thanh điệu} --- bảo toàn thông tin 6 thanh của tiếng Việt qua ma trận tương phản thanh điệu; (ii) \textbf{tín hiệu hình thái từ} --- phân bổ ngân sách nén khác nhau cho hư từ, thực từ, từ láy và từ ghép; và (iii) \textbf{tín hiệu perplexity} --- từ mô hình ngôn ngữ nhỏ bên ngoài (135M tham số) để ước lượng độ quan trọng học máy của token. \method{LACC} hoạt động ở ba mức độ phần cứng: không cần GPU (0~GB VRAM, chỉ dùng tín hiệu ngôn ngữ), với GPU hạn chế (0.3~GB VRAM, thêm mô hình 135M), và đầy đủ (7.8~GB VRAM, kết hợp với INT4 7B để sinh văn bản). Chúng tôi xây dựng bộ benchmark \method{VCC-Bench} --- bộ dữ liệu đánh giá nén ngữ cảnh tiếng Việt đầu tiên với 5 tác vụ. Kết quả thực nghiệm cho thấy \method{LACC} vượt trội hơn các phương pháp hiện có về tỉ lệ bảo toàn thanh điệu và chất lượng sinh văn bản, đồng thời khả thi trên phần cứng hạn chế như GPU T4 16~GB.
+Các phương pháp nén ngữ cảnh (\textit{context compression}) hiện tại như LLMLingua, SnapKV hay Selective Context đều được thiết kế theo hướng \textbf{ngôn-ngữ-bất-khả-tri} (\textit{language-agnostic}), và tiếng Việt --- ngôn ngữ đơn lập, có thanh điệu, với token inflation 1.5--2.0$\times$ so với tiếng Anh --- chưa có một benchmark nén ngữ cảnh nào kiểm soát rò dữ liệu (\textit{data leakage}) để đo các phương pháp này một cách đáng tin cậy. Đóng góp chính của bài báo là \method{VCC-Bench} v2 --- benchmark nén ngữ cảnh tiếng Việt với 5 tác vụ (QA văn bản dài, hội thoại đa lượt, needle-in-haystack có kiểm soát nhiễu thanh điệu, gọi công cụ agent, nén xuyên ngôn ngữ), tách bạch tường minh tập huấn luyện/đánh giá để tránh rò dữ liệu.
+
+Trên nền benchmark này, chúng tôi đánh giá có kiểm soát một câu hỏi cụ thể: liệu tín hiệu ngôn ngữ học đặc thù tiếng Việt --- cụ thể là \textbf{thanh điệu} --- có tương quan với vị trí chứa câu trả lời trong tác vụ hỏi-đáp hay không. Chúng tôi đề xuất \method{LACC} (\textit{Language-Aware Context Compression}), một khung nén cấu hình được kết hợp tín hiệu thanh điệu, hình thái từ và perplexity, cùng các biến thể mở rộng: chấm điểm điều kiện hóa theo câu hỏi (\textit{query-conditioning}, so với LongLLMLingua), chọn lọc mức câu, và một kiến trúc thay thế dựa trên encoder phân loại token (kiểu LLMLingua-2). Phát hiện chính của chúng tôi là một \textbf{kết quả âm có kiểm soát}: tín hiệu thanh điệu \textbf{không} tương quan với việc một token có nằm trong câu chứa đáp án hay không cho tác vụ QA tiếng Việt, dù thanh điệu vẫn là một đặc trưng ngôn ngữ học hợp lệ về mặt hình thái-âm vị. Số liệu định lượng đầy đủ trên \method{VCC-Bench} v2, gồm so sánh với LongLLMLingua, LLMLingua-2 và baseline dịch-rồi-nén, được báo cáo ở \S\ref{sec:results}. \method{LACC} và benchmark đều hoạt động được trên phần cứng hạn chế (GPU tiêu dùng 6~GB), và \method{VCC-Bench} v2 cùng mã nguồn được công bố để cộng đồng có thể kiểm chứng và mở rộng kết quả này cho các ngôn ngữ low-resource khác.
 \end{abstract}
 
 
 % ============================================================================
 \section{Giới thiệu}
+\label{sec:intro}
 % ============================================================================
 
 Mô hình ngôn ngữ lớn (LLM) ngày càng được sử dụng để xử lý các ngữ cảnh dài --- từ phân tích tài liệu pháp luật, hội thoại nhiều lượt, đến tác vụ agent đa bước. Tuy nhiên, độ phức tạp bậc hai $O(n^2)$ của self-attention khiến chi phí suy diễn tăng nhanh theo độ dài đầu vào. Để giải quyết vấn đề này, nhiều phương pháp nén ngữ cảnh đã được đề xuất, chia thành ba hướng chính:
@@ -85,17 +85,17 @@ Tất cả các phương pháp trên đều \textbf{mù ngôn ngữ} --- chúng 
     \item \textbf{Token inflation.} Cùng một nội dung, tiếng Việt sử dụng nhiều token hơn tiếng Anh 1.5--2.0 lần do đặc điểm hình thái và tokenizer không tối ưu~\cite{lee2026equity, deng2026language}. Điều này khiến context window bị ``phình to'' nhanh hơn, đòi hỏi tỉ lệ nén cao hơn.
 \end{enumerate}
 
-\textbf{Đóng góp của bài báo.} Chúng tôi đề xuất \method{LACC} --- khung nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ, với ba đóng góp chính:
+\textbf{Đóng góp của bài báo.} Trước P1--P3, câu hỏi tự nhiên là: một tín hiệu ngôn ngữ học hợp lý về mặt lý thuyết (ví dụ thanh điệu) có thực sự \textit{giúp} một compressor giữ được thông tin cần cho tác vụ hạ nguồn (QA) hay không? Trả lời câu hỏi này đòi hỏi một benchmark kiểm soát được rò dữ liệu, chứ không chỉ một phương pháp mới -- đó là lý do đóng góp chính của bài báo là bộ benchmark, không phải bản thân \method{LACC}:
 
 \begin{enumerate}[label=(\arabic*),leftmargin=*]
-    \item \textbf{Tín hiệu thanh điệu} (\textit{Tone-Aware Scoring}): sử dụng ma trận tương phản 6 thanh điệu để tính trọng số bảo toàn cho từng token, ưu tiên giữ token có thanh điệu khác biệt với ngữ cảnh xung quanh.
-    \item \textbf{Tín hiệu hình thái từ} (\textit{Morphology-Aware Scoring}): phân loại token thành 4 lớp (hư từ, thực từ, từ láy, từ ghép) và áp dụng chiến lược nén khác nhau cho từng lớp.
-    \item \textbf{Kiến trúc module hóa}: cho phép vận hành ở ba mức độ phần cứng --- không cần GPU (chỉ tín hiệu ngôn ngữ), GPU hạn chế (thêm mô hình 135M), và đầy đủ (kết hợp INT4 7B).
-    \item \textbf{Huấn luyện end-to-end}: đề xuất \textit{Phonological Consistency Loss} --- một auxiliary loss huấn luyện mô hình dự đoán thanh điệu từ hidden states, tạo cầu nối trực tiếp giữa training và inference: mô hình học mã hóa tone trong quá trình huấn luyện, và chính classifier đó được dùng làm tone probe khi nén.
+    \item \textbf{\method{VCC-Bench} v2} (đóng góp chính): benchmark đánh giá nén ngữ cảnh tiếng Việt đầu tiên có kiểm soát rò dữ liệu tường minh, 5 tác vụ (QA văn bản dài, hội thoại đa lượt, needle-in-haystack với thiết kế A/B/C tách bạch nhiễu thanh điệu khỏi tín hiệu thật, gọi công cụ agent, nén xuyên ngôn ngữ), cùng bộ độ đo evidence/attribution (\S\ref{sec:results}) đo trực tiếp việc nén có giữ được câu chứa đáp án hay không, thay vì chỉ đo ROUGE/BLEU gián tiếp.
+    \item \textbf{Một kết quả âm có kiểm soát}: trên benchmark này, chúng tôi đo trực tiếp liệu tín hiệu thanh điệu (\S\ref{sec:query_conditioning}--\S\ref{sec:encoder}) có tương quan với vị trí chứa đáp án cho tác vụ QA hay không, tách bạch khỏi các trục khác (điều kiện hóa câu hỏi, cơ chế chấm điểm) để kết luận không bị nhầm lẫn nguyên nhân -- xem Thảo luận (\S\ref{sec:limitations}) cho phát biểu chính xác của phát hiện này và giới hạn của nó.
+    \item \textbf{Khung \method{LACC} cấu hình được}: kết hợp tín hiệu thanh điệu, hình thái từ (phân loại token thành hư từ/thực từ/từ láy/từ ghép, mỗi lớp một chiến lược nén) và perplexity, với các biến thể điều kiện hóa theo câu hỏi, chọn lọc mức câu, và một kiến trúc thay thế dựa trên encoder phân loại token -- dùng làm công cụ đo (không phải kết luận đã định trước) cho mục (2), đồng thời vận hành được ở ba mức phần cứng, từ không cần GPU đến GPU tiêu dùng 6~GB.
 \end{enumerate}
 
-Ngoài ra, chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đánh giá nén ngữ cảnh tiếng Việt đầu tiên với 5 tác vụ, và công bố mã nguồn mở toàn bộ khung thực nghiệm.
+Mã nguồn, \method{VCC-Bench} v2, và toàn bộ khung thực nghiệm được công bố (liên kết ẩn danh trong quá trình phản biện, xem phần công bố dữ liệu/mã nguồn).
 
+\textbf{Liên hệ với special theme COLING 2027 ("NLP for Linguistics").} Bài báo này dùng phương pháp NLP (benchmark có kiểm soát, đo lường có đối chứng) để trả lời một câu hỏi ngôn ngữ học cụ thể -- thanh điệu tiếng Việt có mang thông tin chức năng cho một tác vụ hạ nguồn hay không -- cho một ngôn ngữ low-resource, đúng tinh thần của special theme.
 
 % ============================================================================
 \section{Nghiên cứu liên quan}
@@ -103,7 +103,11 @@ Ngoài ra, chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đánh 
 
 \subsection{Nén ngữ cảnh cho LLM}
 
-\textbf{Nén prompt.} LLMLingua~\cite{jiang2023llmlingua} sử dụng perplexity-based scoring với budget controller để nén prompt lên đến 20$\times$ mà ít mất hiệu năng. LongLLMLingua mở rộng cho ngữ cảnh dài. Selective Context chọn token dựa trên cosine similarity với query. Các phương pháp này hoạt động trong không gian token rời rạc và không có cơ chế nhận thức ngôn ngữ.
+\textbf{Nén prompt.} LLMLingua~\cite{jiang2023llmlingua} sử dụng perplexity-based scoring với budget controller để nén prompt lên đến 20$\times$ mà ít mất hiệu năng. LongLLMLingua~\cite{jiang2023longllmlingua} mở rộng sang chấm điểm điều kiện hóa theo câu hỏi cho ngữ cảnh dài (\S\ref{sec:query_conditioning}). LLMLingua-2~\cite{pan2024llmlingua2} đóng khung nén thành phân loại token nhị phân trên encoder hai chiều thay vì perplexity một chiều (\S\ref{sec:encoder}). Selective Context chọn token dựa trên cosine similarity với query. Các phương pháp này hoạt động trong không gian token rời rạc và không có cơ chế nhận thức ngôn ngữ.
+
+\textbf{Khoảng cách xuyên ngôn ngữ của compressor đã học (\textit{Lost in Compression}~\cite{lukauskas2026lost}).} Nghiên cứu này kiểm toán bốn compressor trích xuất đã học (gồm LLMLingua-2, Kompress-v2) trên mười ngôn ngữ, hơn 250.000 lượt gọi đánh giá, và cho thấy các compressor được giám sát chỉ bằng dữ liệu tiếng Anh (English-supervised) suy giảm hiệu năng đáng kể khi áp dụng ngoài tiếng Anh -- kết luận chính là \textbf{dữ liệu giám sát tiếng Anh không chuyển ngữ (transfer) tốt sang ngôn ngữ khác}, không riêng gì tiếng Việt (tiếng Việt không nằm trong 10 ngôn ngữ được thử). Đây là lý do baseline dịch-rồi-nén (\textit{translate-then-compress}, VN$\to$EN$\to$LLMLingua/-2, B2 ở Bảng~\ref{tab:baselines}\footnote{Baseline này thắng nén bản địa ở khoảng một nửa chi phí token trong 3/5 ngôn ngữ mà~\cite{lukauskas2026lost} thử -- nếu nó cũng thắng trên tiếng Việt, đó là bằng chứng \textit{ủng hộ} phát hiện của họ, không phải phản bác \method{LACC}; xem \S\ref{sec:limitations}.}) là baseline bắt buộc trong bài này (\S\ref{sec:results}): không đo nó thì tiền đề "tiếng Việt cần một compressor bản địa" chưa được kiểm chứng.
+
+\textbf{Vì sao đây không phải cùng một trục với đóng góp của bài báo.} \cite{lukauskas2026lost} đo \textit{compressor học từ dữ liệu tiếng Anh có transfer được sang ngôn ngữ khác không} -- một câu hỏi về giám sát huấn luyện (\textit{supervision}). Bài báo này đo một câu hỏi khác: \textit{tín hiệu ngôn ngữ học đặc thù tiếng Việt (thanh điệu, hình thái từ) có tương quan với vị trí chứa đáp án cho tác vụ QA hay không} -- một câu hỏi về \textit{cơ chế chấm điểm} (\textit{mechanism}), độc lập với compressor được huấn luyện ở đâu. Hai trục bổ sung cho nhau chứ không trùng lặp: \cite{lukauskas2026lost} nói "đừng tin compressor học tiếng Anh sẽ transfer"; bài báo này nói thêm "và một tín hiệu 'đặc thù ngôn ngữ' nghe hợp lý về mặt ngôn ngữ học cũng không tự động là tín hiệu hữu ích cho QA, trừ khi được đo trên benchmark có kiểm soát rò dữ liệu" -- đóng góp benchmark (\method{VCC-Bench} v2) chính là công cụ để đo điều thứ hai, thứ mà~\cite{lukauskas2026lost} không cung cấp cho tiếng Việt.
 
 \textbf{Nén KV cache.} SnapKV~\cite{li2024snapkv} quan sát attention pattern từ ``observation window'' ở cuối prompt để chọn KV position quan trọng. H2O~\cite{zhang2023h2o} giữ ``heavy hitters'' --- token có cumulative attention score cao. StreamingLLM~\cite{xiao2024streamingllm} phát hiện ``attention sink'' và giữ các token đầu + token gần đây. PyramidKV phân bổ ngân sách KV cache theo hình kim tự tháp giữa các layer. Tất cả đều dựa trên attention score --- một tín hiệu không phản ánh đặc điểm ngôn ngữ.
 
@@ -135,9 +139,15 @@ Tiếng Việt thuộc ngữ hệ Nam Á, là ngôn ngữ \textbf{đơn lập} (
     \score{t} = w_{\text{ppl}} \cdot \tilde{\score{}_{\text{ppl}}}(t) \;+\; w_{\text{tone}} \cdot \tilde{\score{}_{\text{tone}}}(t) \;+\; w_{\text{morph}} \cdot \tilde{\score{}_{\text{morph}}}(t)
 \end{equation}
 
-trong đó $\tilde{\score{}}(\cdot)$ là các điểm đã được chuẩn hóa về $[0, 1]$, và $w_{\text{ppl}} + w_{\text{tone}} + w_{\text{morph}} = 1$. Khi không có mô hình ngoài, $w_{\text{ppl}} = 0$.
+trong đó $\tilde{\score{}}(\cdot)$ là các điểm đã được chuẩn hóa về $[0, 1]$, và $w_{\text{ppl}} + w_{\text{tone}} + w_{\text{morph}} = 1$. Khi không có mô hình ngoài, $w_{\text{ppl}} = 0$. Đây là công thức \textbf{wave-1} (\texttt{morph\_combine='add'} trong code), dùng làm cấu hình mặc định và làm điểm so sánh cho các biến thể wave-2 dưới đây.
 
-Hình~\ref{fig:architecture} minh họa kiến trúc tổng thể của \method{LACC}.
+\paragraph{Biến thể E2 -- kết hợp nhân (\textit{multiplicative blend}).} Phân tích nội bộ wave-1 cho thấy tổng có trọng số làm loãng tín hiệu perplexity mạnh khi cộng với hai tín hiệu yếu hơn (điểm chất lượng riêng-perplexity vượt điểm kết hợp; xem Thảo luận). \texttt{morph\_combine='multiply'} thay vào đó dùng hình thái từ như một \textit{hệ số điều chỉnh} trên nền perplexity+thanh điệu, không phải một số hạng cộng:
+\begin{equation}\label{eq:combined_mult}
+    \score{t} = \Big[w_{\text{ppl}}' \cdot \tilde{\score{}}_{\text{ppl}}(t) + w_{\text{tone}}' \cdot \tilde{\score{}}_{\text{tone}}(t)\Big] \times \underbrace{\big(0.5 + \tilde{\score{}}_{\text{morph}}(t)\big)}_{\text{hệ số } \in [0.5,\,1.5]}
+\end{equation}
+với $w_{\text{ppl}}', w_{\text{tone}}'$ là trọng số gốc của \eqref{eq:combined} (không tái chuẩn hóa). Hình thái từ giờ chỉ có thể nhân điểm nền lên tối đa $1.5\times$ hoặc xuống tối thiểu $0.5\times$, không thể lấn át thứ hạng do perplexity/thanh điệu tạo ra như phép cộng có thể.
+
+Hình~\ref{fig:architecture} minh họa kiến trúc tổng thể của \method{LACC} (dạng cộng, wave-1); các biến thể wave-2 thay đổi bước ``Kết hợp'' và/hoặc bước ``Chọn lọc'' như mô tả trong các mục tiếp theo.
 
 \begin{figure}[H]
 \centering
@@ -308,7 +318,7 @@ Khi có GPU, \method{LACC} sử dụng một mô hình ngôn ngữ nhỏ (135M--
     \score{}_{\text{ppl}}(t_i) = -\log P(t_i \mid t_{<i})
 \end{equation}
 
-Token càng ``bất ngờ'' đối với mô hình (perplexity cao) thì càng mang nhiều thông tin và càng nên được giữ lại. Đây là cùng nguyên lý với LLMLingua~\cite{jiang2023llmlingua}, nhưng thay vì dùng mô hình lớn (7B+), \method{LACC} dùng mô hình nhỏ (135M) để tiết kiệm VRAM.
+Token càng ``bất ngờ'' đối với mô hình (perplexity cao) thì càng mang nhiều thông tin và càng nên được giữ lại. Đây là cùng nguyên lý với LLMLingua~\cite{jiang2023llmlingua}, nhưng thay vì dùng mô hình lớn (7B+), \method{LACC} dùng mô hình nhỏ (135M) để tiết kiệm VRAM. \eqref{eq:ppl} được tính trên các cửa sổ trượt $W{=}2048$ token, stride $256$ (E3; bản thảo trước dùng $W{=}512$, cửa sổ hẹp hơn khiến nhiều token đầu mỗi cửa sổ bị chấm điểm với ít ngữ cảnh trái hơn cần thiết) -- xem Thuật toán~\ref{alg:lacc}, bước 3.
 
 \subsubsection{Các mô hình được hỗ trợ}
 
@@ -327,6 +337,25 @@ Qwen2.5-1.5B-Instruct & 1.5B & $\sim$1.0 GB & Chậm hơn & Tốt \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsubsection{Perplexity điều kiện hóa theo câu hỏi (E1, query-conditioning)}
+\label{sec:query_conditioning}
+
+Công thức~\eqref{eq:ppl} chấm điểm token chỉ dựa trên ngữ cảnh bên trái, \textbf{không nhìn thấy câu hỏi} $q$ -- một token mang đáp án nhưng dễ đoán từ văn cảnh (perplexity thấp) vẫn bị chấm thấp dù nó chính là điều câu hỏi cần. Đây là nguyên nhân chính (nguyên nhân A, xem Thảo luận) khiến \method{LACC} wave-1 xóa mất câu chứa đáp án trong 53/300 mẫu QA dù giữ nguyên thanh điệu. Theo LongLLMLingua~\cite{jiang2023longllmlingua}, \method{LACC} định nghĩa thêm perplexity \textbf{điều kiện hóa}:
+\begin{equation}\label{eq:cond_ppl}
+    \score{}_{\text{ppl-cond}}(t_i) = -\log P(t_i \mid q,\, t_{<i})
+\end{equation}
+với câu hỏi $q$ được ghép vào đầu mỗi cửa sổ trượt (Thuật toán~\ref{alg:lacc}, bước 3) trước ngữ cảnh, sao cho mọi token ngữ cảnh đều được chấm điểm với câu hỏi trong tầm nhìn. Điểm \textbf{tương phản} (\textit{contrastive}) là độ sụt perplexity khi có câu hỏi:
+\begin{equation}\label{eq:contrastive_ppl}
+    \score{}_{\text{ppl-cx}}(t_i) = \score{}_{\text{ppl}}(t_i) - \score{}_{\text{ppl-cond}}(t_i)
+\end{equation}
+Token càng \textit{trở nên} dễ đoán hơn khi biết câu hỏi thì càng liên quan đến câu hỏi đó, và càng nên được giữ lại -- ngược với \eqref{eq:ppl}, vốn chỉ ưu tiên token ``bất ngờ'' một cách tổng quát, bất kể câu hỏi là gì. \texttt{contrastive\_ppl=True} (arm \texttt{lacc\_ppl\_contrastive}, \texttt{lacc\_cx\_morph}) dùng \eqref{eq:contrastive_ppl} thay cho \eqref{eq:ppl} khi có $q$; nếu không có câu hỏi, mọi biến thể tự động rơi về \eqref{eq:ppl}.
+
+\paragraph{Hệ số tăng cường từ khoá (query boost).} Độc lập với E1, \textbf{mọi} biến thể \method{LACC} khi có câu hỏi còn nhân thêm một hệ số từ-vựng thô lên $\score{t}$ sau bước kết hợp:
+\begin{equation}\label{eq:query_boost}
+    \text{qboost}(t; q) = \begin{cases} 1.5 & \text{nếu chuỗi bề mặt của } t \text{ xuất hiện nguyên vẹn trong } q \\ 1.0 & \text{ngược lại} \end{cases}
+\end{equation}
+Đây là bộ lọc trùng từ khoá (không dùng embedding, không cần mô hình), áp dụng \textbf{sau khi} đã tính $\score{t}$ theo \eqref{eq:combined} hoặc \eqref{eq:combined_mult} -- kể cả trên các arm không bật \texttt{contrastive\_ppl}. Đây là điểm khác biệt quan trọng với mô tả wave-1 gốc: câu hỏi không hoàn toàn vắng mặt khỏi việc chấm điểm ở wave-1, nhưng tham gia rất thô (trùng từ, không phải trùng ngữ nghĩa) và chỉ áp \textit{sau} khi thứ hạng đã được quyết định.
 
 \subsection{Tín hiệu Thanh điệu từ Mô hình (\textit{Model-Based Tone Scoring})}
 
@@ -369,6 +398,16 @@ Khi inference với \texttt{use\_model\_tone=True}, \method{LACC} không còn d�
 \end{equation}
 
 Token có tone prediction confidence cao $\to$ model nắm rõ thanh điệu $\to$ nên giữ lại. Đây là cầu nối trực tiếp giữa training và inference mà các phương pháp trước đây còn thiếu.
+
+\subsubsection{Biến thể mục tiêu probe (E4): Relevance thay Phonological}
+
+\eqref{eq:tone_loss}--\eqref{eq:model_score} huấn luyện probe để dự đoán \textbf{thanh điệu} của từng vị trí -- một mục tiêu ngôn ngữ học đúng đắn nhưng không trực tiếp đo ``vị trí này có cần cho câu trả lời không''. \texttt{RelevanceConsistencyLoss} là một probe \textbf{cùng kiến trúc, cùng giao diện} (chung lớp phân loại 3 tầng, chung \texttt{score\_importance()}) nhưng đổi nhãn giám sát từ thanh điệu $y_i^{\text{tone}} \in \{0,\ldots,6\}$ sang nhãn nhị phân \textit{liên-quan-câu-hỏi} $y_i^{\text{rel}} \in \{0,1\}$ (token có nằm trong answer span hay không, lấy từ \texttt{qa.jsonl}):
+\begin{equation}\label{eq:rel_loss}
+    \mathcal{L}_{\text{rel}} = \lambda_{\text{rel}} \cdot \frac{1}{N} \sum_{i=1}^{N} \text{CE}_{\mathbf{w}}\big(\text{MLP}(h_i),\; y_i^{\text{rel}}\big)
+\end{equation}
+với $\text{CE}_{\mathbf{w}}$ là cross-entropy có trọng số lớp (lớp \textit{relevant} chỉ chiếm vài phần trăm một cửa sổ 512 token -- CE không trọng số bị tối thiểu hoá bằng cách gọi mọi token \textit{irrelevant}, cho accuracy $\sim$0.96 nhưng F1 dương gần 0). Ở suy luận, \eqref{eq:model_score} được dùng nguyên vẹn, chỉ thay $y^{\text{tone}}$ bằng $y^{\text{rel}}$: token có xác suất \textit{relevant} cao được ưu tiên giữ.
+
+\eqref{eq:phon_loss}--\eqref{eq:tone_loss} (Phonological) và \eqref{eq:rel_loss} (Relevance) là \textbf{hai mục tiêu probe loại trừ nhau} trên cùng một khe cắm (\texttt{tone\_source='model'}): bài báo trình bày cả hai và so sánh trực tiếp bằng A/B có kiểm soát trên cùng một SLM đã đóng băng, cùng tín hiệu perplexity/hình thái, cùng generation model (\S\ref{sec:results} -- \texttt{scripts/verify\_tone\_probe\_e2e.py}), thay vì khẳng định trước mục tiêu nào tốt hơn cho tác vụ QA.
 
 \subsection{Tín hiệu Attention (\textit{SnapKV-Style Importance})}
 
@@ -417,6 +456,16 @@ Từ Hán-Việt (SINO) & Học thuật, pháp luật & $\sim$2\% & 1.50 \\
 \end{tabular}
 \end{table}
 
+\subsection{Chọn lọc theo đơn vị câu (E5, sentence-level selection)}
+\label{sec:sentence_level}
+
+Chọn lọc mặc định (\eqref{eq:budget} hoặc TopK thuần) hoạt động ở mức \textbf{token}: các token của cùng một câu có thể được giữ/loại độc lập với nhau, kể cả khi câu đó chứa đáp án -- nguyên nhân B trong chẩn đoán wave-1 (nén needle giữ được thanh điệu nhưng mất câu chứa mã kích hoạt, do các token lân cận trong câu bị TopK loại rải rác thay vì cả câu bị loại hoặc giữ như một khối). \texttt{selection\_unit='sentence'} (arm \texttt{lacc\_sentence}) chọn lọc ở mức \textbf{câu}: câu được tách bằng ranh giới câu tiếng Việt (dấu câu kết thúc câu hoặc giới hạn cứng $200$ token/câu -- cùng định nghĩa ranh giới dùng cho baseline \textit{sentence\_retrieval}, để một chiến thắng không chỉ là khác biệt cách tách câu), sau đó câu được xếp hạng theo điểm token trung bình bên trong câu và giữ nguyên cả câu theo thứ tự điểm giảm dần cho tới khi đạt ngân sách:
+\begin{equation}\label{eq:sentence_select}
+    \bar{\score{}}(s) = \frac{1}{|s|} \sum_{t \in s} \score{t}, \qquad
+    \text{kept} = \bigcup \Big\{ s : \bar{\score{}}(s) \text{ nằm trong top theo thứ tự giảm dần, tới khi} \sum_{s \in \text{kept}} |s| \geq \lfloor n/R \rfloor \Big\}
+\end{equation}
+Câu đầu và câu cuối luôn được giữ (cùng vai trò với $k{=}2$ token biên ở chọn lọc mức token). Nếu ngữ cảnh có ít hơn 3 câu, \texttt{lacc\_sentence} rơi về chọn lọc mức token (\eqref{eq:budget}/TopK) vì tách câu không còn ý nghĩa.
+
 \subsection{Thuật toán tổng hợp}
 
 Thuật toán~\ref{alg:lacc} mô tả quy trình nén đầy đủ của \method{LACC}.
@@ -449,8 +498,8 @@ Thuật toán~\ref{alg:lacc} mô tả quy trình nén đầy đủ của \method
 \State
 \State // \textbf{Bước 3: Perplexity Scoring} (GPU, tùy chọn, $O(n)$)
 \If{có mô hình ngoài}
-    \For{mỗi cửa sổ 512 token trong \texttt{token\_ids}}
-        \State $\score{}_{\text{ppl}}[i..i{+}512] \gets$ \Call{ComputePerplexity}{tiny\_model, chunk}
+    \For{mỗi cửa sổ $W{=}2048$ token (stride $256$) trong \texttt{token\_ids}} \Comment{E3: 512 $\to$ 2048}
+        \State $\score{}_{\text{ppl}}[i..i{+}W] \gets$ \Call{ComputePerplexity}{tiny\_model, chunk} \Comment{có câu hỏi $\to$ \eqref{eq:contrastive_ppl}}
     \EndFor
 \Else
     \State $\score{}_{\text{ppl}} \gets \mathbf{1}$ \Comment{trung tính}
@@ -460,12 +509,21 @@ Thuật toán~\ref{alg:lacc} mô tả quy trình nén đầy đủ của \method
 \For{mỗi $\score{} \in \{\score{}_{\text{ppl}}, \score{}_{\text{tone}}, \score{}_{\text{morph}}\}$}
     \State $\tilde{\score{}} \gets (\score{} - \min(\score{})) \;/\; (\max(\score{}) - \min(\score{}))$ \Comment{$\to [0,1]$}
 \EndFor
-\State $\score{} \gets w_{\text{ppl}} \cdot \tilde{\score{}}_{\text{ppl}} + w_{\text{tone}} \cdot \tilde{\score{}}_{\text{tone}} + w_{\text{morph}} \cdot \tilde{\score{}}_{\text{morph}}$
+\State $\score{} \gets w_{\text{ppl}} \cdot \tilde{\score{}}_{\text{ppl}} + w_{\text{tone}} \cdot \tilde{\score{}}_{\text{tone}} + w_{\text{morph}} \cdot \tilde{\score{}}_{\text{morph}}$ \Comment{hoặc dạng nhân, \eqref{eq:combined_mult} (E2)}
+\If{có câu hỏi $q$}
+    \State $\score{} \gets \score{} \odot \text{qboost}(q)$ \Comment{hệ số $1.5\times$ theo trùng khoá, \eqref{eq:query_boost} -- áp cho MỌI biến thể, kể cả khi không bật E1}
+\EndIf
 \State
 \State // \textbf{Bước 5: Chọn lọc}
 \State $k \gets 2$ \Comment{số token biên luôn giữ}
 \State $B \gets \max(\lfloor n/R \rfloor - 2k,\; 0)$ \Comment{ngân sách cho token giữa}
-\State $\text{kept} \gets \text{TopK}(\score{}[k..n{-}k],\; B)$ \Comment{giữ $B$ token có điểm cao nhất}
+\If{chọn theo câu (E5)}
+    \State $\text{kept} \gets$ \Call{SelectSentences}{$\score{}$, $B$} \Comment{\S\ref{sec:sentence_level}}
+\ElsIf{chọn theo hạn ngạch lớp từ (E7)}
+    \State $\text{kept} \gets$ \Call{SelectClassProportional}{$\score{}$, $B$} \Comment{\eqref{eq:budget}}
+\Else
+    \State $\text{kept} \gets \text{TopK}(\score{}[k..n{-}k],\; B)$ \Comment{giữ $B$ token có điểm cao nhất}
+\EndIf
 \State $T' \gets \texttt{token\_ids}[0..k] \;+\; \text{kept} \;+\; \texttt{token\_ids}[n{-}k..n]$ \Comment{giữ nguyên thứ tự}
 \State \Return $T'$
 \end{algorithmic}
@@ -492,6 +550,17 @@ Kết hợp \& chọn lọc & $O(n \log n)$ & 0 & CPU \\
 \end{tabular}
 \end{table}
 
+\subsection{Kiến trúc thay thế: Encoder Token-Classification (E6)}
+\label{sec:encoder}
+
+Mọi biến thể ở trên đều chấm điểm bằng một mô hình \textbf{sinh} (causal LM, decode tuần tự, one-directional) rồi TopK/chọn câu bên trên điểm đó. Wave-1 quan sát rằng một scorer sinh 4B tinh chỉnh ($\sim$8 GB trọng số) vẫn thua một scorer 0.5B có sẵn (0.239 so với 0.442) --- \textit{``scorer tốt hơn không đồng nghĩa compressor tốt hơn''}. E6 thay hẳn kiến trúc: đóng khung nén thành \textbf{phân loại token nhị phân giữ/bỏ} trên một encoder hai chiều (bidirectional, kiểu BERT), theo đúng công thức LLMLingua-2~\cite{pan2024llmlingua2}, thay vì chấm điểm bằng perplexity một chiều.
+
+\paragraph{Huấn luyện (distillation ngoại tuyến).} Một mô hình giáo viên (causal LM, mặc định Qwen2.5-0.5B-Instruct) chấm perplexity từng token bằng \eqref{eq:ppl} (cửa sổ trượt $W{=}2048$) trên corpus không cần câu hỏi (E6 \textbf{query-agnostic} -- nén một lần, không phụ thuộc câu hỏi cụ thể, xem \S\ref{sec:e6_positioning}); $1/R$ token điểm cao nhất được gán nhãn \textit{keep}, phần còn lại \textit{drop}. Nhãn (định nghĩa theo ký tự) được chiếu sang tokenization của encoder Việt (PhoBERT/XLM-R) qua ánh xạ span-ký-tự, rồi một \texttt{AutoModelForTokenClassification} 2 lớp được tinh chỉnh để tái tạo nhãn đó (\texttt{scripts/train\_encoder\_compressor.py}). Không cần \texttt{compression.jsonl} (gold trích xuất bằng LLM) -- nhãn tự sinh trực tiếp từ corpus + giáo viên.
+
+\paragraph{Suy luận.} Ngữ cảnh được tokenize lại bằng tokenizer riêng của encoder (khác tokenizer sinh văn bản); xác suất \textit{keep} $P(\text{keep} \mid t)$ theo mỗi token-encoder được chiếu ngược về ký tự rồi gộp (trung bình) lên từng token của tokenizer sinh văn bản qua cùng cầu nối ký tự dùng cho scorer khác-tokenizer (\S\ref{sec:query_conditioning}), sau đó chọn lọc theo ranh giới top-k như các biến thể khác. Với ngữ cảnh dài hơn cửa sổ encoder, các cửa sổ chồng lấp (stride $128$ token-encoder) được dự đoán riêng rồi lấy trung bình phần chồng lấp.
+
+Vì chạy một lượt xuôi hai chiều duy nhất (không giải mã tuần tự qua nhiều cửa sổ như \eqref{eq:ppl}), E6 rẻ hơn đáng kể về độ trễ suy luận so với mọi biến thể dùng scorer sinh -- đây là trục hiệu quả (\textit{efficiency}) mà E6 nhắm tới, tách biệt khỏi trục chất lượng QA mà E1/E4/E5 nhắm tới (\S\ref{sec:e6_positioning}).
+
 
 % ============================================================================
 \section{Thiết kế thực nghiệm}
@@ -508,6 +577,8 @@ Chúng tôi xây dựng \method{VCC-Bench} --- bộ benchmark đầu tiên để
     \item \textbf{Agent Tool-Calling.} Tác vụ agent đa bước với function calling tiếng Việt. Đánh giá khả năng bảo toàn cấu trúc hành động.
     \item \textbf{Cross-lingual Compression.} So sánh nén trực tiếp tiếng Việt với chiến lược ``dịch $\to$ nén $\to$ dịch ngược''.
 \end{enumerate}
+
+Kết quả ở \S\ref{sec:results} dùng \textbf{\method{VCC-Bench} v2} (414 mẫu), bản kế thừa có kiểm soát rò dữ liệu tường minh của bộ đầu (T1--T5 giữ nguyên; T3 needle-in-haystack được thiết kế lại thành ba nhóm A/B/C tách bạch tín hiệu thanh điệu thật khỏi nhiễu bề mặt, sau khi phát hiện bản v1 có 16/16 token needle nằm ở sàn trọng số thanh điệu -- tức số liệu v1 đo một bộ dò dấu thanh, không phải đánh đổi thanh điệu-với-QA). Tài liệu chứa mã kích hoạt/PII trong T3 là \textbf{giả có kiểm soát}: giá trị được sinh chương trình (không gắn với cá nhân thật) và đánh dấu tường minh bằng trường \texttt{synthetic\_pii=true} trên mọi mẫu needle (120/120).
 
 \subsection{Mô hình và cấu hình}
 
@@ -534,32 +605,53 @@ GPU & NVIDIA T4 16~GB / P100 16~GB \\
 
 \subsection{Phương pháp so sánh}
 
-\begin{itemize}
-    \item \textbf{No Compression:} Giữ nguyên toàn bộ ngữ cảnh (upper bound).
-    \item \textbf{Random Baseline:} Chọn token ngẫu nhiên (lower bound).
-    \item \textbf{First-N Baseline:} Giữ $N$ token đầu tiên.
-    \item \textbf{LLMLingua~\cite{jiang2023llmlingua}:} Perplexity-based token selection.
-    \item \textbf{SnapKV~\cite{li2024snapkv}:} Attention-based KV cache eviction.
-    \item \textbf{\method{LACC}-NoModel:} Chỉ dùng tín hiệu thanh điệu + hình thái (0 VRAM).
-    \item \textbf{\method{LACC}-External:} Thêm tín hiệu perplexity từ mô hình 135M.
-\end{itemize}
+Bảng~\ref{tab:baselines} liệt kê toàn bộ các arm được sweep trên VCC-Bench v2 (tên arm khớp 1-1 với \texttt{benchmark.py:WAVE2\_ARMS} và \texttt{run\_pipeline.sh:BENCH\_METHODS}, để một bảng số trong \S\ref{sec:results} có thể truy ngược đúng lệnh đã chạy ra nó).
+
+\begin{table}[H]
+\centering
+\caption{Toàn bộ arm trong sweep chính (VCC-Bench v2, \S\ref{sec:results}). "Trục" đánh dấu arm thuộc trục A (query-awareness), B (cơ chế chấm điểm), hay cả hai; baseline không thuộc trục nào của \method{LACC}.}
+\label{tab:baselines}
+\begin{tabular}{llp{6.3cm}}
+\toprule
+\textbf{Arm} & \textbf{Loại} & \textbf{Mô tả} \\
+\midrule
+\texttt{none} & Upper bound & Giữ nguyên toàn bộ ngữ cảnh \\
+\texttt{random} & Lower bound & Chọn token ngẫu nhiên (nhiều seed, SS4 rule 3) \\
+\texttt{llmlingua} & Baseline & LLMLingua~\cite{jiang2023llmlingua} gốc, perplexity một chiều, không điều kiện câu hỏi \\
+\texttt{llmlingua\_contrastive} & Baseline (trục A) & LongLLMLingua~\cite{jiang2023longllmlingua}: perplexity điều kiện hóa theo câu hỏi \\
+\texttt{translate\_then\_compress} & Baseline (B2) & Dịch VN$\to$EN + LLMLingua, xem \cite{lukauskas2026lost} \\
+\texttt{translate\_then\_compress\_llmlingua2} & Baseline (B2) & Dịch VN$\to$EN + LLMLingua-2 (encoder), đúng nghĩa "LLMLingua-2" mà~\cite{lukauskas2026lost} thử \\
+\texttt{encoder} & Baseline/\method{LACC}-E6 (trục B) & Encoder token-classification kiểu LLMLingua-2~\cite{pan2024llmlingua2}, \S\ref{sec:encoder} \\
+\texttt{lacc\_ppl\_contrastive} & \method{LACC}-E1 (trục A) & Chỉ perplexity điều kiện câu hỏi, tone/morph tắt \\
+\texttt{lacc\_ppl\_morph} & \method{LACC}-E2 & Perplexity $\times$ hình thái (nhân), tone tắt \\
+\texttt{lacc\_cx\_morph} & \method{LACC}-E1+E2 (trục A) & Perplexity điều kiện câu hỏi $\times$ hình thái \\
+\texttt{lacc\_sentence} & \method{LACC}-E5 (trục A) & Chọn lọc mức câu, \S\ref{sec:sentence_level} \\
+\texttt{lacc\_classprop} & \method{LACC}-E7 & Ngân sách theo lớp từ, eq.~\eqref{eq:budget} \\
+\texttt{lacc\_tone\_gated} & \method{LACC}-E8 & Thanh điệu chỉ bật cho tác vụ bề mặt \\
+\texttt{lacc\_tone} & \method{LACC} (wave-1) & Cấu hình gốc (ppl+tone+morph, cộng), điểm đối chứng cho các biến thể trên \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Độ đo}
 
 \begin{itemize}
-    \item \textbf{Compression Ratio (CR):} $n_{\text{original}} \;/\; n_{\text{compressed}}$
+    \item \textbf{Compression Ratio (CR):} $n_{\text{original}} \;/\; n_{\text{compressed}}$ -- báo cả CR \textit{thực đạt} (achieved) lẫn CR \textit{yêu cầu} (requested), trên cả hai tokenizer (PhoBERT và LLM sinh văn bản), vì hai giá trị này lệch nhau và một bảng chỉ báo CR yêu cầu che giấu việc một arm có đạt ngân sách hay không.
     \item \textbf{Token Savings (TS):} $(n_{\text{original}} - n_{\text{compressed}}) \;/\; n_{\text{original}} \times 100\%$
-    \item \textbf{ROUGE-L F1:} Chất lượng sinh văn bản so với đáp án tham chiếu.
-    \item \textbf{BLEU:} Độ chính xác từ vựng.
-    \item \textbf{Exact Match (EM):} Tỉ lệ khớp chính xác.
+    \item \textbf{ROUGE-L F1 / BLEU / token-F1 / Exact Match (EM):} Chất lượng sinh văn bản so với đáp án tham chiếu (token-F1 dùng tokenization giữ dấu thanh, \S\ref{sec:results}).
+    \item \textbf{Needle recall:} Thu hồi ``đáp án kim'' cho tác vụ needle-in-haystack.
     \item \textbf{Tone Preservation Rate (TPR):} Tỉ lệ token có thanh điệu được bảo toàn sau nén.
-    \item \textbf{Function Word Compression Ratio:} Tỉ lệ nén riêng cho hư từ.
+    \item \textbf{Evidence recall:} Câu chứa đáp án (xấp xỉ bằng token-overlap cao nhất với đáp án tham chiếu) có sống sót sau nén không.
+    \item \textbf{Source-span recoverability:} $P(\text{ngữ cảnh đã nén} \Rightarrow \text{câu chứa đáp án gốc})$, chấm bằng mô hình NLI đa ngôn ngữ.
+    \item \textbf{Unsupported-claim rate:} Tỉ lệ câu trong câu trả lời sinh ra không được ngữ cảnh đã nén chứng thực (NLI), một chỉ báo hallucination/attribution.
+    \item \textbf{E4 (probe liên-quan):} PR-AUC và recall@budget (2$\times$/4$\times$/8$\times$) thay cho F1 ở ngưỡng cố định (\S\ref{sec:results}).
     \item \textbf{Harmonized Score:} $2 \times Q \times E \;/\; (Q + E)$ với $Q$ = chất lượng, $E$ = hiệu quả.
 \end{itemize}
 
 
 % ============================================================================
 \section{Kết quả thực nghiệm}
+\label{sec:results}
 % ============================================================================
 
 \subsection{Thử nghiệm khả thi trên GPU phổ thông}
@@ -573,7 +665,7 @@ Bảng~\ref{tab:slm_pilot} báo cáo đánh giá trên 40 văn bản hold-out, �
 
 \begin{table}[H]
 \centering
-\caption{Kết quả pilot của mô hình scoring tiếng Việt nhỏ sau 30 bước cập nhật. Mũi tên $\downarrow$/$\uparrow$ biểu thị chiều tối ưu.}
+\caption{Kết quả pilot của mô hình scoring tiếng Việt nhỏ sau 30 bước cập nhật (GPU phổ thông). Mũi tên $\downarrow$/$\uparrow$ biểu thị chiều tối ưu.}
 \label{tab:slm_pilot}
 \begin{tabular}{ll}
 \toprule
@@ -593,6 +685,23 @@ Tone accuracy, token có thanh $\uparrow$ & 16.59\% (3,141 token) \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\paragraph{Cập nhật wave-2: huấn luyện hội tụ trên toàn corpus.} Bảng~\ref{tab:slm_pilot} ở trên là một phép thử khả thi 30 bước, không phải kết quả hội tụ -- \textbf{không dùng số của nó để so sánh chất lượng}. Sau khi hạ tầng dữ liệu \texttt{vncompress-vi-v2} sẵn sàng (\S\ref{sec:query_conditioning}), cùng adapter được huấn luyện đầy đủ \textbf{3 epoch trên toàn bộ 56,729 văn bản / 3,220 tài liệu} (2,394 bước tối ưu, $\sim$7 phút, 1$\times$ H100 80GB -- không còn trên GPU 6~GB, vì đây là phép đo hội tụ chứ không phải phép đo khả thi phần cứng), đánh giá trên tập hold-out 5,673 văn bản / 792,348 token đã chấm điểm:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hạng mục} & \textbf{Giá trị} \\
+\midrule
+Validation NLL $\downarrow$ / Perplexity $\downarrow$ & 4.4585 / 86.36 \\
+Tone accuracy, toàn bộ token $\uparrow$ & 96.52\% \\
+Tone accuracy, token có thanh $\uparrow$ & \textbf{94.85\%} (thay cho 16.59\% ở Bảng~\ref{tab:slm_pilot}) \\
+Macro-F1, token có thanh $\uparrow$ & 0.9482 \\
+Đối chứng: baseline lớp đa số ("ngang") & 43.48\% \\
+Đối chứng: tra bảng token-id không cần huấn luyện & 100.00\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+Đối chứng tra-bảng-token-id 100\% cho thấy trần lý thuyết của phép đo này là tầm thường (thanh điệu phần lớn suy ra được trực tiếp từ token id); 94.85\% nói rằng hidden state sau LoRA vẫn giữ được gần hết tín hiệu đó sau fine-tune, không hơn. \textbf{Đây là bằng chứng pipeline huấn luyện + probe hoạt động đúng và hội tụ, KHÔNG PHẢI bằng chứng \method{LACC} nén tốt hơn} -- kết luận đó chỉ đến từ VCC-Bench v2 (\S\ref{sec:results}), theo đúng tinh thần thận trọng đã nêu ở đoạn trên cho bản pilot 30 bước.
 
 \subsection{Hiệu quả nén}
 
@@ -689,17 +798,29 @@ All three (external) & --- & --- & --- \\
 \section{Thảo luận}
 % ============================================================================
 
-\subsection{Tại sao tín hiệu ngôn ngữ quan trọng?}
+\subsection{Một đặc trưng ngôn ngữ học hợp lý không tự động là tín hiệu hữu ích: trường hợp thanh điệu}
+\label{sec:why_tone_negative}
 
-Kết quả thực nghiệm (sẽ được điền) cho thấy các phương pháp mù ngôn ngữ gặp ba vấn đề chính với tiếng Việt:
+Lập luận P1 (\S\ref{sec:intro}) rằng mất thanh điệu là một rủi ro thực -- \viet{má} và \viet{ma} là hai từ khác nghĩa, và các phương pháp nén mù ngôn ngữ (LLMLingua, SnapKV) không phân biệt hai token này -- \textbf{vẫn đúng về mặt ngôn ngữ học}. Trọng số bảo toàn thanh điệu \eqref{eq:tone_weight} thực sự ưu tiên giữ \token{má} (score $\approx 2.01$) hơn \token{ma} (score $\approx 1.0$), đúng như thiết kế.
+
+Câu hỏi mà benchmark này trả lời là một câu hỏi khác và hẹp hơn: \textbf{với tác vụ QA cụ thể, việc ưu tiên giữ token mang thanh điệu có làm tăng khả năng câu chứa đáp án sống sót sau nén hay không?} Kết quả có kiểm soát trên \method{VCC-Bench} v2 (\S\ref{sec:results}, số liệu điền tại đó) là \textbf{không}: tín hiệu thanh điệu không tương quan với vị trí chứa đáp án. Ba lý do khớp với thiết kế thực nghiệm giải thích vì sao một tín hiệu hợp lý về ngôn ngữ học lại không chuyển hoá thành lợi ích cho QA:
 
 \begin{enumerate}[label=(\arabic*),leftmargin=*]
-    \item \textbf{Mất thanh điệu:} LLMLingua và SnapKV không phân biệt \token{má} và \token{ma} --- cả hai có thể bị xóa với xác suất như nhau. \method{LACC} với tín hiệu thanh điệu ưu tiên giữ \token{má} (score $\approx 2.01$) hơn \token{ma} (score $\approx 1.0$).
-    
-    \item \textbf{Lãng phí hư từ:} Các phương pháp hiện tại giữ hư từ và thực từ với tỉ lệ như nhau. \method{LACC} phân bổ ngân sách thông minh: hư từ chỉ được giữ 30\%, thực từ được giữ 85\%. Với văn bản 1000 token (350 hư từ + 500 thực từ + 150 khác), ngân sách 250 token: phương pháp mù giữ $\sim$87 hư từ; \method{LACC} chỉ giữ $\sim$35 hư từ --- tiết kiệm 52 token cho thực từ.
-    
-    \item \textbf{Token inflation:} TIR (Token Inflation Ratio) của tiếng Việt là 1.5--2.0$\times$ so với tiếng Anh~\cite{lee2026equity}. Điều này có nghĩa context window 128K token chỉ chứa được $\sim$61K từ tiếng Việt so với $\sim$98K từ tiếng Anh. \method{LACC} bù đắp một phần bằng cách nén mạnh hư từ.
+    \item \textbf{Chấm điểm không biết câu hỏi.} Một token mang thanh điệu đậm nhưng không liên quan tới câu hỏi vẫn được điểm cao như nhau; ngược lại, token chứa đáp án nhưng ít thanh điệu (ví dụ số liệu, tên riêng phiên âm) bị chấm thấp. Đây là lý do trực tiếp dẫn tới E1 (\S\ref{sec:query_conditioning}): tách trục "biết câu hỏi hay không" ra khỏi trục "tín hiệu gì" để không nhầm lẫn hai câu hỏi khác nhau.
+    \item \textbf{Đơn vị chọn lọc là token, không phải câu.} Giữ được các token mang thanh điệu rải rác trong một câu không đồng nghĩa với giữ nguyên câu đó -- câu vẫn có thể bị phá vỡ nếu các token lân cận (ít thanh điệu hơn) bị loại. E5 (\S\ref{sec:sentence_level}) kiểm tra trực tiếp giả thuyết này bằng chọn lọc mức câu.
+    \item \textbf{Kết hợp cộng làm loãng tín hiệu mạnh hơn.} Khi tín hiệu perplexity (vốn tương quan tốt hơn với thông tin cần cho QA) bị cộng trung bình với tín hiệu thanh điệu, thứ hạng token bị kéo lệch khỏi thứ hạng theo perplexity thuần. E2 (\eqref{eq:combined_mult}) kiểm tra việc kết hợp nhân có giữ được ưu thế của tín hiệu mạnh hơn không.
 \end{enumerate}
+
+\textbf{Điều phát hiện này KHÔNG nói:} nó không phủ nhận thanh điệu là một đặc trưng ngữ âm-hình thái quan trọng của tiếng Việt, không nói rằng bảo toàn thanh điệu là vô giá trị cho mọi tác vụ (ví dụ dịch máy, phiên âm, trích dẫn nguyên văn -- các tác vụ ``bề mặt'' mà E8/\texttt{lacc\_tone\_gated} vẫn bật tín hiệu này), và không nói rằng không có tín hiệu ngôn ngữ học nào giúp ích cho nén tiếng Việt (hình thái từ, qua phân bổ ngân sách theo lớp E7, là một trục riêng chưa bị bác bỏ bởi phát hiện này). Nó chỉ nói: \textit{đối với QA, thanh điệu như một tín hiệu chấm điểm độc lập-với-câu-hỏi không tương quan với vị trí đáp án} -- một phát biểu hẹp, có kiểm soát, không nên được khái quát hoá thành ``thanh điệu không quan trọng cho tiếng Việt''.
+
+Token inflation (TIR 1.5--2.0$\times$ so với tiếng Anh~\cite{lee2026equity}, nghĩa là context window 128K token chỉ chứa được $\sim$61K từ tiếng Việt so với $\sim$98K từ tiếng Anh) vẫn là một ràng buộc thực của tiếng Việt độc lập với phát hiện trên -- nó là lý do vì sao nén ngữ cảnh cho tiếng Việt vẫn cần thiết, chỉ là tín hiệu "đúng" để làm việc đó chưa chắc là thanh điệu.
+
+\subsection{Định vị E6: trục cơ chế, không phải trục truy vấn}
+\label{sec:e6_positioning}
+
+Bài báo phân biệt hai trục cải tiến \textbf{độc lập} với nhau: trục A (\textbf{query-awareness} -- chấm điểm token có nhìn câu hỏi hay không, do E1/E4 phụ trách, \S\ref{sec:query_conditioning}) và trục B (\textbf{cơ chế chấm điểm} -- mô hình sinh một chiều so với encoder phân loại hai chiều, do E6 phụ trách, \S\ref{sec:encoder}). E6 được chốt là \textbf{query-agnostic} (nén một lần, không nhìn câu hỏi cụ thể) có chủ đích: mục tiêu của E6 là cô lập câu hỏi ``kiến trúc chấm điểm nào rẻ/tốt hơn cho cùng một ngân sách nén'', không lẫn với câu hỏi ``có nên điều kiện hóa theo câu hỏi hay không'' mà E1 đã trả lời riêng. Ghép hai trục vào một arm (ví dụ nhân thêm hệ số từ khoá của E1 vào E6) sẽ làm bẩn vai trò \textit{control} này.
+
+Hệ quả trực tiếp cho thiết kế so sánh: E6 được đặt cạnh các baseline \textbf{cùng lớp ngân sách/task-agnostic} -- LLMLingua~\cite{jiang2023llmlingua}, LLMLingua-2~\cite{pan2024llmlingua2}, Selective Context -- chứ \textbf{không} so trực tiếp với LongLLMLingua (query-aware, khác lớp ngân sách: LongLLMLingua được phép dùng câu hỏi để chấm điểm, E6 thì không). Nếu E6 thắng các baseline task-agnostic về chất lượng ở cùng tỉ lệ nén, đó là bằng chứng cho trục B (cơ chế); nếu E6 thua LongLLMLingua, điều đó không phản bác trục B -- nó chỉ xác nhận trục A (query-awareness) quan trọng, một kết luận trục A đã tự đứng vững qua so sánh E1 với LLMLingua thường. Giới hạn (\S\ref{sec:limitations}) nói rõ: E6 không đặt mục tiêu thắng baseline query-aware trên chất lượng QA; mục tiêu của nó là trục hiệu quả (độ trễ, kích thước mô hình).
 
 \subsection{Khả năng mở rộng}
 
@@ -712,11 +833,21 @@ Mặc dù được thiết kế cho tiếng Việt, kiến trúc module hóa c�
 \end{itemize}
 
 \subsection{Hạn chế}
+\label{sec:limitations}
 
 \begin{enumerate}[label=(\arabic*),leftmargin=*]
     \item \textbf{Phụ thuộc từ điển:} Tín hiệu thanh điệu và hình thái từ phụ thuộc vào từ điển đóng. Với từ mới hoặc từ mượn, phân loại có thể không chính xác.
     \item \textbf{Mô hình scoring nhỏ:} Perplexity từ mô hình 135M có thể không chính xác bằng mô hình 7B. Tuy nhiên, đây là sự đánh đổi cần thiết cho phần cứng hạn chế.
     \item \textbf{Chưa tối ưu cho streaming:} Thuật toán yêu cầu thấy toàn bộ ngữ cảnh trước khi nén, chưa hỗ trợ streaming từng phần.
+    \item \textbf{Trần của E6 (encoder classifier, \S\ref{sec:e6_positioning}):} E6 là \textit{query-agnostic} theo thiết kế, nên không đặt mục tiêu thắng các baseline query-aware (LongLLMLingua, E1/E4) về chất lượng QA -- một compressor không thấy câu hỏi về nguyên tắc không thể chọn đúng bằng một compressor thấy câu hỏi, ở cùng ngân sách. Đóng góp mà E6 nhắm tới là \textit{hiệu quả} (độ trễ suy luận một-lượt-xuôi, kích thước mô hình nhỏ hơn scorer sinh), so với các baseline \textbf{cùng lớp task-agnostic}, không phải chất lượng tuyệt đối so với mọi baseline.
+\end{enumerate}
+
+\subsection{Rủi ro}
+
+\begin{enumerate}[label=(\arabic*),leftmargin=*]
+    \item \textbf{Khái quát hoá quá mức phát hiện âm.} Kết quả "thanh điệu không tương quan với vị trí đáp án" chỉ được đo cho tác vụ QA trên \method{VCC-Bench} v2, không phải mọi tác vụ hay mọi kiến trúc chấm điểm. Đọc thành "thanh điệu không quan trọng cho NLP tiếng Việt nói chung" là một khái quát hoá sai mà \S\ref{sec:why_tone_negative} cố tình cảnh báo trước.
+    \item \textbf{Nén ngữ cảnh trong ứng dụng có rủi ro cao.} Như mọi phương pháp nén ngữ cảnh mất mát (\textit{lossy}), \method{LACC} và các baseline so sánh đều có thể làm mất thông tin cần cho câu trả lời đúng. Triển khai trong lĩnh vực rủi ro cao (y tế, pháp luật) mà không có bước xác minh bổ sung có thể khuếch đại lỗi thay vì chỉ tiết kiệm chi phí suy luận.
+    \item \textbf{Nhiễm dữ liệu benchmark (\textit{contamination}).} Vì \method{VCC-Bench} v2 được công bố công khai (\S\ref{sec:results}), các mô hình huấn luyện sau này có thể học thuộc nội dung benchmark, làm mất giá trị của các phép đo held-out trong tương lai -- rủi ro chung của mọi benchmark công khai, không riêng bài này.
 \end{enumerate}
 
 
@@ -724,16 +855,20 @@ Mặc dù được thiết kế cho tiếng Việt, kiến trúc module hóa c�
 \section{Kết luận}
 % ============================================================================
 
-Bài báo này đề xuất \method{LACC} --- phương pháp nén ngữ cảnh có nhận thức về đặc điểm ngôn ngữ đầu tiên cho tiếng Việt. \method{LACC} kết hợp ba tín hiệu --- thanh điệu, hình thái từ, và perplexity --- để tính điểm quan trọng cho từng token, từ đó chọn lọc token cần giữ lại. Phương pháp hoạt động ở ba mức độ phần cứng, từ không cần GPU đến đầy đủ, giúp triển khai được trên các thiết bị hạn chế như T4 16~GB.
+Bài báo này công bố \method{VCC-Bench} v2 --- benchmark nén ngữ cảnh tiếng Việt có kiểm soát rò dữ liệu, 5 tác vụ, cùng bộ độ đo evidence/attribution đo trực tiếp việc nén có giữ được câu chứa đáp án hay không. Trên nền benchmark này, chúng tôi đo có kiểm soát một tín hiệu ngôn ngữ học cụ thể --- thanh điệu --- và phát hiện nó \textbf{không} tương quan với vị trí chứa đáp án cho tác vụ QA, dù vẫn là một đặc trưng ngữ âm-hình thái hợp lệ của tiếng Việt (\S\ref{sec:why_tone_negative}). Khung \method{LACC} cấu hình được (thanh điệu, hình thái từ, perplexity, cùng các biến thể điều kiện hóa theo câu hỏi, chọn lọc mức câu, và kiến trúc encoder thay thế) là công cụ đo cho phát hiện này, không phải kết luận đã định trước -- vận hành được từ không cần GPU tới GPU tiêu dùng 6~GB.
 
-Hướng phát triển trong tương lai bao gồm: (1) mở rộng \method{LACC} cho các ngôn ngữ thanh điệu và đơn lập khác; (2) tích hợp với các hệ thống serving như vLLM để nén KV cache; (3) huấn luyện end-to-end với phonological consistency loss; và (4) phát triển phiên bản streaming cho hội thoại thời gian thực.
+Hướng phát triển trong tương lai bao gồm: (1) mở rộng \method{VCC-Bench} và phép đo evidence/attribution cho các ngôn ngữ thanh điệu, đơn lập khác; (2) kiểm chứng liệu hình thái từ (E7, chưa bị phát hiện trên bác bỏ) có tương quan với vị trí đáp án tốt hơn thanh điệu hay không; (3) tích hợp với các hệ thống serving như vLLM để nén KV cache; và (4) huấn luyện end-to-end kết hợp \textit{Relevance Consistency Loss} (E4) thay cho \textit{Phonological Consistency Loss}, tuỳ kết quả A/B ở \S\ref{sec:results}.
 
 
 % ============================================================================
-\section*{Lời cảm ơn}
+\section{Công bố dữ liệu và mã nguồn}
 % ============================================================================
 
-\textit{[Sẽ được bổ sung sau.]}
+\textbf{Giấy phép.} \method{VCC-Bench} v2 kết hợp ba nguồn với giấy phép khác nhau theo từng tác vụ: CC-BY-SA 4.0 (văn bản Wikipedia, dùng cho T2/T5), Public Domain (văn bản pháp luật, dùng cho T1), và MIT (nội dung tổng hợp cho T3/T4 -- needle, hội thoại, lệnh gọi công cụ). Giấy phép tổng hợp được ghi trong metadata đi kèm bộ dữ liệu.
+
+\textbf{Dữ liệu cá nhân (PII).} Không có dữ liệu cá nhân thật trong \method{VCC-Bench} v2. Nội dung dạng định danh (số tài khoản, số điện thoại, biển số xe...) trong tác vụ T3 (needle-in-haystack) đều là giá trị sinh chương trình, không gắn với cá nhân thật, và được đánh dấu tường minh bằng trường \texttt{synthetic\_pii=true} trên toàn bộ 120/120 mẫu needle -- không cần rà soát thủ công thêm cho trường này.
+
+\textbf{Công bố.} Mã nguồn (\method{LACC}, harness \method{VCC-Bench}, script huấn luyện) và bộ dữ liệu \method{VCC-Bench} v2 sẽ được công bố công khai. Trong giai đoạn phản biện double-blind, liên kết được giữ ẩn danh: \texttt{[LIÊN KẾT ẨN DANH -- BỔ SUNG KHI NỘP]}; liên kết định danh đầy đủ (kèm tên tác giả) sẽ được công bố nếu bài được chấp nhận.
 
 
 % ============================================================================
@@ -746,6 +881,16 @@ Hướng phát triển trong tương lai bao gồm: (1) mở rộng \method{LACC
 H. Jiang, Q. Wu, C.-Y. Lin, Y. Yang, and L. Qiu.
 \newblock ``LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models.''
 \newblock In \emph{Proceedings of EMNLP}, 2023.
+
+\bibitem{jiang2023longllmlingua}
+H. Jiang, Q. Wu, X. Luo, D. Li, C.-Y. Lin, Y. Yang, and L. Qiu.
+\newblock ``LongLLMLingua: Accelerating and Enhancing LLMs in Long Context Scenarios via Prompt Compression.''
+\newblock \emph{arXiv:2310.06839}, 2023.
+
+\bibitem{pan2024llmlingua2}
+Z. Pan, Q. Wu, H. Jiang, M. Xia, X. Luo, J. Zhang, Q. Lin, V. Rühle, Y. Yang, C.-Y. Lin, H. V. Zhao, L. Qiu, and D. Zhang.
+\newblock ``LLMLingua-2: Data Distillation for Efficient and Faithful Task-Agnostic Prompt Compression.''
+\newblock In \emph{Findings of ACL}, 2024.
 
 \bibitem{li2024snapkv}
 Y. Li, Y. Huang, B. Yang, B. Venkitesh, A. Locatelli, H. Ye, T. Cai, P. Lewis, and D. Chen.
@@ -786,6 +931,11 @@ N. Deng, A. Shen, Y. Feng, J. Nwatu, J.-W. Chung, M. Chowdhury, Y. Chen, and R. 
 M. U. Colak.
 \newblock ``Cross-Lingual Token Arbitrage: Optimizing Code Agent Context Windows via Local LLM Preprocessing.''
 \newblock \emph{arXiv:2606.03618}, 2026.
+
+\bibitem{lukauskas2026lost}
+M. Lukauskas.
+\newblock ``Lost in Compression: A Controlled Cross-Lingual Audit of Extractive Prompt Compressors.''
+\newblock \emph{arXiv:2608.26175}, 2026.
 
 \bibitem{guo2026brain}
 D. Guo, J. Wu, and S. M. Yiu.

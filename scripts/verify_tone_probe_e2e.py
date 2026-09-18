@@ -68,6 +68,24 @@ PRIMARY_METRIC = {
 DEFAULT_PRIMARY = "token_f1"
 
 
+def detect_probe_kind(tone_probe_path: str) -> str:
+    """'tone' or 'relevance', from the probe's sidecar meta json -- same
+    lookup as models.load_scorer (vncompress/models.py) so a relevance probe
+    passed via --tone-probe-path is labelled correctly instead of reporting
+    as "tone" throughout (docs/lacc_coling2027_tasklist.md G2: this script is
+    reused for the E4 relevance-probe vs tone-probe vs rule A/B)."""
+    probe_base = os.path.splitext(os.path.basename(tone_probe_path))[0]
+    meta_dir = os.path.dirname(os.path.abspath(tone_probe_path))
+    meta_path = os.path.join(meta_dir, f'{probe_base}_meta.json')
+    if not os.path.exists(meta_path):
+        meta_path = os.path.join(meta_dir, 'tone_probe_meta.json')
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding='utf-8') as f:
+            if json.load(f).get('probe_kind') == 'relevance':
+                return 'relevance'
+    return 'tone'
+
+
 def _decode_tokens(tokenizer, ids):
     return [tokenizer.decode([t]).replace("▁", " ").replace("Ġ", " ").strip() for t in ids]
 
@@ -161,7 +179,10 @@ def main():
     from vncompress.models import load_scorer
 
     ratios = [float(r) for r in args.ratios.split(",")]
-    arms = ["none", "random", "lacc_tone_rule", "lacc_tone_probe"]
+    probe_kind = detect_probe_kind(args.tone_probe_path)
+    probe_arm = f"lacc_{probe_kind}_probe"
+    arms = ["none", "random", "lacc_tone_rule", probe_arm]
+    print(f"Detected probe_kind={probe_kind!r} from {args.tone_probe_path} -> arm {probe_arm!r}")
     os.makedirs(args.output_dir, exist_ok=True)
     save_run_metadata(args.output_dir, ExperimentConfig(
         model=args.generation_model, device=args.device, seed=args.seed,
@@ -184,7 +205,7 @@ def main():
     set_seed(args.seed)
 
     # --- one shared SLM scorer for both tone arms (controlled A/B) -------------
-    print(f"Loading SLM tone-probe scorer once: {args.scorer_adapter_dir} + {args.tone_probe_path}")
+    print(f"Loading SLM {probe_kind}-probe scorer once: {args.scorer_adapter_dir} + {args.tone_probe_path}")
     shared_scorer = load_scorer(
         args.scorer_adapter_dir, tone_probe_path=args.tone_probe_path, use_adapter=True, device=args.device,
         dtype=torch.bfloat16 if args.scorer_dtype == "bfloat16" else torch.float32,
@@ -194,7 +215,7 @@ def main():
     def make_arm(method):
         if method in ("none", "random"):
             return create_compressor(method, gen_tokenizer, None, config=None, device=args.device)
-        tone_source = "model" if method == "lacc_tone_probe" else "rule"
+        tone_source = "model" if method == probe_arm else "rule"
         return LACCCompressor(
             gen_tokenizer, model=None, config=None, device=args.device,
             scorer=shared_scorer, tone_source=tone_source, name=method,
@@ -318,7 +339,7 @@ def main():
     def paired_series(metric_key, ratio):
         """Align probe vs rule on the SAME sample ids at this ratio."""
         rule = {r["sample_id"]: r.get(metric_key) for r in records["lacc_tone_rule"][ratio]}
-        probe = {r["sample_id"]: r.get(metric_key) for r in records["lacc_tone_probe"][ratio]}
+        probe = {r["sample_id"]: r.get(metric_key) for r in records[probe_arm][ratio]}
         ids = sorted(set(rule) & set(probe))
         return ([probe[i] for i in ids], [rule[i] for i in ids])
 
@@ -343,7 +364,8 @@ def main():
         "config": {"ratios": ratios, "n_samples": len(samples),
                    "generation_model": args.generation_model,
                    "bertscore": args.bertscore, "no_generation": args.no_generation,
-                   "primary_metric_by_task": PRIMARY_METRIC},
+                   "primary_metric_by_task": PRIMARY_METRIC,
+                   "probe_kind": probe_kind, "probe_arm": probe_arm},
     }
     json_path = os.path.join(args.output_dir, "tone_probe_e2e_results.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -355,9 +377,9 @@ def main():
             return "-"
         return f"{v*100:.1f}%" if pct else f"{v:.3f}"
 
-    lines = ["# Tone-Probe End-to-End Verification\n",
+    lines = [f"# {probe_kind.capitalize()}-Probe End-to-End Verification\n",
              f"Generation model: `{args.generation_model}`  |  samples: {len(samples)}",
-             f"SLM: `{args.scorer_adapter_dir}` + `{args.tone_probe_path}`\n",
+             f"SLM: `{args.scorer_adapter_dir}` + `{args.tone_probe_path}` (probe_kind={probe_kind})\n",
              "## Overall (all tasks, sample-weighted)\n",
              "| Method | Ratio | Real CR | TPR | ROUGE-L | Token-F1 | BLEU | EM | "
              + ("BERTScore | " if args.bertscore else "") + "Retain | Gen ms |",
@@ -377,7 +399,7 @@ def main():
             row += f"{fmt(ret, pct=True)} | {fmt(c['generation_ms'])} |"
             lines.append(row)
 
-    lines.append("\n## Probe contribution: lacc_tone_probe - lacc_tone_rule (paired)\n")
+    lines.append(f"\n## Probe contribution: {probe_arm} - lacc_tone_rule (paired)\n")
     lines.append("Δ with 95% bootstrap CI; ✓ = CI excludes 0 (significant).\n")
     lines.append("| Ratio | Metric | Δ (probe−rule) | 95% CI | p | win-rate | sig |")
     lines.append("|-------|--------|----------------|--------|---|----------|-----|")
@@ -391,7 +413,7 @@ def main():
     lines.append("\n## Per-task primary quality (task-appropriate metric)\n")
     lines.append("| Task | Metric | Ratio | none | rule | probe | Δ probe−rule |")
     lines.append("|------|--------|-------|------|------|-------|--------------|")
-    tasks_seen = sorted({r["task"] for ratio in ratios for r in records["lacc_tone_probe"][ratio]}) \
+    tasks_seen = sorted({r["task"] for ratio in ratios for r in records[probe_arm][ratio]}) \
         if not args.no_generation else []
     for task in tasks_seen:
         pm = PRIMARY_METRIC.get(task, DEFAULT_PRIMARY)
@@ -399,7 +421,7 @@ def main():
             def tv(method):
                 cell = per_task.get(method, {}).get(f"ratio_{ratio}", {}).get(task)
                 return cell["primary"] if cell else None
-            n, r, p = tv("none"), tv("lacc_tone_rule"), tv("lacc_tone_probe")
+            n, r, p = tv("none"), tv("lacc_tone_rule"), tv(probe_arm)
             d = (p - r) if (p is not None and r is not None) else None
             lines.append(f"| {task} | {pm} | {ratio}x | {fmt(n)} | {fmt(r)} | {fmt(p)} | "
                          f"{('%+.3f' % d) if d is not None else '-'} |")

@@ -473,6 +473,15 @@ def load_scorer(
         tone_probe.query_conditioned = bool(meta.get('query_conditioned'))
         tone_probe.query_template = meta.get('query_template')
 
-    from .compression import LACCScorer
+    from .compression import DEFAULT_PPL_WINDOW, LACCScorer, model_max_positions
 
-    return LACCScorer(model, tokenizer, tone_probe=tone_probe)
+    # DEFAULT_PPL_WINDOW (2048) is sized for large rotary-position scorers
+    # (Qwen/Llama-family), which have no hard position cap. GPT2-family
+    # scorers (e.g. this project's default chronopt-research/vietnamese-gpt2-base,
+    # n_positions=1024) have a fixed-size learned position-embedding table --
+    # a window past it indexes out of bounds and crashes as an async CUDA
+    # device-side assert inside F.embedding, not a clean Python error, so this
+    # has to be caught here rather than left for the caller to hit.
+    max_positions = model_max_positions(model)
+    window_size = DEFAULT_PPL_WINDOW if max_positions is None else min(DEFAULT_PPL_WINDOW, max_positions)
+    return LACCScorer(model, tokenizer, tone_probe=tone_probe, window_size=window_size)

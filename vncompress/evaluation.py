@@ -68,6 +68,14 @@ class CompressionMetrics:
     function_word_keep_ratio: Optional[float] = None
     content_word_keep_ratio: Optional[float] = None
 
+    # Evidence/attribution metrics (docs/lacc_coling2027_tasklist.md G0). None
+    # when they could not be computed (no identifiable evidence sentence, or
+    # no NLI scorer configured) -- never 0.0, which would silently dilute the
+    # mean of samples that were never actually scored.
+    evidence_recall: Optional[float] = None
+    source_span_recoverability: Optional[float] = None
+    unsupported_claim_rate: Optional[float] = None
+
     prefill_time_ms: Optional[float] = None
     decode_time_ms: Optional[float] = None
     # Wall-clock of the generation call alone (processing_time_ms is compression
@@ -221,6 +229,159 @@ def compute_token_f1(predictions: List[str], references: List[str]) -> float:
 
 
 # ============================================================================
+# Evidence / attribution metrics (docs/lacc_coling2027_tasklist.md G0)
+# ============================================================================
+#
+# VCC-Bench v2 has no gold answer-span field (see dataset_v2_review), so
+# "the sentence that contains the answer" is approximated: the context
+# sentence with the highest token-recall against reference_answer. That
+# approximation is good enough to ask "did compression keep the answer-bearing
+# sentence", not to certify per-sample evidence spans -- treat these three
+# metrics as diagnostics, not ground truth.
+
+
+def find_evidence_sentence(tokenizer, input_ids: Sequence[int], reference_answer: str) -> str:
+    """Best-effort answer-bearing sentence from the ORIGINAL (uncompressed)
+    context: the sentence spans (compression.sentence_spans -- the same
+    boundaries E5/lacc_sentence selects over) with highest token overlap
+    against reference_answer. Returns '' if reference_answer has no content
+    tokens or no sentence overlaps it at all.
+    """
+    from .compression import sentence_spans
+
+    ans_tokens = set(_normalize_answer(reference_answer))
+    if not ans_tokens:
+        return ''
+    spans = sentence_spans(tokenizer, list(input_ids))
+    best_span, best_overlap = None, 0
+    for start, end in spans:
+        sent_text = tokenizer.decode(input_ids[start:end], skip_special_tokens=True)
+        overlap = len(set(_normalize_answer(sent_text)) & ans_tokens)
+        if overlap > best_overlap:
+            best_overlap, best_span = overlap, (start, end)
+    if best_span is None:
+        return ''
+    start, end = best_span
+    return tokenizer.decode(input_ids[start:end], skip_special_tokens=True)
+
+
+def compute_evidence_recall(evidence_sentence: str, compressed_text: str) -> Optional[float]:
+    """Fraction of the answer-bearing sentence's tokens still present (as a
+    multiset, matching compute_needle_recall) in the compressed context --
+    did compression keep the evidence, not just some tokens. None if no
+    evidence sentence could be identified for this sample."""
+    ev_tokens = _normalize_answer(evidence_sentence)
+    if not ev_tokens:
+        return None
+    ev_counts = Counter(ev_tokens)
+    comp_counts = Counter(_normalize_answer(compressed_text))
+    common = ev_counts & comp_counts
+    return sum(common.values()) / sum(ev_counts.values())
+
+
+_PHOBERT_TOKENIZER_CACHE: Dict[str, Any] = {}
+
+
+def get_phobert_tokenizer(model_name: str = 'vinai/phobert-base'):
+    """Lazy-load + process-cache a second tokenizer for dual-tokenizer
+    achieved-rate reporting (docs/lacc_coling2027_tasklist.md G2): the
+    generation LLM's tokenizer and PhoBERT's disagree on token counts, so a
+    single achieved-ratio number hides which one a reader is actually
+    getting. Cheap (vocab-only, no model weights) so this defaults on, unlike
+    get_nli_scorer. Returns None (achieved-ratio stays absent, not wrong) if
+    transformers/the tokenizer can't be loaded."""
+    if model_name in _PHOBERT_TOKENIZER_CACHE:
+        return _PHOBERT_TOKENIZER_CACHE[model_name]
+    tok = None
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(model_name)
+    except Exception as exc:
+        print(f"[WARN] Second tokenizer unavailable ({model_name}): {exc}. "
+              "phobert_achieved_ratio will be absent from metadata.")
+    _PHOBERT_TOKENIZER_CACHE[model_name] = tok
+    return tok
+
+
+_NLI_PIPELINE_CACHE: Dict[str, Any] = {}
+
+
+def get_nli_scorer(model_name: str = 'MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7'):
+    """Lazy-load + process-cache a multilingual NLI text-pair classifier for
+    source_span_recoverability / unsupported_claim_rate.
+
+    Optional diagnostics, not a required part of a benchmark run: returns None
+    (metrics stay None, never silently 0.0) if `transformers` or the model
+    can't be loaded, e.g. no network/no GPU on a dev machine -- the caller
+    decides whether that's fatal.
+    """
+    if model_name in _NLI_PIPELINE_CACHE:
+        return _NLI_PIPELINE_CACHE[model_name]
+    clf = None
+    try:
+        from transformers import pipeline
+
+        clf = pipeline(
+            'text-classification', model=model_name, top_k=None,
+            device=0 if _cuda_available() else -1,
+        )
+    except Exception as exc:
+        print(f"[WARN] NLI scorer unavailable ({model_name}): {exc}. "
+              "source_span_recoverability / unsupported_claim_rate will be None.")
+    _NLI_PIPELINE_CACHE[model_name] = clf
+    return clf
+
+
+def _nli_entailment_prob(nli, premise: str, hypothesis: str) -> Optional[float]:
+    """P(entailment) for premise -> hypothesis from a text-classification NLI
+    pipeline. None if the scorer, premise, or hypothesis is unusable."""
+    if nli is None or not premise.strip() or not hypothesis.strip():
+        return None
+    try:
+        scores = nli({'text': premise, 'text_pair': hypothesis}, truncation=True)
+        if scores and isinstance(scores[0], list):
+            scores = scores[0]
+        for entry in scores:
+            if 'entail' in entry['label'].lower():
+                return float(entry['score'])
+        return None
+    except Exception:
+        return None
+
+
+def compute_source_span_recoverability(nli, compressed_text: str, evidence_sentence: str) -> Optional[float]:
+    """P(compressed context entails the original evidence sentence): can the
+    answer-bearing span be recovered/inferred from what compression kept.
+    None without an NLI scorer or an identified evidence sentence."""
+    return _nli_entailment_prob(nli, premise=compressed_text, hypothesis=evidence_sentence)
+
+
+_CLAIM_SPLIT_RE = re.compile(r'(?<=[.!?\n])\s+')
+
+
+def compute_unsupported_claim_rate(nli, compressed_text: str, output_text: str) -> Optional[float]:
+    """Fraction of the generated answer's sentence-level claims NOT entailed
+    (P(entailment) < 0.5) by the compressed context -- an attribution/
+    hallucination proxy: does the answer say things the surviving context
+    doesn't support. None without an NLI scorer or a non-empty output."""
+    if nli is None or not output_text.strip():
+        return None
+    claims = [c.strip() for c in _CLAIM_SPLIT_RE.split(output_text) if c.strip()]
+    if not claims:
+        return None
+    scored = unsupported = 0
+    for claim in claims:
+        p = _nli_entailment_prob(nli, premise=compressed_text, hypothesis=claim)
+        if p is None:
+            continue
+        scored += 1
+        if p < 0.5:
+            unsupported += 1
+    return (unsupported / scored) if scored else None
+
+
+# ============================================================================
 # Run-level instrumentation (cost + tone diagnostics for every arm)
 # ============================================================================
 
@@ -308,6 +469,16 @@ class VCCBenchConfig:
     # Stamped into every per-sample record and into the result filename, so
     # multi-seed arms (the `random` floor, SS4 rule 3) never overwrite each other.
     seed: int = 42
+    # HF text-classification NLI model id for source_span_recoverability /
+    # unsupported_claim_rate (docs/lacc_coling2027_tasklist.md G0). None
+    # (default) skips both metrics entirely -- no model load, no per-sample
+    # cost -- since they are optional diagnostics, not required for a run.
+    nli_model: Optional[str] = None
+    # Second tokenizer for dual-tokenizer achieved-rate reporting
+    # (docs/lacc_coling2027_tasklist.md G2: CR/TS on the generation
+    # tokenizer alone hides how much a PhoBERT-tokenized reader -- e.g. the
+    # 'encoder' arm's own tokenizer -- would see. None skips it.
+    phobert_tokenizer: Optional[str] = 'vinai/phobert-base'
 
 
 # Dataset fields copied verbatim into every per-sample metric record. Without
@@ -392,6 +563,11 @@ class VCCBench:
 
     def evaluate(self, compressor_fn: Callable[[str], Any], model, tokenizer, generation_fn: Optional[Callable] = None) -> Dict[str, Any]:
         """Run every configured method on every configured task/ratio."""
+        # Loaded once for the whole sweep, not per-sample/per-arm -- a
+        # cross-encoder load is seconds, not something to pay 11 arms x 3
+        # ratios x 414 samples times.
+        nli = get_nli_scorer(self.config.nli_model) if self.config.nli_model else None
+        phobert_tok = get_phobert_tokenizer(self.config.phobert_tokenizer) if self.config.phobert_tokenizer else None
         all_results: Dict[str, Any] = {}
         for method_name in self.config.methods:
             print(f"\n{'=' * 60}\nEvaluating: {method_name}\n{'=' * 60}")
@@ -405,7 +581,7 @@ class VCCBench:
                     print(f"  Task: {task_name}, Ratio: {ratio}x")
                     metrics_list = self._evaluate_task(
                         compressor, model, tokenizer, samples, ratio, task_name, generation_fn,
-                        method_name=method_name,
+                        method_name=method_name, nli=nli, phobert_tok=phobert_tok,
                     )
                     task_results[f'ratio_{ratio}'] = self._aggregate_metrics(metrics_list)
                     self._warn_on_generation_errors(method_name, task_name, ratio, metrics_list)
@@ -434,7 +610,7 @@ class VCCBench:
         print("           These score 0 and are NOT evidence about the compressor. Fix before reporting.")
 
     def _evaluate_task(self, compressor, model, tokenizer, samples, ratio, task_name, generation_fn,
-                       method_name: str = 'unknown') -> List[CompressionMetrics]:
+                       method_name: str = 'unknown', nli=None, phobert_tok=None) -> List[CompressionMetrics]:
         metrics_list = []
         compressor.config.target_ratio = ratio
         for sample in tqdm(samples, desc=f"  {task_name} @ {ratio}x"):
@@ -457,6 +633,30 @@ class VCCBench:
                 result, tokenizer, input_ids,
             )
 
+            # Evidence/attribution (docs/lacc_coling2027_tasklist.md G0).
+            # evidence_recall needs no NLI -- cheap, always computed.
+            # source_span_recoverability/unsupported_claim_rate need `nli`
+            # (config.nli_model); stay None on every sample when it's unset.
+            compressed_text = tokenizer.decode(result.compressed_ids, skip_special_tokens=True)
+            evidence_sentence = find_evidence_sentence(tokenizer, input_ids, sample.reference_answer)
+            metric.evidence_recall = compute_evidence_recall(evidence_sentence, compressed_text)
+            metric.source_span_recoverability = compute_source_span_recoverability(
+                nli, compressed_text, evidence_sentence,
+            )
+
+            # Dual-tokenizer achieved-rate (G2): the generation tokenizer's
+            # achieved ratio is already `result.compression_ratio` /
+            # `original_tokens` / `compressed_tokens` below; this is the SAME
+            # compressed text re-tokenized with PhoBERT, since the two
+            # disagree on token counts and a single number hides which
+            # tokenizer a reader is actually getting.
+            phobert_orig_n = phobert_comp_n = phobert_achieved = None
+            if phobert_tok is not None:
+                original_text = tokenizer.decode(input_ids, skip_special_tokens=True)
+                phobert_orig_n = len(phobert_tok.encode(original_text, add_special_tokens=False))
+                phobert_comp_n = len(phobert_tok.encode(compressed_text, add_special_tokens=False))
+                phobert_achieved = (phobert_orig_n / phobert_comp_n) if phobert_comp_n else None
+
             gen_start = time.time()
             output = (generation_fn or self._default_generate)(
                 model, tokenizer, compressed_ids=result.compressed_ids, query=sample.query,
@@ -476,6 +676,7 @@ class VCCBench:
                 metric.token_f1 = compute_token_f1([output], [sample.reference_answer])
                 if task_name == 'needle_in_haystack':
                     metric.needle_recall = compute_needle_recall([output], [sample.reference_answer])
+                metric.unsupported_claim_rate = compute_unsupported_claim_rate(nli, compressed_text, output)
 
             metric.quality_score = (
                 (metric.rouge_l_f1 or 0) * 0.4 + (metric.bleu_score or 0) * 0.2 + float(metric.exact_match) * 0.4
@@ -495,6 +696,9 @@ class VCCBench:
                 'seed': self.config.seed,
                 'original_tokens': len(input_ids),
                 'compressed_tokens': len(result.compressed_ids),
+                'phobert_original_tokens': phobert_orig_n,
+                'phobert_compressed_tokens': phobert_comp_n,
+                'phobert_achieved_ratio': phobert_achieved,
                 'prediction': output or '',
                 'generation_error': gen_error,
                 'reference_answer': sample.reference_answer,
@@ -528,7 +732,14 @@ class VCCBench:
                 'role': 'user',
                 'content': f"{ANSWER_INSTRUCTION_VI}\n\n### Ngữ cảnh:\n{context}\n\n### Câu hỏi:\n{query}\n\n### Đáp án:",
             }]
-            return tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+            encoded = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+            # transformers >=4.49 (confirmed: 5.12.1) returns a BatchEncoding
+            # here, not a plain list of ids -- torch.tensor([encoded]) used to
+            # silently fail with "Could not infer dtype of tokenizers.Encoding"
+            # for EVERY arm, and even if it hadn't, len(encoded) would count
+            # dict keys (2), not tokens, corrupting the slice that strips the
+            # prompt off the generated output below.
+            return encoded['input_ids'] if hasattr(encoded, 'keys') else encoded
         return compressed_ids + tokenizer.encode(query, add_special_tokens=False)
 
     def _default_generate(self, model, tokenizer, compressed_ids: List[int], query: str) -> Optional[str]:
@@ -570,6 +781,12 @@ class VCCBench:
             'num_generation_errors': sum(1 for m in metrics_list if m.metadata.get('generation_error')),
             'mean_quality_score': np.mean([m.quality_score for m in metrics_list]),
             'mean_efficiency_score': np.mean([m.efficiency_score for m in metrics_list]),
+            'mean_evidence_recall': _mean_or_none([m.evidence_recall for m in metrics_list]),
+            'mean_source_span_recoverability': _mean_or_none([m.source_span_recoverability for m in metrics_list]),
+            'mean_unsupported_claim_rate': _mean_or_none([m.unsupported_claim_rate for m in metrics_list]),
+            'mean_phobert_achieved_ratio': _mean_or_none(
+                [m.metadata.get('phobert_achieved_ratio') for m in metrics_list]
+            ),
             'num_samples': len(metrics_list),
         }
         tone_rates = [m.tone_preservation_rate for m in metrics_list if m.tone_preservation_rate is not None]
@@ -758,13 +975,16 @@ REGISTRY_METHOD_CATEGORY: Dict[str, MethodCategory] = {
     # they win, change what the paper claims.
     "sentence_retrieval": MethodCategory.BASELINE,
     "translate_then_compress": MethodCategory.BASELINE,
+    "translate_then_compress_llmlingua2": MethodCategory.BASELINE,
     "lacc": MethodCategory.PROPOSED,
     # wave-2 LACC arms (E1/E2/E5/E7): proposed variants of the LACC method
     "lacc_ppl_contrastive": MethodCategory.PROPOSED,
     "lacc_ppl_morph": MethodCategory.PROPOSED,
+    "lacc_cx_morph": MethodCategory.PROPOSED,  # E1+E2: query-conditioned ppl x morph
     "lacc_sentence": MethodCategory.PROPOSED,
     "lacc_classprop": MethodCategory.PROPOSED,
     "lacc_tone_gated": MethodCategory.PROPOSED,
+    "lacc_tone": MethodCategory.PROPOSED,  # A9 (docs/eval_sweep_gate1.md SS2): wave-1 re-check arm
 }
 
 ABLATION_ARM_CATEGORY: Dict[str, MethodCategory] = {

@@ -309,6 +309,30 @@ def _default_stride(window_size: int) -> int:
     return max(1, min(window_size - DEFAULT_PPL_OVERLAP, window_size - 1))
 
 
+def model_max_positions(model) -> Optional[int]:
+    """Hard cap on absolute position index this LM's own embedding table
+    supports, or None if the architecture has no such limit (rotary/ALiBi
+    models like Qwen/Llama do not fail past their trained context length --
+    they just extrapolate).
+
+    GPT2-family models (e.g. the project's default SLM scorer,
+    chronopt-research/vietnamese-gpt2-base, n_positions=1024) have a learned
+    `wpe` position-embedding table: feeding a window longer than this indexes
+    it out of bounds, which surfaces as an async CUDA device-side assert deep
+    inside `F.embedding`, not a clean Python error -- see load_scorer, which
+    clamps `DEFAULT_PPL_WINDOW` (2048, sized for large rotary scorers) down to
+    this cap for GPT2-style scorers.
+    """
+    cfg = getattr(model, 'config', None)
+    if cfg is None:
+        return None
+    for attr in ('n_positions', 'max_position_embeddings'):
+        value = getattr(cfg, attr, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 @torch.no_grad()
 def sliding_window_perplexity(
     model, input_ids: Sequence[int], window_size: int = DEFAULT_PPL_WINDOW, stride: Optional[int] = None,
@@ -323,6 +347,14 @@ def sliding_window_perplexity(
     if n == 0:
         return torch.zeros(0)
     device = next(model.parameters()).device
+    # Defense in depth: a window past the model's own position-embedding cap
+    # (e.g. GPT2-family n_positions=1024) is a CUDA device-side assert inside
+    # F.embedding, not a catchable Python error. load_scorer already sizes the
+    # LACCScorer window to this cap; this clamp protects every OTHER caller
+    # (LLMLinguaCompressor with a GPT2 small_model, direct callers, tests).
+    max_positions = model_max_positions(model)
+    if max_positions is not None and window_size > max_positions:
+        window_size = max_positions
     if stride is None:
         stride = _default_stride(window_size)
     stride = max(1, min(stride, window_size - 1)) if window_size > 1 else 1
@@ -375,6 +407,11 @@ def question_conditioned_perplexity(
         return sliding_window_perplexity(model, input_ids, window_size, stride)
 
     device = next(model.parameters()).device
+    # Defense in depth: see the matching clamp in sliding_window_perplexity --
+    # `q + chunk` below must not exceed the model's position-embedding cap.
+    max_positions = model_max_positions(model)
+    if max_positions is not None and window_size > max_positions:
+        window_size = max_positions
     if stride is None:
         stride = _default_stride(window_size)
     stride = max(1, min(stride, window_size - 1)) if window_size > 1 else 1
@@ -917,9 +954,14 @@ class LACCScorer:
         if n == 0:
             return ppl, tone
         device = next(self.model.parameters()).device
-        window = self.window_size
-        stride = max(1, min(self.stride, window - 1)) if window > 1 else 1
         prefix = self._probe_prefix_ids(question)
+        # `chunk` and `prefix` are concatenated into one forward pass below
+        # (`prefix + chunk`) when a query-conditioned probe is active, so the
+        # window has to leave room for the prefix or that concatenation can
+        # exceed self.window_size -- which load_scorer already sized to the
+        # model's own position-embedding cap (model_max_positions).
+        window = max(2, self.window_size - len(prefix)) if prefix else self.window_size
+        stride = max(1, min(self.stride, window - 1)) if window > 1 else 1
 
         begin, prev_end = 0, 0
         while begin < max(n - 1, 1):
@@ -1522,6 +1564,63 @@ class SentenceRetrievalCompressor(BaseCompressor):
         return self._build_result(compressed, n, (time.time() - start) * 1000, metadata)
 
 
+class _RawTokenizerAdapter:
+    """Minimal HF-tokenizer-shaped wrapper around a raw `tokenizers.Tokenizer`
+    loaded straight from a repo's `tokenizer.json` -- bypasses transformers'
+    from-sentencepiece conversion path for repos where it's broken on the
+    installed transformers version (see TranslateThenCompressCompressor).
+    Only implements what `_load_translator` actually calls: `__call__`
+    (-> BatchEncoding with input_ids/attention_mask) and `decode`.
+    """
+
+    def __init__(self, raw_tokenizer, special_tokens: Sequence[str] = ()):
+        self._tok = raw_tokenizer
+        # skip_special_tokens=True on the raw binding only skips tokens whose
+        # AddedToken carries special=True in tokenizer.json -- legacy exports
+        # (envit5's included) don't set that flag on <pad>/</s>/<unk>, so
+        # decode() strips these by string match instead.
+        self._special_tokens = [t for t in special_tokens if t]
+
+    @classmethod
+    def from_pretrained(cls, model_id: str) -> "_RawTokenizerAdapter":
+        import json
+
+        from huggingface_hub import hf_hub_download
+        from tokenizers import Tokenizer
+
+        raw = Tokenizer.from_pretrained(model_id)
+        special_tokens: List[str] = []
+        try:
+            path = hf_hub_download(model_id, "special_tokens_map.json")
+            with open(path, encoding='utf-8') as f:
+                mapping = json.load(f)
+            for value in mapping.values():
+                if isinstance(value, str):
+                    special_tokens.append(value)
+                elif isinstance(value, list):
+                    special_tokens.extend(v for v in value if isinstance(v, str))
+        except Exception:
+            pass  # decode() just won't strip anything extra
+        return cls(raw, special_tokens=special_tokens)
+
+    def __call__(self, text: str, return_tensors: Optional[str] = None,
+                 truncation: bool = True, max_length: int = 512):
+        from transformers.tokenization_utils_base import BatchEncoding
+
+        self._tok.enable_truncation(max_length=max_length) if truncation else self._tok.no_truncation()
+        ids = self._tok.encode(text).ids
+        input_ids = torch.tensor([ids])
+        return BatchEncoding({'input_ids': input_ids, 'attention_mask': torch.ones_like(input_ids)})
+
+    def decode(self, ids, skip_special_tokens: bool = True) -> str:
+        text = self._tok.decode(list(ids), skip_special_tokens=skip_special_tokens)
+        if skip_special_tokens:
+            for special in self._special_tokens:
+                text = text.replace(special, ' ')
+            text = ' '.join(text.split())
+        return text
+
+
 class TranslateThenCompressCompressor(BaseCompressor):
     """B2 -- translate Vietnamese to English, then compress in English.
 
@@ -1541,11 +1640,16 @@ class TranslateThenCompressCompressor(BaseCompressor):
 
     def __init__(self, tokenizer, model=None, config: Optional[CompressionConfig] = None,
                  device: str = 'cuda', translator: Optional[Callable[[str], str]] = None,
-                 translator_id: str = 'VietAI/envit5-translation', inner_method: str = 'llmlingua'):
+                 translator_id: str = 'VietAI/envit5-translation', inner_method: str = 'llmlingua',
+                 inner_kwargs: Optional[dict] = None):
         super().__init__(tokenizer, model, config)
         self.device = device
         self.translator_id = translator_id
         self.inner_method = inner_method
+        # Extra kwargs for the inner compressor -- e.g. encoder_path/encoder_id
+        # when inner_method='encoder' (docs/lacc_coling2027_tasklist.md G2's
+        # "dịch-rồi-nén VN->EN->LLMLingua-2" baseline).
+        self.inner_kwargs = inner_kwargs or {}
         self._translate = translator     # injectable, so tests need no MT model
         self._mt = None
 
@@ -1557,7 +1661,22 @@ class TranslateThenCompressCompressor(BaseCompressor):
             return self._translate
         if self._mt is None:
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-            tok = AutoTokenizer.from_pretrained(self.translator_id)
+            try:
+                tok = AutoTokenizer.from_pretrained(self.translator_id)
+            except TypeError as exc:
+                # Some transformers releases (seen: 5.12.1) broke the legacy
+                # sentencepiece -> Unigram conversion for repos that ship only
+                # `spiece.model` alongside a `tokenizer.json` (e.g.
+                # VietAI/envit5-translation): AutoTokenizer routes through
+                # T5Tokenizer.__init__, which passes a dict where the
+                # tokenizers-library Unigram constructor now requires a
+                # list-of-tuples ("argument 'vocab': 'dict' object cannot be
+                # converted to 'Sequence'"). Loading the repo's tokenizer.json
+                # directly through the low-level `tokenizers` binding sidesteps
+                # that broken conversion path entirely.
+                if "cannot be converted to 'Sequence'" not in str(exc):
+                    raise
+                tok = _RawTokenizerAdapter.from_pretrained(self.translator_id)
             mdl = AutoModelForSeq2SeqLM.from_pretrained(self.translator_id).to(self.device).eval()
             self._mt = (tok, mdl)
 
@@ -1596,6 +1715,7 @@ class TranslateThenCompressCompressor(BaseCompressor):
         inner_config.target_ratio = max(len(en_ids) / max(target_len, 1), 1.0)
         inner = create_compressor(
             self.inner_method, self.tokenizer, self.model, config=inner_config, device=self.device,
+            **self.inner_kwargs,
         )
         inner_result = inner.compress(en_ids, query=query, **kwargs)
         compressed = inner_result.compressed_ids

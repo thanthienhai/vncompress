@@ -988,9 +988,12 @@ def run_relevance_probe_training(
 
     val_metrics = evaluate_relevance_probe(probe, model, val_loader, device) if val_loader else None
     if val_metrics:
-        print(f"  validation: accuracy={val_metrics['accuracy']:.4f} "
-              f"P={val_metrics['precision']:.4f} R={val_metrics['recall']:.4f} "
-              f"F1={val_metrics['f1']:.4f} (positives={val_metrics['support_positive']}/"
+        budget_str = ' '.join(
+            f"recall@{k.split('_at_')[1]}={v:.4f}"
+            for k, v in val_metrics.items() if k.startswith('recall_at_')
+        )
+        print(f"  validation: PR-AUC={val_metrics['pr_auc']:.4f} {budget_str} "
+              f"(argmax F1={val_metrics['f1']:.4f}, positives={val_metrics['support_positive']}/"
               f"{val_metrics['support_total']})")
 
     os.makedirs(output_dir, exist_ok=True)
@@ -1023,34 +1026,80 @@ def run_relevance_probe_training(
 
 
 @torch.no_grad()
-def evaluate_relevance_probe(probe, model, loader, device) -> Dict[str, float]:
-    """Held-out accuracy plus precision/recall/F1 on the RELEVANT class.
+def evaluate_relevance_probe(
+    probe, model, loader, device, budget_ratios: Sequence[float] = (2.0, 4.0, 8.0),
+) -> Dict[str, float]:
+    """Held-out PR-AUC + recall@budget on the RELEVANT class (docs/lacc_coling2027_tasklist.md G0).
 
-    Accuracy alone is meaningless here: a span covers a handful of tokens in a
-    512-token window, so "everything is irrelevant" already scores ~0.98. The
-    positive-class numbers are the ones that say whether the probe learned
-    anything.
+    Argmax F1 fixes a threshold (0.5) the compressor never actually uses: LACC
+    ranks tokens by score and keeps the top 1/ratio, so accuracy/F1 at a fixed
+    threshold does not measure what deployment needs. PR-AUC is threshold-free
+    ranking quality; recall@budget is the recall of true-relevant tokens when
+    only the top 1/ratio survive, at the same ratios VCC-Bench sweeps (2x/4x/8x)
+    -- computed per window (one row = one document's scored window) and pooled,
+    since that is the unit the compressor actually ranks within.
+
+    Accuracy/precision/recall/F1 (argmax) are still returned for continuity
+    with older reports, but are no longer the headline number: a span covers a
+    handful of tokens in a 512-token window, so "everything is irrelevant"
+    already scores ~0.98 accuracy.
     """
+    from sklearn.metrics import average_precision_score
+
     probe.eval()
     true_positive = false_positive = false_negative = correct = total = 0
+    all_scores: List[float] = []
+    all_labels: List[int] = []
+    recall_hits = {r: 0 for r in budget_ratios}
+    recall_support = {r: 0 for r in budget_ratios}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         hidden = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'],
                        output_hidden_states=True).hidden_states[-1]
         logits = probe.tone_classifier(hidden.float())
+        probs = torch.softmax(logits, dim=-1)[..., 1]  # P(relevant)
         predicted = logits.argmax(dim=-1)
         labels = batch['relevance_labels']
         scored = labels != -100
+
+        for row_probs, row_labels, row_scored in zip(probs, labels, scored):
+            row_probs = row_probs[row_scored]
+            row_labels = row_labels[row_scored]
+            if row_labels.numel() == 0:
+                continue
+            all_scores.extend(row_probs.tolist())
+            all_labels.extend(row_labels.tolist())
+            n_pos = int((row_labels == 1).sum())
+            if n_pos == 0:
+                continue
+            order = torch.argsort(row_probs, descending=True)
+            for ratio in budget_ratios:
+                k = max(1, int(row_labels.numel() / ratio))
+                kept = order[:k]
+                recall_hits[ratio] += int((row_labels[kept] == 1).sum())
+                recall_support[ratio] += n_pos
+
         predicted, labels = predicted[scored], labels[scored]
         correct += int((predicted == labels).sum())
         total += int(labels.numel())
         true_positive += int(((predicted == 1) & (labels == 1)).sum())
         false_positive += int(((predicted == 1) & (labels == 0)).sum())
         false_negative += int(((predicted == 0) & (labels == 1)).sum())
+
     precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
     recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    pr_auc = (
+        float(average_precision_score(all_labels, all_scores))
+        if all_labels and any(l == 1 for l in all_labels) else 0.0
+    )
+    recall_at_budget = {
+        f'recall_at_{ratio:g}x': (recall_hits[ratio] / recall_support[ratio] if recall_support[ratio] else 0.0)
+        for ratio in budget_ratios
+    }
     return {
+        'pr_auc': pr_auc,
+        **recall_at_budget,
         'accuracy': correct / total if total else 0.0,
         'precision': precision, 'recall': recall, 'f1': f1,
         'support_positive': true_positive + false_negative, 'support_total': total,

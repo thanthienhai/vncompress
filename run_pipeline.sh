@@ -84,7 +84,14 @@ ENCODER_OUT="${ENCODER_OUT:-models/encoder_compressor}"
 # here reads data already on disk; it does not touch compression.jsonl and
 # does not need an LLM API key.
 BENCH_MODEL="${BENCH_MODEL:-$ENCODER_TEACHER}"  # generation model for downstream QA; override for a stronger one
-BENCH_METHODS="${BENCH_METHODS:-none,random,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop,encoder}"
+# Arm list finalized in docs/lacc_coling2027_tasklist.md G0 (2026-09-18): the
+# full paper sweep, including 'llmlingua' (plain, non-contrastive baseline)
+# and 'lacc_tone_gated' (E8) alongside the arms already here, plus the G2
+# "dịch-rồi-nén" baseline (translate_then_compress[_llmlingua2]) -- survival
+# baseline per *Lost in Compression*, without which the "Vietnamese needs a
+# native compressor" premise is untested.
+BENCH_METHODS="${BENCH_METHODS:-none,random,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop,lacc_tone_gated,encoder,translate_then_compress,translate_then_compress_llmlingua2}"
+BENCH_NLI_MODEL="${BENCH_NLI_MODEL:-MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7}"  # source_span_recoverability / unsupported_claim_rate; "" to skip
 BENCH_RATIOS="${BENCH_RATIOS:-2,4,8}"
 BENCH_DATA_PATH="${BENCH_DATA_PATH:-data/benchmark/vcc_bench_v2.json}"
 BENCH_OUT="${BENCH_OUT:-results/bench_wave2}"
@@ -364,9 +371,17 @@ stage_bench() {
     if [ -f "$ENCODER_OUT/config.json" ]; then
         encoder_args=(--encoder-path "$ENCODER_OUT")
     else
-        warn "$ENCODER_OUT/config.json not found -- dropping 'encoder' from --methods (run the encoder stage first)"
-        methods="$(echo ",$methods," | sed 's/,encoder,/,/' | sed 's/^,//; s/,$//')"
+        # Both arms need the E6 checkpoint: 'encoder' directly, and
+        # 'translate_then_compress_llmlingua2' (G2 baseline) as its inner step.
+        warn "$ENCODER_OUT/config.json not found -- dropping 'encoder' and " \
+             "'translate_then_compress_llmlingua2' from --methods (run the encoder stage first)"
+        methods="$(echo ",$methods," \
+            | sed 's/,encoder,/,/' \
+            | sed 's/,translate_then_compress_llmlingua2,/,/' \
+            | sed 's/^,//; s/,$//')"
     fi
+    local nli_args=()
+    [ -n "$BENCH_NLI_MODEL" ] && nli_args=(--nli-model "$BENCH_NLI_MODEL")
     if [ -n "$methods" ]; then
         run python benchmark.py \
             --model "$BENCH_MODEL" \
@@ -375,6 +390,7 @@ stage_bench() {
             --data-path "$BENCH_DATA_PATH" \
             --output-dir "$BENCH_OUT/sweep" \
             "${encoder_args[@]}" \
+            "${nli_args[@]}" \
             "${QUICK_BENCH_ARGS[@]}"
     else
         warn "no bench methods left to run -- skipping the VCC-Bench sweep"
@@ -389,6 +405,7 @@ stage_bench() {
                 --generation-model "$BENCH_MODEL" \
                 --scorer-adapter-dir "$SLM_OUT/final" \
                 --tone-probe-path "$SLM_OUT/tone_probe.pt" \
+                --data-path "$BENCH_DATA_PATH" \
                 --ratios "$PROBE_AB_RATIOS" --max-samples "$PROBE_AB_MAX_SAMPLES" \
                 --bertscore \
                 --output-dir "$BENCH_OUT/tone_probe_ab"
@@ -405,6 +422,7 @@ stage_bench() {
                 --generation-model "$BENCH_MODEL" \
                 --scorer-adapter-dir "$SLM_OUT/final" \
                 --tone-probe-path "$PROBE_OUT/relevance_probe.pt" \
+                --data-path "$BENCH_DATA_PATH" \
                 --ratios "$PROBE_AB_RATIOS" --max-samples "$PROBE_AB_MAX_SAMPLES" \
                 --bertscore \
                 --output-dir "$BENCH_OUT/relevance_probe_ab"
@@ -425,6 +443,7 @@ stage_bench() {
                 --ratios "$BENCH_RATIOS" \
                 --data-path "$BENCH_DATA_PATH" \
                 --output-dir "$BENCH_OUT/ablation" \
+                "${nli_args[@]}" \
                 "${QUICK_BENCH_ARGS[@]}"
         fi
     else

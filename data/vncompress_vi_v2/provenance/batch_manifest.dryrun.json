@@ -1,0 +1,12 @@
+{
+  "batches": {
+    "0": {
+      "status": "done",
+      "source_rows": 3,
+      "rows": 7,
+      "items_run": 9,
+      "seconds": 0.6,
+      "finished_at": "2026-09-17T06:39:27+00:00"
+    }
+  }
+}
