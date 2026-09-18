@@ -16,6 +16,7 @@ from vncompress.linguistics import (
     is_vietnamese,
     majority_tone_baseline_rate,
     strip_tone,
+    swap_tone,
 )
 
 
@@ -46,6 +47,39 @@ def test_strip_tone_removes_diacritics():
 
 def test_strip_tone_leaves_ascii_untouched():
     assert strip_tone("hello world 123") == "hello world 123"
+
+
+# ============================================================================
+# swap_tone: the "wrong-tone" counterfactual for the minimal-pair causal test
+# (docs/agent_research_findings_round3.md). Changes ONLY tone, unlike strip_tone
+# it adds no homograph ambiguity, so it isolates the tone signal.
+# ============================================================================
+
+
+def test_swap_tone_changes_only_tone():
+    # The defining invariant: stripping tone from the swapped text equals
+    # stripping it from the original -- base letters and vowel quality untouched.
+    for s in ["Hà Nội là thủ đô của Việt Nam", "ngã tư hỏi đường",
+              "Trường Đại học Bách Khoa"]:
+        sw = swap_tone(s)
+        assert sw != s                              # something actually moved
+        assert strip_tone(sw) == strip_tone(s)      # only tone moved
+        assert len(sw) == len(s)                    # clean NFC, no codepoint drift
+
+
+def test_swap_tone_is_a_derangement_no_tone_stays():
+    # Every marked syllable gets a DIFFERENT tone (no fixed point).
+    from vncompress.linguistics import extract_tone_marks
+    src = "má mà mả mã mạ"  # sắc huyền hỏi ngã nặng (all non-ngang)
+    sw = swap_tone(src)
+    for a, b in zip(extract_tone_marks(src), extract_tone_marks(sw)):
+        if a != "ngang":
+            assert a != b
+
+
+def test_swap_tone_leaves_toneless_text_untouched():
+    assert swap_tone("hello world 123") == "hello world 123"
+    assert swap_tone("ma ba ca") == "ma ba ca"      # all ngang, no marks to move
 
 
 def test_extract_tone_marks_matches_text_length():

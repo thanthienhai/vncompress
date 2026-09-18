@@ -337,6 +337,47 @@ def strip_tone(text: str) -> str:
     return unicodedata.normalize('NFC', without_tone)
 
 
+# A fixed 5-cycle derangement over the tone-bearing combining marks (ngang, the
+# unmarked level tone, has no mark and is left untouched). No tone maps to
+# itself, so every marked syllable's tone is corrupted while its base letters,
+# vowel-quality marks, and the token/character count are preserved. This is the
+# "wrong-tone" counterfactual for the minimal-pair causal test
+# (docs/agent_research_findings_round3.md): unlike strip_tone it does NOT add
+# homograph ambiguity (a marked syllable stays exactly one syllable with exactly
+# one tone), so it isolates the tone signal itself from the lexical-collision
+# confound that diacritic removal introduces.
+_TONE_SWAP_CYCLE = ['huyền', 'sắc', 'hỏi', 'ngã', 'nặng']
+_TONE_MARK_SWAP: Dict[str, str] = {
+    TONE_NAME_TO_MARK[_TONE_SWAP_CYCLE[i]]:
+        TONE_NAME_TO_MARK[_TONE_SWAP_CYCLE[(i + 1) % len(_TONE_SWAP_CYCLE)]]
+    for i in range(len(_TONE_SWAP_CYCLE))
+}
+
+
+def swap_tone(text: str) -> str:
+    """Permute tone marks by a fixed derangement (wrong-tone counterfactual).
+
+    Every tone-bearing syllable keeps its base letters and vowel quality but
+    gets a different tone; unmarked (ngang) syllables are unchanged. Because only
+    tone marks move, strip_tone(swap_tone(text)) == strip_tone(text) -- the
+    invariant that proves this operator changes tone and nothing else.
+
+    Works per character so the swapped tone recomposes to its precomposed NFC
+    form (base + vowel-quality marks first, tone last), rather than leaving a
+    canonically-unordered decomposed sequence."""
+    out = []
+    for ch in unicodedata.normalize('NFC', _nfc(text)):
+        decomposed = unicodedata.normalize('NFD', ch)
+        tones = [c for c in decomposed if c in TONE_MARK_TO_NAME]
+        if not tones:
+            out.append(ch)
+            continue
+        rest = [c for c in decomposed if c not in TONE_MARK_TO_NAME]
+        swapped = [_TONE_MARK_SWAP[c] for c in tones]
+        out.append(unicodedata.normalize('NFC', ''.join(rest) + ''.join(swapped)))
+    return ''.join(out)
+
+
 def extract_tone_marks(text: str) -> List[str]:
     """Extract the sequence of tone marks (by name) from Vietnamese text."""
     return [MANUAL_TONE_MAP.get(c, 'ngang') for c in _nfc(text)]
