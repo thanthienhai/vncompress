@@ -456,6 +456,10 @@ class VCCBenchConfig:
     methods: List[str] = field(default_factory=lambda: ['none', 'random', 'llmlingua', 'lacc'])
     compression_ratios: List[float] = field(default_factory=lambda: [2.0, 4.0, 8.0])
     max_new_tokens: int = 256
+    # 1 = one generate() call per sample, exactly as every run before
+    # 2026-09-18. Raise it for a full sweep: 5 tasks x 14 arms x 3 ratios is
+    # ~23k generations, which one at a time on a 7B reader costs days.
+    generation_batch_size: int = 1
     temperature: float = 0.0
     do_sample: bool = False
     output_dir: str = './results'
@@ -611,9 +615,18 @@ class VCCBench:
 
     def _evaluate_task(self, compressor, model, tokenizer, samples, ratio, task_name, generation_fn,
                        method_name: str = 'unknown', nli=None, phobert_tok=None) -> List[CompressionMetrics]:
+        """Compress every sample, then generate, then score.
+
+        Generation is a separate phase so it can be batched (see
+        `_run_generation`): a full 5-task sweep is ~23k generations, and
+        decoding them one at a time on a 7B reader is the difference between a
+        run that fits the schedule and one that does not. Compression stays
+        per-sample -- it is the thing being measured.
+        """
         metrics_list = []
+        pending = []
         compressor.config.target_ratio = ratio
-        for sample in tqdm(samples, desc=f"  {task_name} @ {ratio}x"):
+        for sample in tqdm(samples, desc=f"  {task_name} @ {ratio}x [compress]"):
             input_ids = tokenizer.encode(sample.context, add_special_tokens=False)
             _reset_peak_vram()
             start_time = time.time()
@@ -657,14 +670,56 @@ class VCCBench:
                 phobert_comp_n = len(phobert_tok.encode(compressed_text, add_special_tokens=False))
                 phobert_achieved = (phobert_orig_n / phobert_comp_n) if phobert_comp_n else None
 
-            gen_start = time.time()
-            output = (generation_fn or self._default_generate)(
-                model, tokenizer, compressed_ids=result.compressed_ids, query=sample.query,
-                max_new_tokens=self.config.max_new_tokens, temperature=self.config.temperature,
-            ) if generation_fn else self._default_generate(model, tokenizer, result.compressed_ids, sample.query)
-            metric.generation_time_ms = (time.time() - gen_start) * 1000
+            # Compression-phase peak only. Generation VRAM is now shared across
+            # a batch and is identical across arms anyway; the arm-specific cost
+            # is what the cost table is about.
             metric.peak_vram_bytes = _peak_vram()
-            gen_error = getattr(self, '_last_generation_error', None)
+
+            # Per-sample provenance. `compression_ratio` above is the REALIZED
+            # ratio; `requested_ratio` is what was configured. Reporting at the
+            # configured ratio compares arms at different operating points --
+            # docs/eval_sweep_gate1.md SS4 rule 1 -- so both must survive to the
+            # analysis stage, along with the prediction text (re-scoring a run
+            # with a new metric must not require re-running the GPU sweep).
+            metric.metadata.update({
+                'method': method_name,
+                'task': task_name,
+                # Pairs a row with the same benchmark sample scored by another
+                # arm: a paired bootstrap across arms is only valid if the rows
+                # line up, and index alignment breaks silently the moment one
+                # arm skips a sample.
+                'sample_id': sample.metadata.get('sample_id'),
+                'requested_ratio': float(ratio),
+                'seed': self.config.seed,
+                'original_tokens': len(input_ids),
+                'compressed_tokens': len(result.compressed_ids),
+                'phobert_original_tokens': phobert_orig_n,
+                'phobert_compressed_tokens': phobert_comp_n,
+                'phobert_achieved_ratio': phobert_achieved,
+                'reference_answer': sample.reference_answer,
+                'query': sample.query,
+            })
+            for key in ANALYSIS_METADATA_KEYS:
+                if key in sample.metadata:
+                    metric.metadata[key] = sample.metadata[key]
+            # Whatever the compressor itself reported (budget_used,
+            # translation_time_ms, num_sentences_kept, ...). Prefixed so an arm
+            # can never shadow a provenance key, and kept because these are the
+            # diagnostics that explain WHY an arm landed where it did -- and the
+            # cost table owes translation time to the translate-then-compress arm.
+            for key, value in result.metadata.items():
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    metric.metadata[f'arm_{key}'] = value
+            pending.append((metric, sample, result, compressed_text))
+            metrics_list.append(metric)
+
+        outputs, gen_errors, gen_times, batch_size = self._run_generation(
+            model, tokenizer, pending, generation_fn, task_name, ratio,
+        )
+
+        for (metric, sample, _result, compressed_text), output, gen_error, gen_ms in zip(
+                pending, outputs, gen_errors, gen_times):
+            metric.generation_time_ms = gen_ms
 
             if output:
                 rouge = compute_rouge_l([output], [sample.reference_answer])
@@ -682,41 +737,100 @@ class VCCBench:
                 (metric.rouge_l_f1 or 0) * 0.4 + (metric.bleu_score or 0) * 0.2 + float(metric.exact_match) * 0.4
             )
             metric.efficiency_score = metric.token_savings_pct / 100.0
-
-            # Per-sample provenance. `compression_ratio` above is the REALIZED
-            # ratio; `requested_ratio` is what was configured. Reporting at the
-            # configured ratio compares arms at different operating points --
-            # docs/eval_sweep_gate1.md SS4 rule 1 -- so both must survive to the
-            # analysis stage, along with the prediction text (re-scoring a run
-            # with a new metric must not require re-running the GPU sweep).
             metric.metadata.update({
-                'method': method_name,
-                'task': task_name,
-                'requested_ratio': float(ratio),
-                'seed': self.config.seed,
-                'original_tokens': len(input_ids),
-                'compressed_tokens': len(result.compressed_ids),
-                'phobert_original_tokens': phobert_orig_n,
-                'phobert_compressed_tokens': phobert_comp_n,
-                'phobert_achieved_ratio': phobert_achieved,
                 'prediction': output or '',
                 'generation_error': gen_error,
-                'reference_answer': sample.reference_answer,
-                'query': sample.query,
+                # generation_time_ms is the batch's wall time divided by the
+                # batch, not a single-sample latency: any per-sample generation
+                # latency claim has to come from a --gen-batch-size 1 run.
+                'generation_batch_size': batch_size,
             })
-            for key in ANALYSIS_METADATA_KEYS:
-                if key in sample.metadata:
-                    metric.metadata[key] = sample.metadata[key]
-            # Whatever the compressor itself reported (budget_used,
-            # translation_time_ms, num_sentences_kept, ...). Prefixed so an arm
-            # can never shadow a provenance key, and kept because these are the
-            # diagnostics that explain WHY an arm landed where it did -- and the
-            # cost table owes translation time to the translate-then-compress arm.
-            for key, value in result.metadata.items():
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    metric.metadata[f'arm_{key}'] = value
-            metrics_list.append(metric)
         return metrics_list
+
+    def _run_generation(self, model, tokenizer, pending, generation_fn, task_name, ratio):
+        """Generate an answer for every pending sample.
+
+        Returns (outputs, errors, per-sample ms, batch_size). Batched whenever
+        config.generation_batch_size > 1 and no custom generation_fn is given --
+        a custom hook takes one sample at a time and cannot be batched behind
+        its back. Prompts are grouped longest-first so each batch pads to a
+        similar width, and a batch that raises (OOM, above all) is retried one
+        sample at a time: a single bad sample must not score its seven
+        neighbours as failed generations.
+        """
+        n = len(pending)
+        outputs: List[Optional[str]] = [None] * n
+        errors: List[Optional[str]] = [None] * n
+        times: List[float] = [0.0] * n
+        batch_size = 1 if generation_fn else max(1, int(getattr(self.config, 'generation_batch_size', 1)))
+
+        def generate_one(i):
+            metric, sample, result, _ct = pending[i]
+            start = time.time()
+            if generation_fn:
+                out = generation_fn(
+                    model, tokenizer, compressed_ids=result.compressed_ids, query=sample.query,
+                    max_new_tokens=self.config.max_new_tokens, temperature=self.config.temperature,
+                )
+                err = None
+            else:
+                out = self._default_generate(model, tokenizer, result.compressed_ids, sample.query)
+                err = getattr(self, '_last_generation_error', None)
+            outputs[i], errors[i], times[i] = out, err, (time.time() - start) * 1000
+
+        if batch_size == 1:
+            for i in tqdm(range(n), desc=f"  {task_name} @ {ratio}x [generate]"):
+                generate_one(i)
+            return outputs, errors, times, batch_size
+
+        prompts = [self._build_prompt_ids(tokenizer, r.compressed_ids, s.query)
+                   for _m, s, r, _ct in pending]
+        order = sorted(range(n), key=lambda i: -len(prompts[i]))
+        chunks = [order[i:i + batch_size] for i in range(0, n, batch_size)]
+        for chunk in tqdm(chunks, desc=f"  {task_name} @ {ratio}x [generate x{batch_size}]"):
+            start = time.time()
+            texts, batch_error = self._generate_batch(model, tokenizer, [prompts[i] for i in chunk])
+            elapsed = (time.time() - start) * 1000
+            if texts is None:
+                print(f"    [WARN] batched generation failed ({batch_error}); "
+                      f"retrying {len(chunk)} sample(s) one at a time.")
+                for i in chunk:
+                    generate_one(i)
+                continue
+            for j, i in enumerate(chunk):
+                outputs[i], times[i] = texts[j], elapsed / len(chunk)
+        return outputs, errors, times, batch_size
+
+    def _generate_batch(self, model, tokenizer, prompts: List[List[int]]):
+        """Greedy-decode a batch of prompts. -> (texts, None) or (None, error).
+
+        LEFT-padded: a decoder-only model padded on the right would attend to
+        pad tokens as if they were context, and the generated span would start
+        at a different offset in every row. With left padding every row's new
+        tokens begin at exactly `width`, so one slice is correct for all.
+        """
+        try:
+            pad_id = tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = tokenizer.eos_token_id
+            width = max(len(p) for p in prompts)
+            input_ids = torch.full((len(prompts), width), pad_id, dtype=torch.long)
+            attention = torch.zeros((len(prompts), width), dtype=torch.long)
+            for row, prompt in enumerate(prompts):
+                input_ids[row, width - len(prompt):] = torch.tensor(prompt, dtype=torch.long)
+                attention[row, width - len(prompt):] = 1
+            input_ids = input_ids.to(model.device)
+            attention = attention.to(model.device)
+            with torch.no_grad():
+                out = model.generate(
+                    input_ids=input_ids, attention_mask=attention,
+                    max_new_tokens=self.config.max_new_tokens,
+                    temperature=self.config.temperature, do_sample=self.config.do_sample,
+                    pad_token_id=pad_id,
+                )
+            return [tokenizer.decode(row[width:], skip_special_tokens=True) for row in out], None
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
 
     def _build_prompt_ids(self, tokenizer, compressed_ids: List[int], query: str) -> List[int]:
         """Token ids for the generation call.

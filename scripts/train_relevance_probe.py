@@ -83,6 +83,14 @@ def main():
     ap.add_argument('--no-balance-classes', action='store_true',
                     help='Plain cross-entropy. The answer span is a few percent of each window, '
                          'so this converges on "nothing is relevant" -- high accuracy, no signal.')
+    ap.add_argument('--focal-gamma', type=float, default=0.0,
+                    help='Focal loss exponent: (1-p_t)^gamma scales each token\'s loss, so easy '
+                         'negatives stop dominating the gradient. 2.0 is the usual starting point; '
+                         '0.0 (default) is plain cross-entropy, as every probe before 2026-09-18.')
+    ap.add_argument('--class-weight-cap', type=float, default=50.0,
+                    help='Ceiling on the positive class weight (inverse frequency, ~65x on the v2 '
+                         'corpus, so this binds). Lower it to trade recall for precision -- with '
+                         'the default cap the probe measured P=4.9%%/R=59%%.')
     ap.add_argument('--output-dir', default='./models/relevance')
     ap.add_argument('--epochs', type=int, default=3)
     ap.add_argument('--batch-size', type=int, default=8)
@@ -118,6 +126,8 @@ def main():
         query_conditioned=not args.no_query_conditioned,
         min_samples=args.min_samples,
         balance_classes=not args.no_balance_classes,
+        focal_gamma=args.focal_gamma,
+        class_weight_cap=args.class_weight_cap,
     )
 
 

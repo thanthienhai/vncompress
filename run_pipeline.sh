@@ -67,6 +67,16 @@ PROBE_EPOCHS="${PROBE_EPOCHS:-3}"
 PROBE_BATCH="${PROBE_BATCH:-8}"
 PROBE_MAX_LEN="${PROBE_MAX_LEN:-512}"
 PROBE_OUT="${PROBE_OUT:-models/relevance}"
+# G2 (docs/lacc_coling2027_tasklist.md): retrain E4 with focal loss. Wave 2's
+# probe measured P=4.9% / R=59% -- inverse-frequency class weights bought
+# recall at the cost of precision, and plain CE let the ~98% easy negatives
+# own the gradient. gamma=2 is the usual starting point; 0 restores wave-2
+# behaviour exactly. PROBE_CLASS_WEIGHT_CAP is the *other* lever on the same
+# trade-off (lower cap = fewer false positives), deliberately left at the
+# wave-2 value so focal loss is the only variable that changed between the two
+# probes -- move one at a time or the comparison says nothing.
+PROBE_FOCAL_GAMMA="${PROBE_FOCAL_GAMMA:-2.0}"
+PROBE_CLASS_WEIGHT_CAP="${PROBE_CLASS_WEIGHT_CAP:-50.0}"
 
 ENCODER_ID="${ENCODER_ID:-vinai/phobert-base}"
 ENCODER_TEACHER="${ENCODER_TEACHER:-Qwen/Qwen2.5-0.5B-Instruct}"
@@ -75,29 +85,68 @@ ENCODER_EPOCHS="${ENCODER_EPOCHS:-2}"
 ENCODER_BATCH="${ENCODER_BATCH:-8}"
 ENCODER_MAX_TEXTS="${ENCODER_MAX_TEXTS:--1}"
 ENCODER_OUT="${ENCODER_OUT:-models/encoder_compressor}"
+# Held-out DOCUMENTS (not paragraphs -- corpus.jsonl averages ~17 paragraphs per
+# document). Wave 2 reported E6 on a loss curve alone because the script had no
+# split at all; 0 restores that.
+ENCODER_VAL_FRACTION="${ENCODER_VAL_FRACTION:-0.05}"
+ENCODER_SEED="${ENCODER_SEED:-42}"
 
-# bench: VCC-Bench v2 sweep (arms that need no trained probe -- E1/E2/E5/E7 --
-# plus the E6 encoder arm) and the two probe A/Bs (verify_tone_probe_e2e.py),
+# bench: VCC-Bench v2 sweep (the full paper arm list -- E1/E2/E5/E7/E8 plus
+# the E6 encoder arm, scored with the trained SLM) and the two probe A/Bs
+# (verify_tone_probe_e2e.py),
 # one with the SLM's own tone_probe.pt, one with the E4 relevance_probe.pt
 # swapped into the same slot (probe_kind is auto-detected from its sidecar
 # meta json -- see scripts/train_relevance_probe.py's docstring). Everything
 # here reads data already on disk; it does not touch compression.jsonl and
 # does not need an LLM API key.
-BENCH_MODEL="${BENCH_MODEL:-$ENCODER_TEACHER}"  # generation model for downstream QA; override for a stronger one
+# Generation model that reads the compressed context and answers. Deliberately
+# NOT $ENCODER_TEACHER: wave 2 read the benchmark with the 0.5B teacher and
+# every arm collapsed into a 0.03-0.14 quality band -- uncompressed context
+# itself scored 0.114 and *lost* to compressed arms, which is what a reader too
+# weak to use its own context looks like. Nothing about compression is
+# measurable in that regime. It also graded E6 with the exact model E6 was
+# distilled from. 7B in fp16 needs ~16GB, so it fits beside the scorer on one
+# H100; drop back to the 0.5B only for wiring smoke tests.
+BENCH_MODEL="${BENCH_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 # Arm list finalized in docs/lacc_coling2027_tasklist.md G0 (2026-09-18): the
 # full paper sweep, including 'llmlingua' (plain, non-contrastive baseline)
 # and 'lacc_tone_gated' (E8) alongside the arms already here, plus the G2
 # "dịch-rồi-nén" baseline (translate_then_compress[_llmlingua2]) -- survival
 # baseline per *Lost in Compression*, without which the "Vietnamese needs a
 # native compressor" premise is untested.
-BENCH_METHODS="${BENCH_METHODS:-none,random,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop,lacc_tone_gated,encoder,translate_then_compress,translate_then_compress_llmlingua2}"
+#
+# 'lacc_tone' (tone always on, the wave-1 arm) is E8's control and is NOT
+# optional: gated-vs-off is not the E8 question, gated-vs-always-on is. Note
+# how to read that pair -- LACCCompressor.surface_tasks is
+# {cross_lingual, translation, transliteration, quotation}, and VCC-Bench v2 is
+# 220 long_document_qa / 120 needle / 48 multi_turn / 18 cross_lingual / 8
+# agent_tool_calling, so the gate only changes behaviour on 18 of 414 samples.
+# In the aggregate table 'lacc_tone_gated' will therefore look like a tone-off
+# arm; the E8 claim lives in the cross_lingual per-task rows (n=18, wide CI),
+# not in the headline number.
+BENCH_METHODS="${BENCH_METHODS:-none,random,llmlingua,llmlingua_contrastive,lacc_ppl_contrastive,lacc_ppl_morph,lacc_cx_morph,lacc_sentence,lacc_classprop,lacc_tone,lacc_tone_gated,encoder,translate_then_compress,translate_then_compress_llmlingua2}"
 BENCH_NLI_MODEL="${BENCH_NLI_MODEL:-MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7}"  # source_span_recoverability / unsupported_claim_rate; "" to skip
 BENCH_RATIOS="${BENCH_RATIOS:-2,4,8}"
+# One seed of `random` is a sample, not a floor (docs/eval_sweep_gate1.md SS4
+# rule 3): without this the weakest arm in the table is a single draw.
+BENCH_RANDOM_SEEDS="${BENCH_RANDOM_SEEDS:-1,2,3}"
+# Empty = all five tasks. Set this to run the answer-shaped tasks first
+# (needle_in_haystack,agent_tool_calling,cross_lingual): on v2,
+# long_document_qa + multi_turn_conversation references are verbatim passages
+# (median 347 words) rather than answers, so they cost 65% of the GPU time for
+# a number that measures passage recovery -- see scripts/analyze_sweep.py.
+BENCH_TASKS="${BENCH_TASKS:-}"
+# Samples per model.generate() call. The full 5-task sweep is ~23k generations;
+# one at a time on a 7B reader that is days, not hours. Lower it if the pod OOMs
+# (a failed batch retries one sample at a time, so the cost is time, not data);
+# set 1 if you need real per-sample generation latency.
+BENCH_GEN_BATCH_SIZE="${BENCH_GEN_BATCH_SIZE:-8}"
 BENCH_DATA_PATH="${BENCH_DATA_PATH:-data/benchmark/vcc_bench_v2.json}"
 BENCH_OUT="${BENCH_OUT:-results/bench_wave2}"
 PROBE_AB_RATIOS="${PROBE_AB_RATIOS:-2,4,8}"
 PROBE_AB_MAX_SAMPLES="${PROBE_AB_MAX_SAMPLES:-100}"
 BENCH_ABLATION="${BENCH_ABLATION:-1}"        # 0 to skip the ppl/tone/morph isolation sweep
+BENCH_TRAINED_SCORER="${BENCH_TRAINED_SCORER:-1}"  # 0 reverts the lacc_* arms to scoring with the generation model
 
 ALL_STAGES="check venv deps data slm probe encoder validate bench"
 STAGES="${STAGES:-$ALL_STAGES}"
@@ -324,6 +373,8 @@ stage_probe() {
         --epochs "$PROBE_EPOCHS" \
         --batch-size "$PROBE_BATCH" \
         --max-length "$PROBE_MAX_LEN" \
+        --focal-gamma "$PROBE_FOCAL_GAMMA" \
+        --class-weight-cap "$PROBE_CLASS_WEIGHT_CAP" \
         "${QUICK_PROBE_ARGS[@]}"
     [ "$DRY_RUN" = 1 ] || [ -f "$PROBE_OUT/relevance_probe.pt" ] || die "relevance_probe.pt was not produced"
     # The validation F1 is the number that says whether the probe learned
@@ -347,7 +398,15 @@ stage_encoder() {
         --epochs "$ENCODER_EPOCHS" \
         --batch-size "$ENCODER_BATCH" \
         --max-texts "$ENCODER_MAX_TEXTS" \
+        --val-fraction "$ENCODER_VAL_FRACTION" \
+        --seed "$ENCODER_SEED" \
         --output-dir "$ENCODER_OUT"
+    [ "$DRY_RUN" = 1 ] || run python -c "
+import json; m=json.load(open('$ENCODER_OUT/encoder_compressor_meta.json'))
+v=m.get('val_metrics') or {}
+print('  held-out:', {k: round(x,4) for k,x in v.items() if isinstance(x,(int,float))} or 'none recorded')
+print('  trained on:', m.get('num_train_texts'), 'texts /', m.get('num_train_documents'), 'documents')
+"
     ok "encoder compressor saved"
 }
 
@@ -363,9 +422,9 @@ stage_validate() {
 stage_bench() {
     log "Stage: bench -> $BENCH_OUT"
 
-    # --- VCC-Bench v2 sweep: arms that need no trained probe (E1/E2/E5/E7) ---
-    # plus 'encoder' (E6) when a checkpoint exists. None of this reads
-    # compression.jsonl or needs an LLM to generate anything.
+    # --- VCC-Bench v2 sweep: the full paper arm list (E1/E2/E5/E7/E8) ------
+    # plus 'encoder' (E6) when a checkpoint exists, all scored with the trained
+    # SLM (see scorer_args below). None of this reads compression.jsonl.
     local methods="$BENCH_METHODS"
     local encoder_args=()
     if [ -f "$ENCODER_OUT/config.json" ]; then
@@ -382,6 +441,36 @@ stage_bench() {
     fi
     local nli_args=()
     [ -n "$BENCH_NLI_MODEL" ] && nli_args=(--nli-model "$BENCH_NLI_MODEL")
+    local task_args=()
+    [ -n "$BENCH_TASKS" ] && task_args=(--tasks "$BENCH_TASKS")
+    local seed_args=()
+    [ -n "$BENCH_RANDOM_SEEDS" ] && seed_args=(--random-seeds "$BENCH_RANDOM_SEEDS")
+    local gen_args=(--gen-batch-size "$BENCH_GEN_BATCH_SIZE")
+
+    # The lacc_* arms score with the SLM the slm stage trained -- the same
+    # scorer the ablation below already uses. Wave 2 ran the sweep WITHOUT
+    # these flags, and without a scorer LACC silently falls back to scoring
+    # perplexity with the *generation* model (compression.py, the
+    # `elif self.use_perplexity and self.model is not None` branch). So its
+    # headline table scored with Qwen-0.5B while its ablation table scored with
+    # the trained SLM -- two tables that cannot be read against each other, and
+    # no arm anywhere measuring what wave 2 actually trained. The fallback also
+    # ties scorer strength to reader strength, so raising BENCH_MODEL would
+    # silently change the compressor too; passing the adapter keeps the reader
+    # and the scorer independent. The rule-vs-probe question is a separate
+    # axis, answered by the two probe A/Bs below.
+    local scorer_args=()
+    if [ "$BENCH_TRAINED_SCORER" = 1 ]; then
+        if [ -d "$SLM_OUT/final" ]; then
+            scorer_args=(--scorer-adapter-dir "$SLM_OUT/final")
+            [ -f "$SLM_OUT/tone_probe.pt" ] && scorer_args+=(--tone-probe-path "$SLM_OUT/tone_probe.pt")
+        else
+            warn "$SLM_OUT/final not found -- lacc_* arms fall back to scoring perplexity with the " \
+                 "GENERATION model ($BENCH_MODEL), not the trained SLM; the sweep table will not be " \
+                 "comparable with the ablation table (run the slm stage first)"
+        fi
+    fi
+
     if [ -n "$methods" ]; then
         run python benchmark.py \
             --model "$BENCH_MODEL" \
@@ -390,8 +479,17 @@ stage_bench() {
             --data-path "$BENCH_DATA_PATH" \
             --output-dir "$BENCH_OUT/sweep" \
             "${encoder_args[@]}" \
+            "${scorer_args[@]}" \
             "${nli_args[@]}" \
+            "${task_args[@]}" \
+            "${seed_args[@]}" \
+            "${gen_args[@]}" \
             "${QUICK_BENCH_ARGS[@]}"
+        # Significance, from the per-sample rows the sweep just wrote. Arm means
+        # alone cannot say whether a 0.002 gap is a result; this is also the only
+        # per-task view, which is where the E8 (cross_lingual) read-out lives.
+        [ "$DRY_RUN" = 1 ] || run python scripts/analyze_sweep.py "$BENCH_OUT/sweep" \
+            --metric token_f1 --reference none --out "$BENCH_OUT/sweep/significance_token_f1.md"
     else
         warn "no bench methods left to run -- skipping the VCC-Bench sweep"
     fi
@@ -444,6 +542,8 @@ stage_bench() {
                 --data-path "$BENCH_DATA_PATH" \
                 --output-dir "$BENCH_OUT/ablation" \
                 "${nli_args[@]}" \
+                "${task_args[@]}" \
+                "${gen_args[@]}" \
                 "${QUICK_BENCH_ARGS[@]}"
         fi
     else

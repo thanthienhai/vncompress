@@ -248,6 +248,9 @@ def run_benchmark(
     limit_samples: int = None,
     nli_model: str = None,
     phobert_tokenizer: str = 'vinai/phobert-base',
+    tasks: list = None,
+    max_new_tokens: int = None,
+    gen_batch_size: int = 1,
 ):
     """Run VCC-Bench evaluation (or, with ablation=True, the signal-isolation
     ablation study). Writes config.json + environment.json into `output_dir`
@@ -280,12 +283,18 @@ def run_benchmark(
         methods=method_names,
         compression_ratios=ratios or ([2.0] if quick else [2.0, 4.0, 8.0]),
         output_dir=output_dir, device=device,
-        max_new_tokens=128 if quick else 256,
+        max_new_tokens=max_new_tokens if max_new_tokens else (128 if quick else 256),
+        generation_batch_size=gen_batch_size,
         prompt_style=prompt_style,
         seed=exp_config.seed if exp_config is not None else 42,
         nli_model=nli_model,
         phobert_tokenizer=phobert_tokenizer,
     )
+    if tasks:
+        unknown = [t for t in tasks if t not in config.tasks]
+        if unknown:
+            raise ValueError(f"Unknown task(s): {unknown}. Valid: {config.tasks}")
+        config.tasks = list(tasks)
     bench = _load_dataset(config, data_path, tokenizer, quick, limit_samples=limit_samples)
 
     print("\nBenchmark Configuration:")
@@ -429,6 +438,23 @@ def main():
     parser.add_argument('--encoder-id', default=None,
                          help="Raw encoder id for the 'encoder' arm when no fine-tuned checkpoint is available "
                               "(e.g. vinai/phobert-base) -- smoke-tests the wiring only.")
+    parser.add_argument('--tasks', default=None,
+                         help="Comma-separated VCC-Bench tasks to run (default: all five). Use this to "
+                              "spend GPU time on the tasks whose references are answer-shaped -- "
+                              "needle_in_haystack/agent_tool_calling/cross_lingual -- before "
+                              "long_document_qa/multi_turn_conversation, whose v2 references are "
+                              "verbatim passages (median 347 words) that no arm can reproduce under "
+                              "--max-new-tokens.")
+    parser.add_argument('--gen-batch-size', type=int, default=1,
+                         help='Generate this many samples per model.generate() call (default: 1, '
+                              'i.e. the pre-2026-09-18 behaviour). A full 5-task sweep is ~23k '
+                              'generations; batching is what makes that fit a schedule. Prompts are '
+                              'grouped longest-first and a failed batch retries one sample at a time, '
+                              'so the cost of setting this too high is wasted time, not lost samples. '
+                              'Per-sample generation latency is only meaningful at 1.')
+    parser.add_argument('--max-new-tokens', type=int, default=None,
+                         help='Generation cap (default: 256, or 128 with --quick). long_document_qa '
+                              'references run to a 347-word median, so 256 truncates most of them.')
     parser.add_argument('--nli-model', default=None,
                          help="HF text-classification NLI model id (e.g. "
                               "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7). Enables "
@@ -440,6 +466,14 @@ def main():
                               "compression_ratio) -- see docs/lacc_coling2027_tasklist.md G2. "
                               "Pass '' to disable.")
     args = parser.parse_args()
+
+    # Validate before anything loads a model: on a 7B reader a typo here would
+    # otherwise surface minutes into the run.
+    if args.tasks:
+        valid = VCCBenchConfig().tasks
+        bad = [t.strip() for t in args.tasks.split(',') if t.strip() and t.strip() not in valid]
+        if bad:
+            parser.error(f"unknown --tasks {bad}; valid: {','.join(valid)}")
 
     if args.list_methods:
         print("Available compression methods:")
@@ -493,6 +527,8 @@ def main():
         ablation=args.ablation, random_seeds=random_seeds, prompt_style=args.prompt_style,
         limit_samples=args.limit_samples, nli_model=args.nli_model,
         phobert_tokenizer=args.phobert_tokenizer or None,
+        tasks=[t.strip() for t in args.tasks.split(',') if t.strip()] if args.tasks else None,
+        max_new_tokens=args.max_new_tokens, gen_batch_size=args.gen_batch_size,
     )
 
 

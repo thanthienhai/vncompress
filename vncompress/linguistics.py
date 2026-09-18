@@ -1332,12 +1332,21 @@ class RelevanceConsistencyLoss(nn.Module):
     """
 
     def __init__(self, hidden_dim: int, num_classes: int = 2, lambda_relevance: float = 1.0,
-                 ignore_index: int = -100, class_weights: Optional[Sequence[float]] = None):
+                 ignore_index: int = -100, class_weights: Optional[Sequence[float]] = None,
+                 focal_gamma: float = 0.0):
         super().__init__()
         self.num_classes = num_classes
         self.num_tones = num_classes  # alias: keeps the tone-probe interface/loader working
         self.lambda_relevance = lambda_relevance
         self.ignore_index = ignore_index
+        # focal_gamma > 0 down-weights tokens the probe already gets right
+        # ((1-p_t)^gamma), so the gradient goes to the few hard ones instead of
+        # the ocean of easy negatives. Orthogonal to class_weights: those set
+        # how much a positive is worth (alpha), this sets how much an *easy*
+        # example is worth. 0.0 = plain CE, i.e. every probe trained before
+        # 2026-09-18 -- a float attribute, not a buffer, so state_dict stays
+        # byte-identical to what models.load_scorer expects.
+        self.focal_gamma = float(focal_gamma)
         # An answer span is a few percent of a training window, so unweighted CE
         # is minimised by calling every token irrelevant -- measured: accuracy
         # 0.96, positive-class F1 0.007. Held as a plain tensor, NOT a buffer, so
@@ -1361,7 +1370,21 @@ class RelevanceConsistencyLoss(nn.Module):
             )
         logits = self.tone_classifier(hidden_states)
         weight = None if self.class_weights is None else self.class_weights.to(logits.device)
-        if mask is not None:
+        if self.focal_gamma > 0:
+            flat_logits = logits.view(-1, self.num_classes)
+            flat_labels = labels.view(-1)
+            valid = flat_labels != self.ignore_index
+            # gather() cannot take -100, so score the ignored positions against
+            # class 0 and drop them with `keep` below.
+            safe_labels = torch.where(valid, flat_labels, torch.zeros_like(flat_labels))
+            log_probs = F.log_softmax(flat_logits, dim=-1)
+            logp_t = log_probs.gather(1, safe_labels.unsqueeze(1)).squeeze(1)
+            per_token = -logp_t * (1.0 - logp_t.exp()).pow(self.focal_gamma)
+            if weight is not None:
+                per_token = per_token * weight[safe_labels]
+            keep = valid.float() if mask is None else valid.float() * mask.view(-1).float()
+            loss = (per_token * keep).sum() / (keep.sum() + 1e-8)
+        elif mask is not None:
             loss = F.cross_entropy(
                 logits.view(-1, self.num_classes), labels.view(-1),
                 reduction='none', ignore_index=self.ignore_index, weight=weight,

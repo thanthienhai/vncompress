@@ -71,12 +71,109 @@ def build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, ratio, max_
     return enc['input_ids'], labels
 
 
+def split_by_document(rows, val_fraction, seed):
+    """Split (text, doc_key) rows into train/val by DOCUMENT.
+
+    corpus.jsonl averages ~17 paragraphs per document, so splitting by row
+    leaves near-duplicate siblings of the same article on both sides and the
+    held-out score reports memorisation. Corpora with no doc_id (non-jsonl
+    shapes) can only be split by row -- that is said out loud rather than
+    silently reported as a held-out number.
+    """
+    import random
+
+    if val_fraction <= 0:
+        return list(rows), []
+    keys = sorted({k for _, k in rows if k})
+    rng = random.Random(seed)
+    if not keys:
+        print("  WARNING: corpus carries no doc_id -- falling back to a ROW-level split. "
+              "Paragraphs of one document can land on both sides; read the val numbers as optimistic.")
+        shuffled = list(rows)
+        rng.shuffle(shuffled)
+        n_val = max(1, int(len(shuffled) * val_fraction))
+        return shuffled[n_val:], shuffled[:n_val]
+    # Never hand every document to validation: --max-texts takes a contiguous
+    # prefix of the corpus, and corpus.jsonl is ordered by document, so a small
+    # cap can leave one or two documents in total.
+    n_val = min(max(1, int(len(keys) * val_fraction)), len(keys) - 1)
+    if n_val <= 0:
+        print(f"  WARNING: only {len(keys)} document(s) available -- cannot hold one out. "
+              "Training without validation; raise --max-texts or lower --val-fraction.")
+        return list(rows), []
+    rng.shuffle(keys)
+    val_keys = set(keys[:n_val])
+    train = [(t, k) for t, k in rows if k not in val_keys]
+    val = [(t, k) for t, k in rows if k in val_keys]
+    return train, val
+
+
+def evaluate_encoder(model, loader, ratio):
+    """Keep/drop quality on held-out documents.
+
+    PR-AUC and recall@budget, not accuracy: EncoderClassifierCompressor ranks
+    tokens by P(keep) and keeps the top 1/ratio, so a fixed 0.5 threshold scores
+    a decision the compressor never makes. Argmax P/R/F1 comes along for
+    continuity with older logs.
+    """
+    import torch
+    from sklearn.metrics import average_precision_score
+
+    was_training = model.training
+    model.eval()
+    scores, labels_all = [], []
+    hits = support = 0
+    tp = fp = fn = 0
+    total_loss = n_batches = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            batch = {k: v.to(model.device) for k, v in batch.items()}
+            out = model(**batch)
+            total_loss += float(out.loss)
+            n_batches += 1
+            probs = torch.softmax(out.logits.float(), dim=-1)[..., 1]  # P(keep)
+            predicted = out.logits.argmax(dim=-1)
+            valid = batch['labels'] != -100
+            for row_probs, row_labels, row_valid in zip(probs, batch['labels'], valid):
+                row_probs, row_labels = row_probs[row_valid], row_labels[row_valid]
+                if row_labels.numel() == 0:
+                    continue
+                scores.extend(row_probs.tolist())
+                labels_all.extend(row_labels.tolist())
+                n_pos = int((row_labels == 1).sum())
+                if n_pos:
+                    k = max(1, int(row_labels.numel() / ratio))
+                    kept = torch.argsort(row_probs, descending=True)[:k]
+                    hits += int((row_labels[kept] == 1).sum())
+                    support += n_pos
+            pred, lab = predicted[valid], batch['labels'][valid]
+            tp += int(((pred == 1) & (lab == 1)).sum())
+            fp += int(((pred == 1) & (lab == 0)).sum())
+            fn += int(((pred == 0) & (lab == 1)).sum())
+    if was_training:
+        model.train()
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    return {
+        'val_loss': total_loss / n_batches if n_batches else 0.0,
+        'pr_auc': float(average_precision_score(labels_all, scores))
+                  if labels_all and any(x == 1 for x in labels_all) else 0.0,
+        f'recall_at_{ratio:g}x': hits / support if support else 0.0,
+        'precision_keep': precision,
+        'recall_keep': recall,
+        'f1_keep': 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
+        'keep_rate_labels': sum(labels_all) / len(labels_all) if labels_all else 0.0,
+        'num_scored_tokens': len(labels_all),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description='Distill a keep/drop encoder token classifier (wave-2 E6).')
     ap.add_argument('--train-data-path', default=None,
                     help='Corpus for the teacher to label. Defaults to '
                          'data/vncompress_vi_v2/corpus.jsonl (see '
-                         'vncompress.training.load_training_texts); only its `train` split is read.')
+                         'vncompress.training.load_training_texts); only its `train` split is read, '
+                         'and --val-fraction carves the held-out documents out of that.')
     ap.add_argument('--holdout-docs-from', action='append', default=None, metavar='PATH',
                     help='Exclude documents used by this external benchmark. Repeatable. '
                          'Defaults to data/benchmark/vcc_bench_v2.json when it exists.')
@@ -93,6 +190,11 @@ def main():
                          '(vncompress.config.PHOBERT_MAX_ENCODER_LEN) -- a mismatch here silently '
                          'trains/serves the checkpoint at two different window sizes.')
     ap.add_argument('--max-texts', type=int, default=-1, help='Cap number of training texts (-1 = all).')
+    ap.add_argument('--val-fraction', type=float, default=0.05,
+                    help='Fraction of DOCUMENTS held out for validation (default: 0.05 -- ~160 of '
+                         'the v2 corpus\'s 3.2k documents, enough to score on while costing little '
+                         'training data). 0 disables validation and leaves only a loss curve.')
+    ap.add_argument('--seed', type=int, default=42, help='Seed for the train/val document split.')
     ap.add_argument('--output-dir', default='models/encoder_compressor')
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
@@ -102,7 +204,7 @@ def main():
     from transformers import AutoModelForTokenClassification, AutoTokenizer
 
     from vncompress.models import load_model
-    from vncompress.training import load_training_texts, resolve_holdout_documents
+    from vncompress.training import load_training_texts_with_docs, resolve_holdout_documents
 
     device = args.device if (args.device == 'cpu' or torch.cuda.is_available()) else 'cpu'
     print(f"Teacher: {args.teacher_model} | Encoder: {args.encoder_id} | ratio={args.ratio} | device={device}")
@@ -111,21 +213,28 @@ def main():
                                             dtype='float16' if device == 'cuda' else 'float32')
     enc_tok = AutoTokenizer.from_pretrained(args.encoder_id, use_fast=True)
 
-    texts = load_training_texts(
-        args.train_data_path,
-        holdout_docs=resolve_holdout_documents(args.holdout_docs_from, args.no_holdout))
+    holdout = resolve_holdout_documents(args.holdout_docs_from, args.no_holdout)
+    rows = load_training_texts_with_docs(args.train_data_path, holdout_docs=holdout)
     if args.max_texts > 0:
-        texts = texts[:args.max_texts]
-    print(f"Building distillation labels for {len(texts)} texts...")
+        rows = rows[:args.max_texts]
+    train_rows, val_rows = split_by_document(rows, args.val_fraction, args.seed)
+    print(f"Building distillation labels for {len(train_rows)} train / {len(val_rows)} val texts "
+          f"({len({k for _, k in train_rows})} / {len({k for _, k in val_rows})} documents)...")
 
-    examples = []
-    for text in texts:
-        built = build_labels_for_text(text, teacher_model, teacher_tok, enc_tok, args.ratio, args.max_length)
-        if built:
-            examples.append(built)
+    def build(rs):
+        out = []
+        for text, _ in rs:
+            built = build_labels_for_text(text, teacher_model, teacher_tok, enc_tok,
+                                          args.ratio, args.max_length)
+            if built:
+                out.append(built)
+        return out
+
+    examples = build(train_rows)
+    val_examples = build(val_rows)
     if not examples:
         raise RuntimeError("No usable training examples were built.")
-    print(f"  {len(examples)} labeled examples")
+    print(f"  {len(examples)} labeled train examples, {len(val_examples)} val examples")
 
     pad_id = enc_tok.pad_token_id or 0
 
@@ -143,6 +252,10 @@ def main():
         return {'input_ids': input_ids, 'attention_mask': attn, 'labels': labels}
 
     loader = DataLoader(examples, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(val_examples, batch_size=args.batch_size, shuffle=False,
+                            collate_fn=collate) if val_examples else None
+    if val_loader is None:
+        print("  WARNING: no validation examples -- this run produces a loss curve and nothing else.")
 
     model = AutoModelForTokenClassification.from_pretrained(
         args.encoder_id, num_labels=2, id2label={0: 'drop', 1: 'keep'}, label2id={'drop': 0, 'keep': 1},
@@ -153,6 +266,7 @@ def main():
 
     model.train()
     step = 0
+    val_history = []
     for epoch in range(args.epochs):
         for batch in loader:
             batch = {k: v.to(model.device) for k, v in batch.items()}
@@ -164,11 +278,36 @@ def main():
             step += 1
             if step % 20 == 0:
                 print(f"  epoch {epoch + 1} step {step} loss {out.loss.item():.4f}")
+        if val_loader is not None:
+            m = evaluate_encoder(model, val_loader, args.ratio)
+            m['epoch'] = epoch + 1
+            val_history.append(m)
+            print(f"  epoch {epoch + 1} validation: loss={m['val_loss']:.4f} "
+                  f"PR-AUC={m['pr_auc']:.4f} recall@{args.ratio:g}x={m[f'recall_at_{args.ratio:g}x']:.4f} "
+                  f"(keep F1={m['f1_keep']:.4f}, label keep-rate={m['keep_rate_labels']:.3f})")
 
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)
     enc_tok.save_pretrained(args.output_dir)
-    print(f"Saved distilled encoder classifier to: {args.output_dir}")
+    # Provenance + the held-out number, beside the weights: a checkpoint whose
+    # only evidence is a loss curve in a lost stdout cannot be reported on.
+    import json as _json
+    with open(os.path.join(args.output_dir, 'encoder_compressor_meta.json'), 'w', encoding='utf-8') as f:
+        _json.dump({
+            'encoder_id': args.encoder_id, 'teacher_model': args.teacher_model,
+            'ratio': args.ratio, 'epochs': args.epochs, 'lr': args.lr,
+            'batch_size': args.batch_size, 'max_length': args.max_length,
+            'optimizer_steps': step, 'seed': args.seed,
+            'train_data_path': args.train_data_path,
+            'holdout_docs': list(holdout),
+            'val_fraction': args.val_fraction,
+            'num_train_texts': len(examples), 'num_val_texts': len(val_examples),
+            'num_train_documents': len({k for _, k in train_rows}),
+            'num_val_documents': len({k for _, k in val_rows}),
+            'val_metrics': val_history[-1] if val_history else None,
+            'val_metrics_per_epoch': val_history,
+        }, f, ensure_ascii=False, indent=2)
+    print(f"Saved distilled encoder classifier to: {args.output_dir} (+ encoder_compressor_meta.json)")
     print(f"Use it: EncoderClassifierCompressor(tokenizer, encoder_path='{args.output_dir}')")
 
 

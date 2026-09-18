@@ -101,7 +101,7 @@ def resolve_holdout_documents(paths=None, disabled: bool = False) -> Sequence[st
     return keys
 
 
-def _load_corpus_jsonl(path, split, holdout_keys, min_chars, lang) -> List[str]:
+def _load_corpus_jsonl(path, split, holdout_keys, min_chars, lang) -> List[Tuple[str, str]]:
     """vncompress-vi-v2 `corpus.jsonl`: one paragraph per line.
 
     `split` matters more here than in the old JSON corpus: 6,766 of the 72,301
@@ -109,7 +109,7 @@ def _load_corpus_jsonl(path, split, holdout_keys, min_chars, lang) -> List[str]:
     documents. Defaulting to `train` makes training on them impossible rather
     than merely discouraged.
     """
-    texts, documents, dropped_split, dropped_lang, dropped_holdout = [], set(), 0, 0, 0
+    rows, documents, dropped_split, dropped_lang, dropped_holdout = [], set(), 0, 0, 0
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
@@ -132,14 +132,58 @@ def _load_corpus_jsonl(path, split, holdout_keys, min_chars, lang) -> List[str]:
             text = row.get('text', '')
             if len(text) <= min_chars:
                 continue
-            texts.append(text)
-            documents.add(document_key(row.get('doc_id', '')))
-    print(f"Training corpus: {len(texts):,} texts over {len(documents):,} documents "
+            key = document_key(row.get('doc_id', ''))
+            rows.append((text, key))
+            documents.add(key)
+    print(f"Training corpus: {len(rows):,} texts over {len(documents):,} documents "
           f"from {path} (split={split!r})")
     if dropped_split or dropped_lang or dropped_holdout:
         print(f"  dropped: {dropped_split:,} other-split, {dropped_lang:,} non-{lang}, "
               f"{dropped_holdout:,} held-out-document")
-    return texts
+    return rows
+
+
+def load_training_texts_with_docs(
+    data_path: Optional[str] = None,
+    split: Optional[str] = 'train',
+    holdout_docs: Iterable[str] = (),
+    min_chars: int = MIN_TRAINING_CHARS,
+    lang: Optional[str] = 'vi',
+) -> List[Tuple[str, str]]:
+    """`load_training_texts`, but each text is paired with its document key.
+
+    For callers that split train/validation themselves: corpus.jsonl averages
+    ~17 paragraphs per document, so splitting by row puts siblings of the same
+    article on both sides and the held-out score reads high for the wrong
+    reason. Corpus shapes that carry no doc_id yield an empty key.
+    """
+    if data_path and os.path.exists(data_path):
+        if data_path.endswith('.jsonl'):
+            holdout_keys = {document_key(str(d).replace(' ', '_')) for d in holdout_docs if d}
+            return _load_corpus_jsonl(data_path, split, holdout_keys, min_chars, lang)
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and 'paragraphs' in data:
+            return [(p['text'], '') for p in data['paragraphs'] if len(p['text']) > min_chars]
+        if isinstance(data, dict) and 'samples' in data:
+            return [(s.get('context', ''), '') for s in data['samples'] if len(s.get('context', '')) > min_chars]
+        if isinstance(data, list):
+            return [(item if isinstance(item, str) else item.get('text', item.get('context', '')), '')
+                    for item in data]
+        return []
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for candidate in (
+        os.path.join(here, 'data', 'vncompress_vi_v2', 'corpus.jsonl'),
+        os.path.join(here, 'data', 'benchmark', 'training_corpus_v1.json'),
+        os.path.join(here, 'data', 'benchmark', 'wikipedia_vi_raw.json'),
+        os.path.join(here, 'vcc_bench_data', 'training_corpus_v1.json'),
+        os.path.join(here, 'vcc_bench_data', 'wikipedia_vi_raw.json'),
+    ):
+        if os.path.exists(candidate):
+            return load_training_texts_with_docs(candidate, split=split, holdout_docs=holdout_docs,
+                                                 min_chars=min_chars, lang=lang)
+    return [(t, '') for t in _demo_texts()]
 
 
 def load_training_texts(
@@ -157,32 +201,8 @@ def load_training_texts(
     {"samples": [{"context": ...}]}, or a flat list of strings/dicts -- those
     carry no split, so the filters do not apply to them.
     """
-    if data_path and os.path.exists(data_path):
-        if data_path.endswith('.jsonl'):
-            holdout_keys = {document_key(str(d).replace(' ', '_')) for d in holdout_docs if d}
-            return _load_corpus_jsonl(data_path, split, holdout_keys, min_chars, lang)
-        with open(data_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, dict) and 'paragraphs' in data:
-            return [p['text'] for p in data['paragraphs'] if len(p['text']) > min_chars]
-        if isinstance(data, dict) and 'samples' in data:
-            return [s.get('context', '') for s in data['samples'] if len(s.get('context', '')) > min_chars]
-        if isinstance(data, list):
-            return [item if isinstance(item, str) else item.get('text', item.get('context', '')) for item in data]
-        return []
-
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for candidate in (
-        os.path.join(here, 'data', 'vncompress_vi_v2', 'corpus.jsonl'),
-        os.path.join(here, 'data', 'benchmark', 'training_corpus_v1.json'),
-        os.path.join(here, 'data', 'benchmark', 'wikipedia_vi_raw.json'),
-        os.path.join(here, 'vcc_bench_data', 'training_corpus_v1.json'),
-        os.path.join(here, 'vcc_bench_data', 'wikipedia_vi_raw.json'),
-    ):
-        if os.path.exists(candidate):
-            return load_training_texts(candidate, split=split, holdout_docs=holdout_docs,
-                                       min_chars=min_chars, lang=lang)
-    return _demo_texts()
+    return [text for text, _ in load_training_texts_with_docs(
+        data_path, split=split, holdout_docs=holdout_docs, min_chars=min_chars, lang=lang)]
 
 
 # ============================================================================
@@ -872,6 +892,8 @@ def run_relevance_probe_training(
     query_conditioned: bool = True,
     min_samples: int = 32,
     balance_classes: bool = True,
+    focal_gamma: float = 0.0,
+    class_weight_cap: float = 50.0,
 ):
     """Train ONLY a query-relevance probe on a frozen SLM's hidden states (E4).
 
@@ -953,12 +975,14 @@ def run_relevance_probe_training(
     if val_loader is None:
         print("  WARNING: no validation split -- the probe will be saved without an accuracy number.")
 
-    class_weights = relevance_class_weights(dataset) if balance_classes else None
+    class_weights = relevance_class_weights(dataset, cap=class_weight_cap) if balance_classes else None
     if class_weights:
         print(f"  class weights [irrelevant, relevant]: "
-              f"[{class_weights[0]:.2f}, {class_weights[1]:.2f}]")
+              f"[{class_weights[0]:.2f}, {class_weights[1]:.2f}] (cap={class_weight_cap})")
+    print(f"  focal gamma: {focal_gamma}" + ("  (0 = plain cross-entropy)" if not focal_gamma else ""))
     probe = RelevanceConsistencyLoss(model.config.hidden_size, lambda_relevance=1.0,
-                                     class_weights=class_weights).to(device)
+                                     class_weights=class_weights,
+                                     focal_gamma=focal_gamma).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=0.01)
     scaler = torch.amp.GradScaler('cuda')
 
@@ -1019,6 +1043,8 @@ def run_relevance_probe_training(
             'query_conditioned': bool(query_conditioned),
             'query_template': query_template,
             'class_weights': class_weights,
+            'class_weight_cap': class_weight_cap,
+            'focal_gamma': focal_gamma,
             'val_metrics': val_metrics,
         }, f, ensure_ascii=False, indent=2)
     print(f"Saved relevance probe: {probe_path} (+ relevance_probe_meta.json) | optimizer steps={step}")
