@@ -28,9 +28,123 @@ from vncompress.evaluation import (
     compute_exact_match,
     compute_needle_recall,
     compute_rouge_l,
+    compute_span_recoverability_hard,
     compute_token_f1,
     paired_bootstrap_delta,
+    paired_power_analysis,
+    tost_equivalence,
 )
+
+
+# ============================================================================
+# TOST equivalence test: turns "p>0.05" into a valid equivalence claim for the
+# negative result (Lakens 2017). docs/agent_research_findings_round2.md.
+# ============================================================================
+
+
+def test_tost_declares_equivalence_when_delta_is_within_sesoi():
+    # Two arms that differ only by tiny noise, SESOI = 1 point (0.01 on a 0-1
+    # scale): the CI sits inside +/-SESOI, so equivalence is established.
+    a = [0.50, 0.51, 0.49, 0.50, 0.505, 0.495, 0.50, 0.50, 0.51, 0.49]
+    b = [0.50, 0.50, 0.50, 0.50, 0.500, 0.500, 0.50, 0.50, 0.50, 0.50]
+    r = tost_equivalence(a, b, sesoi=0.02)
+    assert r is not None
+    assert r.equivalent is True
+    assert r.p_tost < 0.05
+    assert -0.02 < r.ci_low and r.ci_high < 0.02
+
+
+def test_tost_rejects_equivalence_when_delta_exceeds_sesoi():
+    # A real, large gap (0.4) is NOT equivalence, even though it is also clearly
+    # "significant" -- the two questions are distinct.
+    a = [0.9] * 10
+    b = [0.5] * 10
+    r = tost_equivalence(a, b, sesoi=0.05)
+    assert r is not None
+    assert r.equivalent is False
+    assert r.p_tost > 0.05  # cannot reject "delta >= +sesoi"
+
+
+def test_tost_requires_positive_sesoi_and_enough_pairs():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        tost_equivalence([0.5, 0.5], [0.5, 0.5], sesoi=0.0)
+    assert tost_equivalence([0.5], [0.5], sesoi=0.1) is None  # <2 usable pairs
+
+
+# ============================================================================
+# Power analysis: a negative result must show the test COULD have detected an
+# effect of size SESOI (Card et al. 2020). docs/agent_research_findings_round2.md.
+# ============================================================================
+
+
+def test_power_high_for_large_n_small_variance():
+    # 400 pairs, differences tightly around 0 -> plenty of power to detect a
+    # 1-point (0.01) effect, and the MDE is well below the SESOI.
+    rng = __import__("numpy").random.default_rng(0)
+    noise = rng.normal(0, 0.02, 400)
+    a = list(0.50 + noise)
+    b = [0.50] * 400
+    r = paired_power_analysis(a, b, sesoi=0.01)
+    assert r is not None
+    assert r.power > 0.80
+    assert r.underpowered is False
+    assert r.mde < r.sesoi
+
+
+def test_power_low_and_underpowered_for_tiny_n_large_variance():
+    # n=18 (E8 cross_lingual subset) with high variance -> underpowered, and the
+    # MDE far exceeds a 1-point SESOI, so "no difference" here is inconclusive.
+    rng = __import__("numpy").random.default_rng(1)
+    diffs = rng.normal(0, 0.30, 18)
+    a = list(0.50 + diffs)
+    b = [0.50] * 18
+    r = paired_power_analysis(a, b, sesoi=0.01)
+    assert r is not None
+    assert r.power < 0.80
+    assert r.underpowered is True
+    assert r.mde > r.sesoi
+
+
+def test_power_guards_sesoi_pairs_and_zero_variance():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        paired_power_analysis([0.5, 0.6], [0.5, 0.5], sesoi=0.0)
+    assert paired_power_analysis([0.5], [0.5], sesoi=0.1) is None      # <2 pairs
+    assert paired_power_analysis([0.5, 0.5], [0.4, 0.4], sesoi=0.1) is None  # zero-variance diff
+
+
+# ============================================================================
+# Deterministic hard span-recoverability (== 1 - LLMLingua-2 Variation Rate):
+# separates truly-extractive arms from abstractive/translate-then-compress
+# ones without any NLI model (docs/agent_research_findings.md, metric B#8).
+# ============================================================================
+
+
+def test_hard_recoverability_extractive_subset_is_one():
+    # A verbatim extractive subset introduces no new tokens -> fully recoverable.
+    orig = "Hà Nội là thủ đô của Việt Nam từ năm 1010."
+    comp = "Hà Nội là thủ đô Việt Nam"
+    assert compute_span_recoverability_hard(orig, comp) == 1.0
+
+
+def test_hard_recoverability_abstractive_is_below_one():
+    # Translated / paraphrased tokens are absent from the source -> penalised,
+    # which is exactly how this control catches attribution laundering.
+    orig = "Hà Nội là thủ đô của Việt Nam."
+    comp = "Hanoi is the capital of Vietnam"
+    assert compute_span_recoverability_hard(orig, comp) == 0.0
+
+
+def test_hard_recoverability_partial_and_normalization():
+    # Half the compressed tokens are new -> 0.5; matching is NFC + case robust.
+    assert compute_span_recoverability_hard("con mèo ngồi trên thảm", "con mèo cat mat") == 0.5
+    assert compute_span_recoverability_hard("CÔNG Nghệ", "công nghệ") == 1.0
+
+
+def test_hard_recoverability_empty_compressed_is_none():
+    # No scorable tokens -> None (never a misleading 0.0 that dilutes the mean).
+    assert compute_span_recoverability_hard("abc def", "") is None
 
 
 # ============================================================================

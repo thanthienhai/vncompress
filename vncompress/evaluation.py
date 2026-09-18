@@ -24,6 +24,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
 from enum import Enum
+from statistics import NormalDist
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -74,6 +75,14 @@ class CompressionMetrics:
     # mean of samples that were never actually scored.
     evidence_recall: Optional[float] = None
     source_span_recoverability: Optional[float] = None
+    # Deterministic (no-NLI) counterpart to source_span_recoverability: the
+    # fraction of compressed tokens that occur verbatim in the ORIGINAL context
+    # (== 1 - LLMLingua-2's Variation Rate, arXiv:2403.12968 Eq. VR). For a
+    # truly extractive compressor this is ~1.0; abstractive / translate-then-
+    # compress arms score below 1.0 because they introduce tokens absent from
+    # the source. Reported as the "extractive doesn't launder attribution"
+    # control (cf. the emitted-grounded gap, arXiv:2609.14245 sec 3.2).
+    span_recoverability_hard: Optional[float] = None
     unsupported_claim_rate: Optional[float] = None
 
     prefill_time_ms: Optional[float] = None
@@ -232,20 +241,22 @@ def compute_token_f1(predictions: List[str], references: List[str]) -> float:
 # Evidence / attribution metrics (docs/lacc_coling2027_tasklist.md G0)
 # ============================================================================
 #
-# VCC-Bench v2 has no gold answer-span field (see dataset_v2_review), so
-# "the sentence that contains the answer" is approximated: the context
-# sentence with the highest token-recall against reference_answer. That
-# approximation is good enough to ask "did compression keep the answer-bearing
-# sentence", not to certify per-sample evidence spans -- treat these three
-# metrics as diagnostics, not ground truth.
+# The gold evidence sentence is "the sentence that contains the answer". In
+# VCC-Bench v2 the reference_answer is a verbatim substring of the context for
+# 100% of QA rows (the source qa.jsonl stores exact [start,end] char offsets;
+# measured 6000/6000), so the FIRST choice is exact: the sentence that contains
+# reference_answer as a normalized substring -- that is ground truth, not an
+# approximation. Only when no sentence contains it verbatim (e.g. an answer
+# stitched across a sentence boundary) do we fall back to the highest
+# token-recall sentence, which stays a diagnostic. See docs/agent_research_findings.md.
 
 
 def find_evidence_sentence(tokenizer, input_ids: Sequence[int], reference_answer: str) -> str:
-    """Best-effort answer-bearing sentence from the ORIGINAL (uncompressed)
-    context: the sentence spans (compression.sentence_spans -- the same
-    boundaries E5/lacc_sentence selects over) with highest token overlap
-    against reference_answer. Returns '' if reference_answer has no content
-    tokens or no sentence overlaps it at all.
+    """Answer-bearing sentence from the ORIGINAL (uncompressed) context, over the
+    same sentence spans (compression.sentence_spans) that E5/lacc_sentence select
+    over. Prefers the sentence containing reference_answer verbatim (exact gold);
+    otherwise the sentence with highest token overlap. Returns '' if
+    reference_answer has no content tokens or no sentence overlaps it at all.
     """
     from .compression import sentence_spans
 
@@ -253,16 +264,21 @@ def find_evidence_sentence(tokenizer, input_ids: Sequence[int], reference_answer
     if not ans_tokens:
         return ''
     spans = sentence_spans(tokenizer, list(input_ids))
-    best_span, best_overlap = None, 0
-    for start, end in spans:
-        sent_text = tokenizer.decode(input_ids[start:end], skip_special_tokens=True)
+    decoded = [tokenizer.decode(input_ids[start:end], skip_special_tokens=True)
+               for start, end in spans]
+    # Exact gold: shortest sentence that contains the answer verbatim (NFC +
+    # lowercase + whitespace-collapsed), which pins the evidence to one span
+    # rather than the longest sentence that happens to include it.
+    ans_norm = ' '.join(_normalize_answer(reference_answer))
+    verbatim = [s for s in decoded if ans_norm and ans_norm in ' '.join(_normalize_answer(s))]
+    if verbatim:
+        return min(verbatim, key=len)
+    best_sent, best_overlap = '', 0
+    for sent_text in decoded:
         overlap = len(set(_normalize_answer(sent_text)) & ans_tokens)
         if overlap > best_overlap:
-            best_overlap, best_span = overlap, (start, end)
-    if best_span is None:
-        return ''
-    start, end = best_span
-    return tokenizer.decode(input_ids[start:end], skip_special_tokens=True)
+            best_overlap, best_sent = overlap, sent_text
+    return best_sent
 
 
 def compute_evidence_recall(evidence_sentence: str, compressed_text: str) -> Optional[float]:
@@ -355,6 +371,30 @@ def compute_source_span_recoverability(nli, compressed_text: str, evidence_sente
     answer-bearing span be recovered/inferred from what compression kept.
     None without an NLI scorer or an identified evidence sentence."""
     return _nli_entailment_prob(nli, premise=compressed_text, hypothesis=evidence_sentence)
+
+
+def compute_span_recoverability_hard(original_text: str, compressed_text: str) -> Optional[float]:
+    """Deterministic, NLI-free span recoverability: the fraction of compressed
+    tokens that occur (as a multiset) in the ORIGINAL context after Unicode-NFC
+    + lowercase + whitespace normalization.
+
+    This is the complement of LLMLingua-2's Variation Rate
+    (VR = fraction of compressed words absent from the source; arXiv:2403.12968,
+    sec. data filtering), so span_recoverability_hard = 1 - VR. A genuinely
+    extractive compressor keeps verbatim spans and scores ~1.0; abstractive or
+    translate-then-compress arms introduce tokens absent from the source and
+    score below 1.0. Reported as a control that our extractive compressor does
+    not launder attribution (contrast the emitted-grounded gap of
+    arXiv:2609.14245, sec. 3.2), and unlike source_span_recoverability it needs
+    no NLI model, so it carries none of that evaluator's circularity risk.
+
+    None when the compressed text has no scorable tokens."""
+    comp_counts = Counter(_normalize_answer(compressed_text))
+    if not comp_counts:
+        return None
+    orig_counts = Counter(_normalize_answer(original_text))
+    present = comp_counts & orig_counts  # multiset intersection
+    return sum(present.values()) / sum(comp_counts.values())
 
 
 _CLAIM_SPLIT_RE = re.compile(r'(?<=[.!?\n])\s+')
@@ -651,10 +691,16 @@ class VCCBench:
             # source_span_recoverability/unsupported_claim_rate need `nli`
             # (config.nli_model); stay None on every sample when it's unset.
             compressed_text = tokenizer.decode(result.compressed_ids, skip_special_tokens=True)
+            original_text = tokenizer.decode(input_ids, skip_special_tokens=True)
             evidence_sentence = find_evidence_sentence(tokenizer, input_ids, sample.reference_answer)
             metric.evidence_recall = compute_evidence_recall(evidence_sentence, compressed_text)
             metric.source_span_recoverability = compute_source_span_recoverability(
                 nli, compressed_text, evidence_sentence,
+            )
+            # Deterministic control (no NLI): does compression keep verbatim
+            # source spans, or introduce new tokens (abstractive laundering)?
+            metric.span_recoverability_hard = compute_span_recoverability_hard(
+                original_text, compressed_text,
             )
 
             # Dual-tokenizer achieved-rate (G2): the generation tokenizer's
@@ -665,7 +711,6 @@ class VCCBench:
             # tokenizer a reader is actually getting.
             phobert_orig_n = phobert_comp_n = phobert_achieved = None
             if phobert_tok is not None:
-                original_text = tokenizer.decode(input_ids, skip_special_tokens=True)
                 phobert_orig_n = len(phobert_tok.encode(original_text, add_special_tokens=False))
                 phobert_comp_n = len(phobert_tok.encode(compressed_text, add_special_tokens=False))
                 phobert_achieved = (phobert_orig_n / phobert_comp_n) if phobert_comp_n else None
@@ -897,6 +942,7 @@ class VCCBench:
             'mean_efficiency_score': np.mean([m.efficiency_score for m in metrics_list]),
             'mean_evidence_recall': _mean_or_none([m.evidence_recall for m in metrics_list]),
             'mean_source_span_recoverability': _mean_or_none([m.source_span_recoverability for m in metrics_list]),
+            'mean_span_recoverability_hard': _mean_or_none([m.span_recoverability_hard for m in metrics_list]),
             'mean_unsupported_claim_rate': _mean_or_none([m.unsupported_claim_rate for m in metrics_list]),
             'mean_phobert_achieved_ratio': _mean_or_none(
                 [m.metadata.get('phobert_achieved_ratio') for m in metrics_list]
@@ -1055,6 +1101,137 @@ def paired_bootstrap_delta(
         n=n, mean_a=float(av.mean()), mean_b=float(bv.mean()), mean_delta=float(diff.mean()),
         ci_low=float(ci_low), ci_high=float(ci_high), p_value=p_value,
         win_rate=float((diff >= 0).mean()), significant=bool(ci_low > 0 or ci_high < 0),
+    )
+
+
+@dataclass
+class EquivalenceResult:
+    """Result of a two-one-sided-tests (TOST) equivalence check on the paired
+    mean difference mean(a - b), against a pre-registered SESOI margin."""
+
+    n: int
+    mean_delta: float
+    sesoi: float
+    # 100*(1 - 2*alpha)% CI -- the interval TOST checks against +/-sesoi.
+    ci_low: float
+    ci_high: float
+    p_tost: float           # max of the two one-sided bootstrap p-values
+    equivalent: bool        # CI within [-sesoi, +sesoi] at this alpha
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+def tost_equivalence(
+    a: Sequence[float], b: Sequence[float], sesoi: float,
+    alpha: float = 0.05, n_boot: int = 10000, seed: int = 42,
+) -> Optional[EquivalenceResult]:
+    """Two One-Sided Tests (TOST) equivalence check on the paired mean
+    difference mean(a - b), bootstrapped exactly like paired_bootstrap_delta.
+
+    A non-significant paired test (p > 0.05) only fails to find a difference; it
+    does NOT establish equivalence -- the trap every negative result must avoid
+    (Lakens 2017, "Equivalence Tests: A Practical Primer"). TOST instead asks
+    whether the effect is smaller than a pre-registered smallest effect size of
+    interest (`sesoi`, e.g. 1 EM/F1 point on VCC-Bench): equivalence holds when
+    the 100*(1-2*alpha)% CI of the difference lies entirely within
+    [-sesoi, +sesoi]. That licenses the claim "tone-augmented is equivalent to
+    language-agnostic selection within +/-SESOI", not merely "no significant
+    difference". See docs/agent_research_findings_round2.md.
+
+    sesoi must be > 0. Returns None if fewer than 2 usable (non-None) pairs
+    remain, matching paired_bootstrap_delta.
+    """
+    if sesoi <= 0:
+        raise ValueError(f"sesoi must be positive, got {sesoi}")
+    pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+    if len(pairs) < 2:
+        return None
+    diff = np.array([x - y for x, y in pairs], dtype=float)
+    n = len(diff)
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_means = diff[idx].mean(axis=1)
+
+    # TOST at alpha == the (1 - 2*alpha) CI lying within the bounds.
+    lo_q = alpha
+    ci_low, ci_high = np.quantile(boot_means, [lo_q, 1 - lo_q])
+    # Two one-sided bootstrap p-values: H0_upper: delta >= +sesoi (reject if
+    # few resamples reach it); H0_lower: delta <= -sesoi. Equivalence needs both
+    # rejected, so the TOST p is the larger (weaker) of the two.
+    p_upper = float((boot_means >= sesoi).mean())
+    p_lower = float((boot_means <= -sesoi).mean())
+    p_tost = max(p_upper, p_lower)
+
+    return EquivalenceResult(
+        n=n, mean_delta=float(diff.mean()), sesoi=float(sesoi),
+        ci_low=float(ci_low), ci_high=float(ci_high),
+        p_tost=p_tost, equivalent=bool(ci_low > -sesoi and ci_high < sesoi),
+    )
+
+
+@dataclass
+class PowerResult:
+    """Statistical power of a paired comparison to detect an effect of size
+    `sesoi`, plus the minimum detectable effect at a target power. Normal
+    approximation to the paired-mean test (Card et al. 2020)."""
+
+    n: int
+    sd_diff: float
+    se: float               # standard error of the paired mean difference
+    sesoi: float
+    alpha: float
+    power: float            # P(detect a true effect of size sesoi), two-sided
+    target_power: float
+    mde: float              # smallest effect detectable at target_power
+    underpowered: bool      # power < target_power to see the SESOI
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+def paired_power_analysis(
+    a: Sequence[float], b: Sequence[float], sesoi: float,
+    alpha: float = 0.05, target_power: float = 0.80,
+) -> Optional[PowerResult]:
+    """Power and minimum-detectable-effect for the paired difference a - b,
+    using the observed per-sample variance (normal approximation to the paired
+    t-test; Card et al. 2020, "With Little Power Comes Great Responsibility").
+
+    A negative result must show the test COULD have detected an effect of the
+    smallest size worth caring about (`sesoi`) had one existed; otherwise "no
+    difference" may just be too few samples. `power` is that probability at the
+    current n; `mde` is the smallest true effect this n could detect at
+    `target_power` -- report it so an underpowered subset (e.g. E8's n=18) is
+    called out rather than over-claimed as equivalence.
+
+    sesoi must be > 0. Returns None if fewer than 2 usable (non-None) pairs
+    remain or the differences have zero variance (power is then undefined here).
+    """
+    if sesoi <= 0:
+        raise ValueError(f"sesoi must be positive, got {sesoi}")
+    pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+    if len(pairs) < 2:
+        return None
+    diff = np.array([x - y for x, y in pairs], dtype=float)
+    n = len(diff)
+    sd = float(diff.std(ddof=1))
+    if sd == 0.0:
+        return None
+    se = sd / np.sqrt(n)
+
+    nd = NormalDist()
+    z_alpha = nd.inv_cdf(1 - alpha / 2)
+    ncp = sesoi / se  # non-centrality: how many SEs the SESOI is
+    power = nd.cdf(ncp - z_alpha) + nd.cdf(-ncp - z_alpha)
+    z_power = nd.inv_cdf(target_power)
+    mde = (z_alpha + z_power) * se
+
+    return PowerResult(
+        n=n, sd_diff=sd, se=float(se), sesoi=float(sesoi), alpha=float(alpha),
+        power=float(power), target_power=float(target_power), mde=float(mde),
+        underpowered=bool(power < target_power),
     )
 
 
