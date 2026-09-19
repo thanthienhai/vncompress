@@ -644,9 +644,12 @@ Bảng~\ref{tab:baselines} liệt kê toàn bộ các arm được sweep trên V
     \item \textbf{Evidence recall:} Câu chứa đáp án (xấp xỉ bằng token-overlap cao nhất với đáp án tham chiếu) có sống sót sau nén không.
     \item \textbf{Source-span recoverability:} $P(\text{ngữ cảnh đã nén} \Rightarrow \text{câu chứa đáp án gốc})$, chấm bằng mô hình NLI đa ngôn ngữ.
     \item \textbf{Unsupported-claim rate:} Tỉ lệ câu trong câu trả lời sinh ra không được ngữ cảnh đã nén chứng thực (NLI), một chỉ báo hallucination/attribution.
+    \item \textbf{Span-recoverability (hard):} Tỉ lệ token trong ngữ cảnh đã nén xuất hiện \textit{nguyên văn} trong ngữ cảnh gốc ($=1-$ \textit{Variation Rate} của LLMLingua-2~\cite{pan2024llmlingua2}). Đây là chỉ báo \textbf{tất định, không cần NLI}: nén trích nguyên văn đạt $\approx 1.0$, còn dịch-rồi-nén/viết-lại tụt xuống dưới. Nó làm \textit{neo} độc lập để phát hiện khi điểm NLI (source-span recoverability) chứng thực một câu mà kiểm tra chuỗi bác bỏ -- một biện pháp chống \textit{circularity} của việc dùng cùng một mô hình NLI vừa để lọc vừa để chấm.
     \item \textbf{E4 (probe liên-quan):} PR-AUC và recall@budget (2$\times$/4$\times$/8$\times$) thay cho F1 ở ngưỡng cố định (\S\ref{sec:results}).
     \item \textbf{Harmonized Score:} $2 \times Q \times E \;/\; (Q + E)$ với $Q$ = chất lượng, $E$ = hiệu quả.
 \end{itemize}
+
+\paragraph{Xử lý thống kê cho kết quả âm.} Vì đóng góp trung tâm là một \textit{kết quả âm}, chúng tôi không dừng ở ``khác biệt không có ý nghĩa'' ($p>0.05$), vốn không chứng minh được sự tương đương. Với mỗi so sánh chính (arm bật thanh điệu so với arm language-agnostic tương ứng), chúng tôi báo cáo: (i) khoảng tin cậy bootstrap ghép cặp cho hiệu số; (ii) \textbf{kiểm định tương đương TOST}~\cite{lakens2017equivalence} với một SESOI (ngưỡng hiệu ứng nhỏ nhất đáng quan tâm) \textbf{đăng ký trước} là 1 điểm EM/F1, để có thể phát biểu ``tương đương trong $\pm 1$ điểm EM'' thay vì chỉ ``không thấy khác biệt''; và (iii) \textbf{phân tích power}~\cite{card2020power}. Ở những tập con nhỏ (ví dụ tác vụ xuyên ngôn ngữ, $n{=}18$) chưa đủ power để khẳng định tương đương, chúng tôi nói rõ điều đó và hạ cấp phát biểu thành ``chưa đủ bằng chứng, cần $n$ lớn hơn'' thay vì diễn giải quá mức.
 
 
 % ============================================================================
@@ -810,6 +813,8 @@ Câu hỏi mà benchmark này trả lời là một câu hỏi khác và hẹp h
     \item \textbf{Đơn vị chọn lọc là token, không phải câu.} Giữ được các token mang thanh điệu rải rác trong một câu không đồng nghĩa với giữ nguyên câu đó -- câu vẫn có thể bị phá vỡ nếu các token lân cận (ít thanh điệu hơn) bị loại. E5 (\S\ref{sec:sentence_level}) kiểm tra trực tiếp giả thuyết này bằng chọn lọc mức câu.
     \item \textbf{Kết hợp cộng làm loãng tín hiệu mạnh hơn.} Khi tín hiệu perplexity (vốn tương quan tốt hơn với thông tin cần cho QA) bị cộng trung bình với tín hiệu thanh điệu, thứ hạng token bị kéo lệch khỏi thứ hạng theo perplexity thuần. E2 (\eqref{eq:combined_mult}) kiểm tra việc kết hợp nhân có giữ được ưu thế của tín hiệu mạnh hơn không.
 \end{enumerate}
+
+\textbf{Loại trừ giải thích ``method quá yếu''.} Một kết quả âm chỉ đáng tin khi loại được khả năng pipeline \textit{không bắt được tín hiệu nào} chứ không riêng thanh điệu. Chúng tôi dùng chính arm language-agnostic điều kiện hóa theo câu hỏi (E1, \texttt{lacc\_ppl\_contrastive}, \S\ref{sec:query_conditioning}) làm \textbf{đối chứng dương} (\textit{positive control}): đây là một tín hiệu được kỳ vọng có ích cho QA, chạy qua \textit{cùng} pipeline chấm điểm và \textit{cùng} bộ dữ liệu. Nếu đối chứng dương cải thiện chất lượng QA có ý nghĩa (\S\ref{sec:results}) trong khi thanh điệu thì không, thất bại của thanh điệu là về \textit{tín hiệu}, không phải về \textit{phương pháp} -- đây là điều một probe tương quan đơn lẻ (E4) không tự chứng minh được. Ngoài ra, vì mô hình đọc (\textit{reader}) và encoder PhoBERT vốn đã nhận đầu vào \textit{có dấu}, phép đo của chúng tôi là \textbf{giá trị biên} (\textit{marginal}) của việc \textit{ưu tiên giữ} token mang thanh điệu khi chọn lọc, chứ không phải giá trị của bản thân dấu thanh trong biểu diễn; chúng tôi phát biểu phạm vi hẹp này tường minh để không nhầm ``thanh điệu bị xóa'' với ``thanh điệu không được ưu tiên khi chọn lọc''.
 
 \textbf{Điều phát hiện này KHÔNG nói:} nó không phủ nhận thanh điệu là một đặc trưng ngữ âm-hình thái quan trọng của tiếng Việt, không nói rằng bảo toàn thanh điệu là vô giá trị cho mọi tác vụ (ví dụ dịch máy, phiên âm, trích dẫn nguyên văn -- các tác vụ ``bề mặt'' mà E8/\texttt{lacc\_tone\_gated} vẫn bật tín hiệu này), và không nói rằng không có tín hiệu ngôn ngữ học nào giúp ích cho nén tiếng Việt (hình thái từ, qua phân bổ ngân sách theo lớp E7, là một trục riêng chưa bị bác bỏ bởi phát hiện này). Nó chỉ nói: \textit{đối với QA, thanh điệu như một tín hiệu chấm điểm độc lập-với-câu-hỏi không tương quan với vị trí đáp án} -- một phát biểu hẹp, có kiểm soát, không nên được khái quát hoá thành ``thanh điệu không quan trọng cho tiếng Việt''.
 
@@ -1075,6 +1080,16 @@ N. Quac et al.
 H. T. N. Huynh, L. Nguyen, N. H. Nguyen, H. P. T. Nguyen, and T. T. Quan.
 \newblock ``A Two-Stage Vietnamese Spelling Correction Pipeline Combining Underthesea and BARTpho.''
 \newblock \emph{VNU Journal of Science: Comp. Science \& Com. Eng.}, 2026.
+
+\bibitem{lakens2017equivalence}
+D. Lakens.
+\newblock ``Equivalence Tests: A Practical Primer for t Tests, Correlations, and Meta-Analyses.''
+\newblock \emph{Social Psychological and Personality Science}, 8(4):355--362, 2017.
+
+\bibitem{card2020power}
+D. Card, P. Henderson, U. Khandelwal, R. Jia, K. Mahowald, and D. Jurafsky.
+\newblock ``With Little Power Comes Great Responsibility.''
+\newblock In \emph{Proceedings of EMNLP}, 2020.
 
 \end{thebibliography}
 
